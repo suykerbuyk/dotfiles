@@ -1,0 +1,4 @@
+#!/bin/sh
+$HOME/bin/bkup.documents $@
+$HOME/bin/bkup.pictures $@
+$HOME/bin/bkup.thunderbird $@

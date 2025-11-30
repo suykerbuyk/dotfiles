@@ -1,0 +1,25 @@
+#!/bin/sh
+USER=admin
+PASS=admin
+EXTRA="-N 5 -R10 -C 17"
+if [ "x$1" != "x" ] ; then
+	printf $1 | grep lr && PASS="clandestine"
+	printf $1 | grep ldr01a && USER=ADMIN && PASS="KYUFORHXHG" && EXTRA="-N 5 -R10 -C 8"
+	printf $1 | grep ldr01b && USER=ADMIN && PASS="LTWDSHQGLC" && EXTRA="-N 5 -R10 -C 8"
+	printf $1 | grep dac-ipmi && EXTRA="-o supermicro"
+	printf $1 | grep sm2401-ipmi && EXTRA="-o supermicro" && USER="ADMIN" && PASS="ADMIN"
+	printf $1 | grep 'sc01' && EXTRA="-N 5 -R10 -C3"
+	printf $1 | grep 'bv' && PASS="superuser"
+	printf $1 | grep '172.16.' && PASS="clandestine"
+	printf $1 | grep '172.19.' && PASS="clandestine"
+	printf $1 | grep 'miner' && PASS="clandestine"
+	printf $1 | grep 'cadmin' && PASS="clandestine"
+	printf $1 | grep 'mgmt-ipmi' && PASS="clandestine" && CYPHER=1
+	printf $1 | grep dgx1-ipmi && USER="qct.admin" && PASS="clandestine"
+	echo "CTRL-G is the escape character!!"
+	echo ipmitool ${EXTRA} -H $1 -U $USER -P $PASS -I lanplus sol -e ^G activate
+	ipmitool ${EXTRA} -H $1 -U $USER -P $PASS -I lanplus sol -e  activate || \
+	ipmitool ${EXTRA} -H $1 -U $USER -P $PASS -I lanplus sol deactivate
+else
+	echo Please supply the host name as the one and only parameter.
+fi

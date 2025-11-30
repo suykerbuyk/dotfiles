@@ -1,0 +1,4 @@
+#!/bin/sh
+#rsync -avzr ~/.thunderbird/ sc01.syketech.arpa:/usr/home/johns/.thunderbird/ --delete-after
+#rsync -avzr ~/.thunderbird/ sc01:/ark01/bkup/thunderbird/ --delete-after
+rsync -avzr ~/.thunderbird/ vault01:/ark01/bkup/thunderbird/ --delete-after $@

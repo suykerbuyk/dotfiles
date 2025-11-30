@@ -1,0 +1,4 @@
+#!/bin/sh
+#rsync -avr ~/Pictures/ sc01.syketech.arpa:/usr/home/johns/Pictures/ $*
+#rsync -avr ~/Pictures/ sc01:/ark01/srv/media/pictures/ $*
+rsync -avr ~/Pictures/ vault01:/ark01/srv/media/pictures/ $@

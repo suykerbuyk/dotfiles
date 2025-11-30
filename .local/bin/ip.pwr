@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+#curl http://ip-pwr-01/set.cmd\?user=admin+pass\=12345678\?cmd\=setpower+p61\=1+p62\=1+p63\=1+p64\=1
+
+if [ "$#" -eq 0 ]; then
+	echo "IP Power 9258 utility script"
+	echo " status  : (default) show state of outlets."
+	echo " on      : turn all outlets on."
+	echo " off     : turn all outlets off."
+	echo " cycle   : power cycle all outlets off then on."
+	echo " ENV VARS: IP_PWR_USER, IP_PWR_PASS,"
+	echo "           IP_PWR_ADDR, IP_PWR_CYCLE_TIME"
+	echo ""
+	echo "Status:"
+fi
+
+IP_PWR_OPER_DEF="status"
+: "${IP_PWR_USER:=admin}"
+: "${IP_PWR_PASS:=12345678}"
+: "${IP_PWR_ADDR:=ip-pwr-01}"
+: "${IP_PWR_CYCLE_TIME:=5}"
+IP_PWR_OPER="${1:-$IP_PWR_OPER_DEF}"
+
+IP_PWR_BASE_CMD=http://${IP_PWR_ADDR}/set.cmd\?user=${IP_PWR_USER}+pass\=${IP_PWR_PASS}
+IP_PWR_SUBCMD_STATUS=\?cmd=getpower
+IP_PWR_SUBCMD_ALL_ON=\?cmd\=setpower+p61\=1+p62\=1+p63\=1+p64\=1
+IP_PWR_SUBCMD_ALLOFF=\?cmd\=setpower+p61\=0+p62\=0+p63\=0+p64\=0
+IP_PWR_SUBCMD_CYCLE=\?cmd\=\setpower\
++p61\=0+p61n\=1+t61\=${IP_PWR_CYCLE_TIME}\
++p62\=0+p62n\=1+t62\=${IP_PWR_CYCLE_TIME}\
++p63\=0+p63n\=1+t63\=${IP_PWR_CYCLE_TIME}\
++p64\=0+p64n\=1+t64\=${IP_PWR_CYCLE_TIME}
+
+case "${IP_PWR_OPER}" in
+	status) CMD="${IP_PWR_BASE_CMD}${IP_PWR_SUBCMD_STATUS}"
+		;;
+	on) CMD="${IP_PWR_BASE_CMD}${IP_PWR_SUBCMD_ALL_ON}"
+		;;
+	off) CMD="${IP_PWR_BASE_CMD}${IP_PWR_SUBCMD_ALLOFF}"
+		;;
+	cycle) CMD="${IP_PWR_BASE_CMD}${IP_PWR_SUBCMD_CYCLE}"
+		;;
+esac
+#curl -v "${CMD}"
+curl -s "${CMD}" | sed 's/<[^>]*>//g' | sed 's/p6/ Line/g' | sed 's/=1/=on/g' | sed 's/=0/=off/g'

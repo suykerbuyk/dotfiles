@@ -1,0 +1,11 @@
+|**Tool name** |**URL**|
+|-----------|------------------------------|
+|ripgrep | https://github.com/BurntSushi/ripgrep/releases/tag/15.1.0 |
+|nvim    | github.com/neovim/neovim/releases|
+|nvm (node version manager) | curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh \| bash|
+|golang | https://go.dev/dl/ |
+|rustup | curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh |
+|broot | wget 'https://dystroy.org/broot/download/x86_64-linux/broot' | 
+
+
+
