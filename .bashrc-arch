@@ -1,0 +1,29 @@
+#
+# ~/.bashrc
+#
+
+# If not running interactively, don't do anything
+[[ $- != *i* ]] && return
+
+alias ls='ls --color=auto'
+alias grep='grep --color=auto'
+PS1='[\u@\h \W]\$ '
+
+#Local additions
+set -o vi
+export EDITOR=$(which vim)
+export VISUAL=$(which gvim)
+export XZ_OPT="-9 -T0"
+export GOPATH=$HOME/code/go
+export PATH=$HOME/bin:/usr/local/bin:$GOPATH/bin:$PATH
+
+eval $(starship init bash)
+eval $(keychain --eval --quiet id_ed25519)
+
+if [[ -x "$(which fzf)" ]]; then
+    eval "$(fzf --bash)"
+    if [[ -x $(which tmux) ]]; then
+        export FZF_DEFAULT_OPTS='--tmux center'
+    fi
+fi
+. "$HOME/.cargo/env"

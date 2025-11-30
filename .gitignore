@@ -1,0 +1,4 @@
+.ssh/hosts/
+.ssh/sockets/
+.vimbackup/*
+.local/bin/*

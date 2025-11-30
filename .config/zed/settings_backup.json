@@ -1,0 +1,50 @@
+// Zed settings
+//
+// For information on how to configure Zed, see the Zed
+// documentation: https://zed.dev/docs/configuring-zed
+//
+// To see all of Zed's default settings without changing your
+// custom settings, run `zed: open default settings` from the
+// command palette (cmd-shift-p / ctrl-shift-p)
+{
+  "vim_mode": true,
+  "ui_font_size": 16,
+  "buffer_font_size": 16,
+  "theme": {
+    "mode": "system",
+    "light": "Ayu Dark",
+    "dark": "One Dark"
+  }
+  {
+  "language_models": {
+    "xai": {
+      "version": "1.0",
+      "api_url": "https://api.x.ai/v1",  // Default, but customizable if needed
+      "available_models": [
+        {
+          "name": "Grok 4",
+          "model": "grok-4"
+        },
+        {
+          "name": "Grok Code Fast 1",
+          "model": "grok-code-fast-1",
+          "max_tokens": 8192,  // Adjust based on needs; supports up to 128k context
+          "temperature": 0.7   // Lower for precise code, higher for creative suggestions
+        }
+      ]
+    }
+  },
+  "assistant": {
+    "version": 2,
+    "provider": "xai",  // Set xAI as default provider
+    "default_model": "grok-code-fast-1",  // Prioritize the coding-optimized model
+    "inline_assistant": {
+      "enabled": true,  // For as-you-type completions
+      "model": "grok-code-fast-1"
+    },
+    "thread": {
+      "model": "grok-code-fast-1"  // For agent threads/multi-step tasks
+    }
+  }
+}
+}
