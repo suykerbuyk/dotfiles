@@ -8,6 +8,9 @@ BIN_DIR="$HOME/.local/bin"
 BIN_NAME="jq"
 TEMP_DIR="$(mktemp -d)"
 
+[ ! -d "${APP_DIR}" ] && mkdir -p "${APP_DIR}"
+[ ! -d "${BIN_DIR}" ] && mkdir -p "${BIN_DIR}"
+
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m | sed 's/x86_64/amd64/ ; s/aarch64/arm64/')" # Normalize arch for jq naming
 
