@@ -3,6 +3,12 @@ server="vault01.syketech.arpa"
 base_dir="/" # Optional: Prefix local mounts (e.g., /mnt/nfs/ark01/foo); set to "" for direct /ark01/foo
 fs_dir="ark01"
 
+command -v showmount 2>&1 >/dev/null || {
+    echo "NFS Utils not found, please install:"
+    echo "  debian: apt install nfs-common"
+    echo "  others: <install> nfs-util"
+    exit 1
+}
 mkdir -p "${base_dir}${fs_dir}"
 
 for X in $(showmount -e "$server" 2>/dev/null | grep ${fs_dir} | awk '{print $1}' | sort); do
