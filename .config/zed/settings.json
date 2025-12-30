@@ -10,15 +10,33 @@
   "ssh_connections": [
     {
       "host": "um790",
+      "args": [],
       "projects": [
         {
-          "paths": ["/home/johns/code/proteus"]
+          "paths": [
+            "/home/johns/code/proteus"
+          ]
         },
         {
-          "paths": ["/home/johns/code/proteus/proteus-rs"]
+          "paths": [
+            "/home/johns/code/proteus/proteus-rs"
+          ]
         },
         {
-          "paths": ["/home/johns/code/proteus/rust_can_util"]
+          "paths": [
+            "/home/johns/code/proteus/rust_can_util"
+          ]
+        }
+      ]
+    },
+    {
+      "host": "um791",
+      "args": [],
+      "projects": [
+        {
+          "paths": [
+            "/home/johns/code/proteus/proteus-rs"
+          ]
         }
       ]
     }
