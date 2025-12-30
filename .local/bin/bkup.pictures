@@ -1,4 +1,9 @@
-#!/bin/sh
-#rsync -avr ~/Pictures/ sc01.syketech.arpa:/usr/home/johns/Pictures/ $*
-#rsync -avr ~/Pictures/ sc01:/ark01/srv/media/pictures/ $*
+#!/bin/bash
+echo "Backing Pictures up to the the vault"
 rsync -avr ~/Pictures/ vault01:/ark01/srv/media/pictures/ $@
+ping -c 1 -W 1 -w 1 -q s76 2>&1 >/dev/null || exit 0
+echo "Backing up Pictures to S76"
+rsync -avzr ~/Pictures/ s76:Pictures/ --delete-after $@
+ping -c 1 -W 1 -w 1 -q um791 2>&1 >/dev/null || exit 0
+echo "Backing up Pictures to um791"
+rsync -avzr ~/Pictures/ um791:Pictures/ --delete-after $@

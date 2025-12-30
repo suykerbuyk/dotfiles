@@ -1,4 +1,9 @@
 #!/bin/bash
-#rsync -avr ~/Documents/ sc01:/usr/home/johns/Documents/ $*
-#rsync -avrz ~/Documents/ sc01:/ark01/bkup/documents $*
+echo "Backing Documents up to the the vault"
 rsync -avrz ~/Documents/ vault01:/ark01/bkup/documents $@
+ping -c 1 -W 1 -w 1 -q s76 2>&1 >/dev/null || exit 0
+echo "Backing up Documents to S76"
+rsync -avzr ~/Documents/ s76:Documents/ --delete-after $@
+ping -c 1 -W 1 -w 1 -q um791 2>&1 >/dev/null || exit 0
+echo "Backing up Documents to um791"
+rsync -avzr ~/Documents/ um791:Documents/ --delete-after $@

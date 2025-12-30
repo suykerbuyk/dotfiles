@@ -1,4 +1,9 @@
-#!/bin/sh
-#rsync -avzr ~/.thunderbird/ sc01.syketech.arpa:/usr/home/johns/.thunderbird/ --delete-after
-#rsync -avzr ~/.thunderbird/ sc01:/ark01/bkup/thunderbird/ --delete-after
+#!/bin/bash
+echo "Backing up thunderbird to the the vault"
 rsync -avzr ~/.thunderbird/ vault01:/ark01/bkup/thunderbird/ --delete-after $@
+ping -c 1 -W 1 -w 1 -q s76 2>&1 >/dev/null || exit 0
+echo "Backing up Documents to S76"
+rsync -avzr ~/.thunderbird/ s76:.thunderbird/ --delete-after $@
+ping -c 1 -W 1 -w 1 -q um791 2>&1 >/dev/null || exit 0
+echo "Backing up to um791"
+rsync -avzr ~/.thunderbird/ um791:.thunderbird/ --delete-after $@
