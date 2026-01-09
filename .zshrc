@@ -20,8 +20,8 @@ export VISUAL="${VIM}"
 export SUDO_EDITOR="$EDITOR"
 unset VIM
 export GOPATH=$HOME/code/go
-
-[ ! -d ${GOPATH} ] && mkdir -p ${GOPATH}
+[ ! -d ${GOPATH} ] && mkdir -p "${GOPATH}/bin"
+export PATH="${GOPATH}/bin:$PATH"
 
 [ -f "$HOME/.keys" ] && source $HOME/.keys \
 	|| echo - " no local .keys file found."
