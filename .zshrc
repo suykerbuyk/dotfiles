@@ -25,9 +25,8 @@ export GOPATH=$HOME/code/go
 
 [ -f "$HOME/.keys" ] && source $HOME/.keys \
 	|| echo - " no local .keys file found."
-[ -d "${HOME}/bin" ] && export PATH="${HOME}/bin/:$PATH"
 [ -d "${HOME}/.local/bin" ] && export PATH="${HOME}/.local/bin:$PATH"
-[ -f "${HOME}/go/bin/go" ] && export PATH="${HOME}/go/bin:$PATH" \
+[ -f "${HOME}/.local/bin/go" ] \
 	|| echo " - go does not appear to be locally installed." 
 [ -f "${HOME}/.cargo/bin/cargo" ] && source "$HOME/.cargo/env" \
 	|| echo " - rust does not appear to be locally installed."
@@ -49,4 +48,3 @@ else
 	echo "nvm node version manager is not installed."
 	echo "https://github.com/nvm-sh/nvm?tab=readme-ov-file#install--update-script"
 fi
-

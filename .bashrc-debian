@@ -115,13 +115,15 @@ if ! shopt -oq posix; then
     fi
 fi
 
-[ -d "${HOME}/bin" ] && export PATH="${HOME}/bin/:$PATH"
 [ -d "${HOME}/.local/bin" ] && export PATH="${HOME}/.local/bin:$PATH"
-[ -f "${HOME}/.cargo/bin/cargo" ] && export PATH="${HOME}/.cargo/bin:$PATH"
-[ -f "${HOME}/.local/go/bin/go" ] && export PATH="${HOME}/.local/go/bin:$PATH"
-[ -f "${HOME}/go/bin/go" ] && export PATH="${HOME}/go/bin:$PATH"
-[ -f "${HOME}/.keys" ] && source "${HOME}/.keys"
-[ -f "${HOME}/.config/broot/launcher/bash/br" ] && source "${HOME}/.config/broot/launcher/bash/br"
+[ -f "${HOME}/.cargo/bin/cargo" ] \
+	&& export PATH="${HOME}/.cargo/bin:$PATH" \
+	|| echo "Rust does not appear to be locally installed"
+[ -f "${HOME}/.keys" ] && source "${HOME}/.keys" \
+	"No .keys file found in $HOME"
+[ -f "${HOME}/.config/broot/launcher/bash/br" ] \
+	&& source "${HOME}/.config/broot/launcher/bash/br" \
+	|| echo "broot does not appear to be installed locally"
 
 VIM="$(which nvim 2>/dev/null || which vim 2>/dev/null || which vi 2>/dev/null)"
 export EDITOR=${VIM}
