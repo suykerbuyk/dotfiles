@@ -120,9 +120,8 @@ fi
 	&& export PATH="${HOME}/.cargo/bin:$PATH" \
 	|| echo "Rust does not appear to be locally installed"
 [ -f "${HOME}/.keys" ] && source "${HOME}/.keys" \
-	"No .keys file found in $HOME"
-[ -f "${HOME}/.config/broot/launcher/bash/br" ] \
-	&& source "${HOME}/.config/broot/launcher/bash/br" \
+	|| "No .keys file found in $HOME"
+[ -f "${HOME}/.config/broot/launcher/bash/br" ] && source "${HOME}/.config/broot/launcher/bash/br" \
 	|| echo "broot does not appear to be installed locally"
 
 VIM="$(which nvim 2>/dev/null || which vim 2>/dev/null || which vi 2>/dev/null)"
