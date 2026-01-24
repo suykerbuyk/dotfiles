@@ -121,6 +121,7 @@ fi
 [ -f "${HOME}/.local/go/bin/go" ] && export PATH="${HOME}/.local/go/bin:$PATH"
 [ -f "${HOME}/go/bin/go" ] && export PATH="${HOME}/go/bin:$PATH"
 [ -f "${HOME}/.keys" ] && source "${HOME}/.keys"
+[ -f "${HOME}/.config/broot/launcher/bash/br" ] && source "${HOME}/.config/broot/launcher/bash/br"
 
 VIM="$(which nvim 2>/dev/null || which vim 2>/dev/null || which vi 2>/dev/null)"
 export EDITOR=${VIM}
@@ -142,4 +143,3 @@ else
     echo "https://github.com/nvm-sh/nvm?tab=readme-ov-file#install--update-script"
 fi
 
-source /home/johns/.config/broot/launcher/bash/br

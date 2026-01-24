@@ -50,5 +50,3 @@ else
 	echo "https://github.com/nvm-sh/nvm?tab=readme-ov-file#install--update-script"
 fi
 
-
-source /home/johns/.config/broot/launcher/bash/br
