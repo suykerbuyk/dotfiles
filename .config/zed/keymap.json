@@ -10,12 +10,30 @@
     "context": "Workspace",
     "bindings": {
       // "shift shift": "file_finder::Toggle"
-    }
+    },
   },
   {
     "context": "Editor",
     "bindings": {
-      // "j k": ["workspace::SendKeystrokes", "escape"]
-    }
-  }
+      "j k": ["workspace::SendKeystrokes", "escape"],
+    },
+  },
+  {
+    "context": "!Terminal",
+    "bindings": {
+      "ctrl-alt-shift-c c": "collab_panel::ToggleFocus",
+    },
+  },
+  {
+    "context": "!Terminal",
+    "bindings": {
+      "super-shift-t": "collab_panel::ToggleFocus",
+    },
+  },
+  {
+    "context": "!Terminal",
+    "bindings": {
+      "alt-super-shift-r": "collab_panel::ToggleFocus",
+    },
+  },
 ]
