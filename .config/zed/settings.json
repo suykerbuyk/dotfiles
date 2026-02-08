@@ -53,6 +53,11 @@
         },
         {
           "paths": [
+            "/home/johns/code/proteus/proteus-hvpc-support/./"
+          ]
+        },
+        {
+          "paths": [
             "/home/johns/code/proteus/proteus-registry"
           ]
         },
