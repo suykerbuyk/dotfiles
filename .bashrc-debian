@@ -4,8 +4,8 @@
 
 # If not running interactively, don't do anything
 case $- in
-    *i*) ;;
-      *) return;;
+*i*) ;;
+*) return ;;
 esac
 
 # don't put duplicate lines or lines starting with space in the history.
@@ -37,7 +37,7 @@ fi
 
 # set a fancy prompt (non-color, unless we know we "want" color)
 case "$TERM" in
-    xterm-color|*-256color) color_prompt=yes;;
+xterm-color | *-256color) color_prompt=yes ;;
 esac
 
 # uncomment for a colored prompt, if the terminal has the capability; turned
@@ -115,14 +115,17 @@ if ! shopt -oq posix; then
     fi
 fi
 
+#  My changes
+export GOPATH=$HOME/code/go
+[ ! -d ${GOPATH} ] && mkdir -p ${GOPATH}
+
+#[ -d "${HOME}/bin" ] && export PATH="${HOME}/bin/:$PATH"
 [ -d "${HOME}/.local/bin" ] && export PATH="${HOME}/.local/bin:$PATH"
-[ -f "${HOME}/.cargo/bin/cargo" ] \
-	&& export PATH="${HOME}/.cargo/bin:$PATH" \
-	|| echo "Rust does not appear to be locally installed"
-[ -f "${HOME}/.keys" ] && source "${HOME}/.keys" \
-	|| "No .keys file found in $HOME"
-[ -f "${HOME}/.config/broot/launcher/bash/br" ] && source "${HOME}/.config/broot/launcher/bash/br" \
-	|| echo "broot does not appear to be installed locally"
+[ -f "${HOME}/.cargo/bin/cargo" ] && export PATH="${HOME}/.cargo/bin:$PATH"
+[ -f "${HOME}/.local/go/bin/go" ] && export PATH="${HOME}/.local/go/bin:$PATH"
+[ -d "${GOPATH}/bin" ] && export PATH="${GOPATH}/bin:$PATH"
+#[ -f "${HOME}/go/bin/go" ] && export PATH="${HOME}/go/bin:$PATH"
+[ -f "${HOME}/.keys" ] && source "${HOME}/.keys"
 
 VIM="$(which nvim 2>/dev/null || which vim 2>/dev/null || which vi 2>/dev/null)"
 export EDITOR=${VIM}
