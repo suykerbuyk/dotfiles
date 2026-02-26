@@ -115,9 +115,9 @@ test results, and task management procedures.
   requires the human to say so. Normally the human reviews staged changes
   and commits themselves.
 - **Never commit AI-generated artifacts or context files.** `CLAUDE.md`,
-  `RESUME.md`, `commit.msg`, and `tasks/` are local-only session context —
-  they must never appear in git history. Do not stage or commit them unless
-  the human explicitly directs otherwise.
+  `RESUME.md`, `HISTORY.md`, `commit.msg`, and `tasks/` are local-only session
+  context — they must never appear in git history. Do not stage or commit them
+  unless the human explicitly directs otherwise.
 - **Git commit messages are the project's history.** The commit messages
   themselves are the sole documentation of how and why this project evolved
   over time and the objectives it was trying to achieve. Write them
@@ -156,16 +156,14 @@ ${RESUME_TITLE}
 
 ## Project History
 
-<!-- Each major iteration gets a paragraph describing what changed and why.
-     Written in past tense. This grows organically — the AI appends to it
-     during /wrap sessions. Format follows the pattern:
+See \`HISTORY.md\` for full iteration narratives.
 
-     A Nth iteration [did X]. [Why it was needed]. [What changed technically].
-     [Key decisions and tradeoffs]. [Verification: test count, results].
+<!-- Compact summary table — one row per iteration. Full narratives live in
+     HISTORY.md (append-only archive). On /wrap, add a new row here AND
+     append the full narrative to HISTORY.md. -->
 
-     This section, combined with git commit messages, provides full project
-     evolution context. The git history has the detailed diffs; this section
-     has the narrative "why" connecting them. -->
+| # | Summary | Key Changes |
+|---|---------|-------------|
 
 ## File Inventory
 
@@ -217,6 +215,45 @@ ${RESUME_TITLE}
      - Table of test tags/groups with coverage description
      - Run commands for common scenarios
 -->
+
+## Document Structure
+
+| Document | Purpose | Loaded |
+|----------|---------|--------|
+| \`RESUME.md\` | Active working context: summary, architecture, design decisions, test suite, known issues, task management | Always (on every \`/restart\`) |
+| \`HISTORY.md\` | Append-only archive: full iteration narratives and completed implementation plans | On demand (when historical detail is needed) |
+| \`CLAUDE.md\` | AI workflow rules, pointer to RESUME.md | Always (auto-loaded by Claude Code) |
+
+**Standard operating procedure:**
+- On \`/wrap\`: append new iteration narrative to \`HISTORY.md\`, add summary row to the Project History table in \`RESUME.md\`
+- Completed plans move from \`RESUME.md\` to \`HISTORY.md\` once the plan is fully implemented and verified
+- \`HISTORY.md\` is never truncated or rewritten — only appended to
+HEREDOC
+)"
+
+# --- HISTORY.md --------------------------------------------------------------
+
+# Use project name if provided, otherwise placeholder
+if [[ -n "$PROJECT_NAME" ]]; then
+    HISTORY_TITLE="# ${PROJECT_NAME} — Project History"
+else
+    HISTORY_TITLE="# Project Name — Project History"
+fi
+
+safe_write "HISTORY.md" "$(
+    cat <<HEREDOC
+${HISTORY_TITLE}
+
+## Iteration Narratives
+
+<!-- Full iteration paragraphs are appended here during /wrap.
+     Each paragraph describes what changed and why, in past tense.
+     Format: "A Nth iteration [did X]. [Why]. [Technical details]." -->
+
+## Completed Plans
+
+<!-- Completed implementation plans are moved here from RESUME.md
+     once the plan is fully implemented and verified. -->
 HEREDOC
 )"
 
@@ -232,6 +269,7 @@ references in referenced order to restore full project context:
 1. `RESUME.md` — project purpose, architecture, design decisions, test results
 2. `BUILD.md` — build system tutorial (if it exists)
 3. `tasks/*.md` — open bugs and planned improvements
+4. `HISTORY.md` — iteration narratives and completed plans (read on demand, not required for routine work)
 
 After reading, briefly confirm what you loaded and note the current state:
 test count, open tasks, and what was last worked on based on recent git history.
@@ -304,6 +342,11 @@ Specifically:
 - Compare against the actual codebase state (files, tests, architecture)
 - Update all sections that are stale: file inventory, test counts, module
   descriptions, architecture diagrams, design decisions, and test results
+- Append a new iteration narrative to HISTORY.md describing what changed
+  in this session and why (past tense, technical detail)
+- Add a corresponding summary row to the Project History table in RESUME.md
+- Move any completed plans from RESUME.md to the Completed Plans section
+  in HISTORY.md, replacing them with a single-line pointer
 - Retire completed tasks: check each file in tasks/ (not tasks/done/) against
   the session's work and RESUME.md history — if a task has been implemented and
   committed, update its status to "Done", move it to tasks/done/, and update
@@ -326,6 +369,7 @@ echo "Updating .gitignore..."
 
 gitignore_ensure "CLAUDE.md"
 gitignore_ensure "RESUME.md"
+gitignore_ensure "HISTORY.md"
 gitignore_ensure "commit.msg"
 gitignore_ensure "tasks/"
 
@@ -336,6 +380,7 @@ echo "Done. Directory structure:"
 echo ""
 echo "  CLAUDE.md                    # AI workflow rules (gitignored)"
 echo "  RESUME.md                    # Living project context (gitignored)"
+echo "  HISTORY.md                   # Append-only iteration archive (gitignored)"
 echo "  .claude/commands/restart.md  # /restart — restore AI context"
 echo "  .claude/commands/wrap.md     # /wrap — close out session"
 echo "  tasks/                       # Work tickets (gitignored)"
