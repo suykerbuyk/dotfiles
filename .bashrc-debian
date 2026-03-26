@@ -147,3 +147,4 @@ else
     echo "https://github.com/nvm-sh/nvm?tab=readme-ov-file#install--update-script"
 fi
 
+export CLAUDE_VAULT=~/obsidian/ObsMeetings

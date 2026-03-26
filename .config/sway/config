@@ -178,6 +178,10 @@ bindsym $mod+minus scratchpad show
 
 bindsym $mod+shift+p exec 'swaymsg "output * power off"'
 bindsym $mod+ctrl+p exec 'swaymsg "output * power on" '
+
+#display most recent notifications from swaync
+bindsym $mod+shift+m exec 'swaync-client -op'
+
 #
 # Resizing containers:
 #

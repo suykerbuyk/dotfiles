@@ -1,50 +1,108 @@
-// Zed settings
-//
-// For information on how to configure Zed, see the Zed
-// documentation: https://zed.dev/docs/configuring-zed
-//
-// To see all of Zed's default settings without changing your
-// custom settings, run `zed: open default settings` from the
-// command palette (cmd-shift-p / ctrl-shift-p)
 {
-  "vim_mode": true,
-  "ui_font_size": 16,
-  "buffer_font_size": 16,
-  "theme": {
-    "mode": "system",
-    "light": "Ayu Dark",
-    "dark": "One Dark"
-  }
-  {
+  "agent": {
+    "default_model": {
+      "enable_thinking": false,
+      "model": "grok-code-fast-1",
+      "provider": "x_ai"
+    },
+    "inline_assistant_model": {
+      "model": "claude-sonnet-4-5-thinking",
+      "provider": "zed.dev"
+    },
+    "play_sound_when_agent_done": true,
+    "show_turn_stats": true,
+    "tool_permissions": {
+      "default": "allow"
+    },
+    "use_modifier_to_send": true
+  },
+  "buffer_font_size": 12,
+  "context_servers": {
+    "vibe-vault": {
+      "command": {
+        "args": [
+          "mcp"
+        ],
+        "path": "vv"
+      }
+    }
+  },
   "language_models": {
-    "xai": {
-      "version": "1.0",
-      "api_url": "https://api.x.ai/v1",  // Default, but customizable if needed
-      "available_models": [
+    "completion": {
+      "default_model": "grok-4",
+      "inline_assistant": {
+        "enabled": true,
+        "model": "grok-4"
+      },
+      "provider": "xai",
+      "thread": {
+        "model": "grok-4"
+      }
+    },
+    "providers": {
+      "xai": {
+        "models": [
+          {
+            "model": "grok-4",
+            "name": "Grok 4"
+          },
+          {
+            "max_tokens": 8192,
+            "model": "grok-code-fast-1",
+            "name": "Grok Code Fast 1",
+            "temperature": 0.7
+          }
+        ]
+      }
+    }
+  },
+  "ssh_connections": [
+    {
+      "args": [],
+      "host": "um791",
+      "projects": [
         {
-          "name": "Grok 4",
-          "model": "grok-4"
+          "paths": [
+            "/home/johns/code/proteus"
+          ]
         },
         {
-          "name": "Grok Code Fast 1",
-          "model": "grok-code-fast-1",
-          "max_tokens": 8192,  // Adjust based on needs; supports up to 128k context
-          "temperature": 0.7   // Lower for precise code, higher for creative suggestions
+          "paths": [
+            "/home/johns/code/proteus/proteus-emp-fixes/./"
+          ]
+        },
+        {
+          "paths": [
+            "/home/johns/code/proteus/proteus-hvpc-support/./"
+          ]
+        },
+        {
+          "paths": [
+            "/home/johns/code/proteus/proteus-registry"
+          ]
+        },
+        {
+          "paths": [
+            "/home/johns/code/proteus/proteus-rs"
+          ]
         }
       ]
     }
-  },
-  "assistant": {
-    "version": 2,
-    "provider": "xai",  // Set xAI as default provider
-    "default_model": "grok-code-fast-1",  // Prioritize the coding-optimized model
-    "inline_assistant": {
-      "enabled": true,  // For as-you-type completions
-      "model": "grok-code-fast-1"
-    },
-    "thread": {
-      "model": "grok-code-fast-1"  // For agent threads/multi-step tasks
+  ],
+  "terminal": {
+    "dock": "right",
+    "shell": {
+      "program": "/bin/bash"
     }
+  },
+  "theme": {
+    "dark": "One Dark",
+    "light": "Ayu Dark",
+    "mode": "system"
+  },
+  "ui_font_size": 16,
+  "vim_mode": true,
+  "which_key": {
+    "enabled": true
   }
-}
 }
