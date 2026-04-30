@@ -16,6 +16,7 @@ export VISUAL=$(which gvim)
 export XZ_OPT="-9 -T0"
 export GOPATH=$HOME/code/go
 export PATH=$HOME/bin:/usr/local/bin:$GOPATH/bin:$PATH
+export CLAUDE_VAULT=~/obsidian/ObsMeetings
 
 eval $(starship init bash)
 eval $(keychain --eval --quiet id_ed25519)

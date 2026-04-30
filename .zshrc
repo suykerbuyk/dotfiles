@@ -14,6 +14,10 @@ setopt inc_append_history
 set -o vi
 export XZ_OPT="-9 -T0"
 
+#Set VimKey bindings:
+bindkey -v
+plugins=(vimode)
+
 VIM="$(whence -p nvim || whence -p vim || whence vi)"
 export EDITOR="${VIM}"
 export VISUAL="${VIM}"
@@ -22,6 +26,7 @@ unset VIM
 export GOPATH=$HOME/code/go
 [ ! -d ${GOPATH} ] && mkdir -p "${GOPATH}/bin"
 export PATH="${GOPATH}/bin:$PATH"
+export CLAUDE_VAULT=~/obsidian/ObsMeetings
 
 [ -f "$HOME/.keys" ] && source $HOME/.keys \
 	|| echo - " no local .keys file found."
@@ -50,3 +55,4 @@ else
 fi
 
 source /home/johns/.config/broot/launcher/bash/br
+eval "$(tv init zsh)"

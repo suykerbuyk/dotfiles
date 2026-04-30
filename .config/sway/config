@@ -1,3 +1,4 @@
+# STUDY THIS: https://gitlab.com/that1communist/dotfiles/-/blob/master/.config/sway/modules/win-rules?ref_type=heads
 # Default config for sway
 #
 # Copy this to ~/.config/sway/config and edit it to your liking.
@@ -56,8 +57,8 @@ output DP-3 pos 5120,0
 #workspace 2 output HDMI-A-1
 #workspace 3 output HDMI-A-2
 
-workspace 1 output DP-1
-workspace 2 output DP-2 focus
+workspace 1 output DP-1 focus
+workspace 2 output DP-2
 workspace 3 output DP-3
 
 ### Idle configuration
@@ -141,10 +142,10 @@ bindsym $mod+Shift+0 move container to workspace number 10
 # You can "split" the current object of your focus with
 # $mod+b or $mod+v, for horizontal and vertical splits
 # respectively.
-bindsym $mod+b splith
-bindsym $mod+v splitv
-#bindsym $mod+Shift+quotedbl splith
-#bindsym $mod+Shift+percent splitv
+#bindsym $mod+b splith
+#bindsym $mod+v splitv
+bindsym $mod+Shift+quotedbl splith
+bindsym $mod+Shift+percent splitv
 
 # Switch the current container between different layout styles
 bindsym $mod+s layout stacking
@@ -178,6 +179,10 @@ bindsym $mod+minus scratchpad show
 
 bindsym $mod+shift+p exec 'swaymsg "output * power off"'
 bindsym $mod+ctrl+p exec 'swaymsg "output * power on" '
+
+#display most recent notifications from swaync
+bindsym $mod+shift+m exec 'swaync-client -op'
+
 #
 # Resizing containers:
 #
@@ -263,31 +268,30 @@ mode "print" {
 bindsym $mod+Print mode "print"
 
 
-for_window [instance="1password" class="1Password"] floating enable
+for_window [app_id="recmeet-tray" title="Meeting Context" ] floating enable, resize set width 600 height 600, sticky enable
+for_window [app_id="1password"] floating enable, resize set width 600 height 600, sticky enable
 for_window [app_id="pavucontrol"] floating enable
 for_window [app_id="yubico-authenticator"] floating enable
 for_window [class="zoom" instance="zoom" title="Settings"] floating enable
 for_window [class="zoom" instance="zoom" title="Meeting"] floating enable
 for_window [class="zoom" instance="zoom" title="Zoom Workplace"] floating enable
+for_window [title="annotate_toolbar" class="zoom" instance="zoom"] floating enable
 for_window [app_id="flameshot"] border pixel 0, floating enable, fullscreen disable, move absolute position 0 0
 #for_window [con_id="Picture-in-Picture"] floating enable
-for_window [title="Picture in picture"] floating enable, sticky enable
 for_window [title="Picture-in-Picture"] floating enable, sticky enable
 for_window [instance="system-config-printer"] floating enable, sticky enable
 for_window [app_id="system-config-printer"] floating enable, sticky enable
 for_window [app_id="nm-connection-editor"] floating enable, sticky enable
-##129: con "Login to account "Hotmail" failed" (xdg_shell, pid: 3326, app_id: "thunderbird")
-for_window [title="Login to account.*" app_id="thunderbird"] floating enable, sticky enable, assign -> 1
-for_window [title=".*Reminder" app_id="thunderbird"] floating enable, sticky enable, assign -> 1
-for_window [title="Extension: (NoScript)*" app_id="firefox"] floating enable, sticky enable, assign -> 1
-for_window [title="Message Filters" app_id="thunderbird"] floating enable, sticky enable, assign -> 1
-for_window [title="OpenPGP Key Manager" app_id="thunderbird"] floating enable, sticky enable, assign -> 1
-#for_window [app_id="1 Reminder" app_id="thunderbird"] floating enable, sticky enable
-for_window [app_id="org.kde.kcalc"]  floating enable, sticky enable, assign -> 1
-for_window [title="PayPal Checkout — Mozilla Firefox" app_id="firefox"]  floating enable, sticky enable, assign -> 1
-for_window [app_id="blueman-manager"]  floating enable, sticky enable, assign -> 1
-for_window [title="wev" app_id="wev"]  floating enable, sticky enable, assign -> 1
-for_window [title="QEMU" app_id="qemu"]  floating enable, sticky enable, assign -> 1
+for_window [title="Login to account.*" app_id="thunderbird"] floating enable, sticky enable, assign → 1
+for_window [title="^\d Reminder"] floating enable, resize set width 600 height 400, sticky enable, inhibit idle focus 
+for_window [title="Extension: (NoScript)*" app_id="firefox"] floating enable, sticky enable, assign → 1
+for_window [title="Message Filters" app_id="thunderbird"] floating enable, sticky enable, assign → 1
+for_window [title="OpenPGP Key Manager" app_id="thunderbird"] floating enable, sticky enable, assign → 1
+for_window [app_id="org.kde.kcalc"]  floating enable, sticky enable, assign → 1
+for_window [title="PayPal Checkout — Mozilla Firefox" app_id="firefox"]  floating enable, sticky enable, assign → 1
+for_window [app_id="blueman-manager"]  floating enable, sticky enable, assign → 1
+for_window [title="wev" app_id="wev"]  floating enable, sticky enable, assign → 1
+for_window [title="QEMU" app_id="qemu"]  floating enable, sticky enable, assign → 1
 
 for_window [window_role="pop-up"] floating enable
 for_window [window_role="bubble"] floating enable
@@ -301,3 +305,5 @@ for_window [app_id="org.gnome.Calendar"] floating enable
 # decorate legacy x11 windows:
 for_window [shell="xwayland"] title_format "[XWayland] %title"
 # xwayland disable  #kill x11 support/emulation
+
+for_window [title="(?:Open|Save) (?:File|Folder|As)"] floating enable, resize set width 1030 height 710
