@@ -1,39 +1,11 @@
-// Zed keymap
-//
-// For information on binding keys, see the Zed
-// documentation: https://zed.dev/docs/key-bindings
-//
-// To see the default key bindings run `zed: open default keymap`
-// from the command palette.
 [
   {
-    "context": "Workspace",
+    "context": "Terminal",
     "bindings": {
-      // "shift shift": "file_finder::Toggle"
-    },
-  },
-  {
-    "context": "Editor",
-    "bindings": {
-      "j k": ["workspace::SendKeystrokes", "escape"],
-    },
-  },
-  {
-    "context": "!Terminal",
-    "bindings": {
-      "ctrl-alt-shift-c c": "collab_panel::ToggleFocus",
-    },
-  },
-  {
-    "context": "!Terminal",
-    "bindings": {
-      "super-shift-t": "collab_panel::ToggleFocus",
-    },
-  },
-  {
-    "context": "!Terminal",
-    "bindings": {
-      "alt-super-shift-r": "collab_panel::ToggleFocus",
-    },
-  },
+      "shift-enter": [
+        "terminal::SendText",
+        "\u001b\r"
+      ]
+    }
+  }
 ]

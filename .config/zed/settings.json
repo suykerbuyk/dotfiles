@@ -1,8 +1,21 @@
 {
+  "project_panel": {
+    "dock": "right"
+  },
+  "outline_panel": {
+    "dock": "right"
+  },
+  "collaboration_panel": {
+    "dock": "right"
+  },
+  "git_panel": {
+    "dock": "right"
+  },
   "agent": {
+    "dock": "left",
     "default_model": {
       "enable_thinking": false,
-      "model": "grok-code-fast-1",
+      "model": "grok-4-1-fast-reasoning",
       "provider": "x_ai"
     },
     "inline_assistant_model": {
@@ -18,6 +31,12 @@
   },
   "buffer_font_size": 12,
   "context_servers": {
+    "vibe-palace": {
+      "args": [
+        "mcp"
+      ],
+      "command": "vp"
+    },
     "vibe-vault": {
       "args": [
         "mcp"
@@ -66,21 +85,6 @@
         },
         {
           "paths": [
-            "/home/johns/code/proteus/proteus-emp-fixes/./"
-          ]
-        },
-        {
-          "paths": [
-            "/home/johns/code/proteus/proteus-hvpc-support/./"
-          ]
-        },
-        {
-          "paths": [
-            "/home/johns/code/proteus/proteus-registry"
-          ]
-        },
-        {
-          "paths": [
             "/home/johns/code/proteus/proteus-rs"
           ]
         }
@@ -88,7 +92,7 @@
     }
   ],
   "terminal": {
-    "dock": "right",
+    "dock": "bottom",
     "shell": {
       "program": "/bin/bash"
     }

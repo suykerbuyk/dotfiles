@@ -148,3 +148,8 @@ else
 fi
 
 export CLAUDE_VAULT=~/obsidian/ObsMeetings
+eval "$(tv init bash)"
+
+# dedupe bash history
+export HISTCONTROL=ignoredups:erasedups
+export HISTIGNORE="&:ls:[bf]g:exit:pwd:clear"

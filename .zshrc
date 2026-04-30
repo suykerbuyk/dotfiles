@@ -55,3 +55,4 @@ else
 fi
 
 source /home/johns/.config/broot/launcher/bash/br
+eval "$(tv init zsh)"
