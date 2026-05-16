@@ -1,4 +1,12 @@
 {
+  "agent_servers": {
+    "gemini": {
+      "type": "registry"
+    },
+    "claude-acp": {
+      "type": "registry"
+    }
+  },
   "project_panel": {
     "dock": "right"
   },
@@ -22,7 +30,7 @@
       "model": "claude-sonnet-4-5-thinking",
       "provider": "zed.dev"
     },
-    "play_sound_when_agent_done": true,
+    "play_sound_when_agent_done": "always",
     "show_turn_stats": true,
     "tool_permissions": {
       "default": "allow"

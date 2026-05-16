@@ -28,22 +28,28 @@ export GOPATH=$HOME/code/go
 export PATH="${GOPATH}/bin:$PATH"
 export CLAUDE_VAULT=~/obsidian/ObsMeetings
 
-[ -f "$HOME/.keys" ] && source $HOME/.keys \
+[ -s "$HOME/.keys" ] && source $HOME/.keys \
 	|| echo - " no local .keys file found."
-[ -d "${HOME}/.local/bin" ] && export PATH="${HOME}/.local/bin:$PATH"
-[ -f "${HOME}/.local/bin/go" ] \
+[ -d "${HOME}/.local/bin" ] && export PATH="${HOME}/.local/bin:$PATH" \
+	|| echo "Users ~/.local/bin directory does not exists"
+[ -s "${HOME}/.local/bin/go" ] \
 	|| echo " - go does not appear to be locally installed." 
-[ -f "${HOME}/.cargo/bin/cargo" ] && source "$HOME/.cargo/env" \
+[ -s "${HOME}/.cargo/bin/cargo" ] && source "$HOME/.cargo/env" \
 	|| echo " - rust does not appear to be locally installed."
-[ -f ${HOME}/.config/broot/launcher/bash/br ] && source ${HOME}/.config/broot/launcher/bash/br \
+[ -s ${HOME}/.config/broot/launcher/bash/br ] && source ${HOME}/.config/broot/launcher/bash/br \
 	|| echo " - broot is not installed locally."
 
-whence -cp fzf 2>&1 >/dev/null && source <(fzf --zsh)
+whence -cp fzf 2>&1 >/dev/null && source <(fzf --zsh) \
+	|| echo "fzf is not installed"
 # https://wiki.archlinux.org/title/SSH_keys
 whence -cp keychain 2>&1 >/dev/null \
 	&& eval $(keychain --eval --quiet id_ed25519 ) \
 	|| echo "keychain not installed"
 
+# Setup 'tv' shell helpers and completion if tv is installed
+whence -cp tv 2>&1 >/dev/null && eval $(tv init zsh) || echo "tv not installed" 
+#
+# If installed locally, add nvm to user path.
 NVM_INSTALL="$HOME/.local/apps/nvm"
 if [ -d "$NVM_INSTALL" ] ; then
 	export NVM_DIR="$NVM_INSTALL"
@@ -54,5 +60,12 @@ else
 	echo "https://github.com/nvm-sh/nvm?tab=readme-ov-file#install--update-script"
 fi
 
-source /home/johns/.config/broot/launcher/bash/br
-eval "$(tv init zsh)"
+# If installed, add ROCM to the path and export the environmental variable for its install path
+ROCM_INSTALL="/opt/rocm/"
+if [ -d "${ROCM_INSTALL}/bin" ] ; then
+	export ROCM_PATH="${ROCM_INSTALL}"
+	export PATH="${ROCM_PATH}/bin:${PATH}"
+	echo "ROCM added to path"
+else
+	echo "ROCM is not installed"
+fi

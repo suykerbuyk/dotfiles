@@ -121,8 +121,8 @@ export GOPATH=$HOME/code/go
 
 #[ -d "${HOME}/bin" ] && export PATH="${HOME}/bin/:$PATH"
 [ -d "${HOME}/.local/bin" ] && export PATH="${HOME}/.local/bin:$PATH"
-[ -f "${HOME}/.cargo/bin/cargo" ] && export PATH="${HOME}/.cargo/bin:$PATH"
-[ -f "${HOME}/.local/go/bin/go" ] && export PATH="${HOME}/.local/go/bin:$PATH"
+[ -s "${HOME}/.cargo/bin/cargo" ] && export PATH="${HOME}/.cargo/bin:$PATH"
+[ -s "${HOME}/.local/go/bin/go" ] && export PATH="${HOME}/.local/go/bin:$PATH"
 [ -d "${GOPATH}/bin" ] && export PATH="${GOPATH}/bin:$PATH"
 #[ -f "${HOME}/go/bin/go" ] && export PATH="${HOME}/go/bin:$PATH"
 [ -f "${HOME}/.keys" ] && source "${HOME}/.keys"
@@ -135,8 +135,16 @@ command -v keychain 2>&1 >/dev/null &&
     eval $(keychain --eval --quiet id_ed25519) ||
     echo "keychain not installed"
 
-command -v fzf 2>&1 >/dev/null && source <(fzf --bash)
+#command -v fzf 2>&1 >/dev/null && source <(fzf --bash)
 command -v tv 2>&1 >/dev/null && eval "$(tv init bash)"
+
+# Set up fzf
+if [[ -x "$(which fzf)" ]]; then
+    eval "$(fzf --bash)"
+    if [[ -x $(which tmux) ]]; then
+        export FZF_DEFAULT_OPTS='--tmux center'
+    fi
+fi
 
 NVM_INSTALL="$HOME/.local/apps/nvm"
 if [ -d "$NVM_INSTALL" ]; then
@@ -148,7 +156,17 @@ else
     echo "https://github.com/nvm-sh/nvm?tab=readme-ov-file#install--update-script"
 fi
 
-export CLAUDE_VAULT=~/obsidian/ObsMeetings
+# If installed, add ROCM to the path and export the environmental variable for its install path
+ROCM_INSTALL="/opt/rocm/"
+if [ -d "${ROCM_INSTALL}/bin" ] ; then
+	export ROCM_PATH="${ROCM_INSTALL}"
+	export PATH="${ROCM_PATH}/bin:${PATH}"
+	echo "ROCM added to path"
+else
+	echo "ROCM is not installed"
+fi
+
+# export CLAUDE_VAULT=~/obsidian/ObsMeetings
 
 # dedupe bash history
 export HISTCONTROL=ignoredups:erasedups
