@@ -307,3 +307,6 @@ for_window [shell="xwayland"] title_format "[XWayland] %title"
 # xwayland disable  #kill x11 support/emulation
 
 for_window [title="(?:Open|Save) (?:File|Folder|As)"] floating enable, resize set width 1030 height 710
+
+
+#  107: floating_con "recmeet captions" (xdg_shell, pid: 3041487, app_id: "recmeet-tray", foreign_toplevel_id: "6a7c9a26f2b5015d49a5632f263c0a50")00
