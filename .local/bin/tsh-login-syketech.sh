@@ -16,6 +16,9 @@ x11)
 tty)
     echo "Running on in console mode only"
     ;;
+wayland)
+    echo "Running on wayland"
+    ;;
 *)
     echo "Session type $SESSION is unmapped"
     ;;

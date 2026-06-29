@@ -69,3 +69,9 @@ if [ -d "${ROCM_INSTALL}/bin" ] ; then
 else
 	echo "ROCM is not installed"
 fi
+
+# >>> grok installer >>>
+export PATH="$HOME/.grok/bin:$PATH"
+fpath=(~/.grok/completions/zsh $fpath)
+autoload -Uz compinit && compinit -C
+# <<< grok installer <<<
