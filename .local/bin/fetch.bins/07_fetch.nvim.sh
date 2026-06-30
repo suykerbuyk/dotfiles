@@ -8,7 +8,7 @@ BIN_NAME="nvim"
 IMG_NAME="nvim.appimage" # Or extract to 'nvim'
 TEMP_DIR="$(mktemp -d)"
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-ARCH="$(uname -m)"
+ARCH="$(uname -m | sed 's/x86_64/amd64/ ; s/aarch64/arm64/')" # Normalize arch for jq naming
 
 LATEST_URL="https://api.github.com/repos/neovim/neovim/releases/latest"
 RELEASE_INFO=$(curl -s "$LATEST_URL")
