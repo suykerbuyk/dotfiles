@@ -2,3 +2,4 @@
 .ssh/sockets/
 .vimbackup/*
 .local/bin/*
+.local/apps/*

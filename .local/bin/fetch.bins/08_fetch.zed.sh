@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ "${XDG_SESSION_TYPE}" == "tty" ] ; then
+	echo "Did not detect a windowing session, skipping Zed install"
+	exit
+fi
+
 PREFIX_DIR="${HOME}/.local"
 APP_DIR="${PREFIX_DIR}/apps"
 BIN_DIR="${PREFIX_DIR}/bin"

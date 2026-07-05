@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+# TODO: We should be sourcing the individual fetch scripts rather than calling them.
+# Each of the unique vars to an install script should only override an environmental var if it is not set
+
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m | sed 's/x86_64/amd64/ ; s/aarch64/arm64/')" # Normalize arch for jq naming
 
