@@ -1,4 +1,4 @@
-#!/usr/bin/env zsh
+#!/usr/bin/env sh
 # qdbus org.kde.konsole $KONSOLE_DBUS_SESSION setTitle 1 $(uname -n)
 #printf "\033]0;%s@%s\007" "${USER}" "$(hostname)"
 #cols=$(tput cols)
