@@ -1,16 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "${XDG_SESSION_TYPE}" == "tty" ] ; then
-	echo "Did not detect a windowing session, skipping Zed install"
-	exit
-fi
-
 PREFIX_DIR="${HOME}/.local"
 APP_DIR="${PREFIX_DIR}/apps"
 BIN_DIR="${PREFIX_DIR}/bin"
 BIN_NAME="zed"
 INSTALL_DIR="${APP_DIR}/${BIN_NAME}.app"
+
+
+is_wsl() {
+	local osrelease=""
+	[ -r /proc/sys/kernel/osrelease ] && osrelease=$(</proc/sys/kernel/osrelease)
+	case "${osrelease,,}" in
+		*microsoft*|*wsl*) return 0 ;;
+	esac
+	[ -n "${WSL_DISTRO_NAME:-}" ] && return 0   # fallback for odd custom kernels
+	return 1
+}
+
+if is_wsl && [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
+	echo "WSL without a display server, skipping Zed install"; exit 0
+fi
 
 CHANNEL="${ZED_CHANNEL:-stable}" # Allow env override, default stable
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
