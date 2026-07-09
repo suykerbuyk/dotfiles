@@ -1,30 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
-echo "Running"
-INSTALL_DIR="$HOME/.local/bin"
 
-APP_DIR="$HOME/.local/apps"
-BIN_DIR="$HOME/.local/bin"
+# Bootstrap installer for jq. This runs FIRST and must NOT depend on jq itself.
+# Sourced from _lib.sh (uses only the jq-free helpers).
+# See Context.fetch.bins.refactor.md for full design and verified facts.
+# The stow safety guard (in fb_init) ensures we never run from inside the
+# dotfiles checkout.
+
+. "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/_lib.sh"
+
 BIN_NAME="jq"
+fb_init
 
-[ ! -d "${APP_DIR}" ] && mkdir -p "${APP_DIR}"
-[ ! -d "${BIN_DIR}" ] && mkdir -p "${BIN_DIR}"
-
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-ARCH="$(uname -m | sed 's/x86_64/amd64/ ; s/aarch64/arm64/')" # Normalize arch for jq naming
-
+# Per-tool normalization (jq wants "macos" not "darwin", amd64 not x86_64)
+OS="$(fb_os macos)"
+ARCH="$(fb_arch amd64)"
 echo "OS=$OS ARCH=$ARCH"
 
-LATEST_URL="https://api.github.com/repos/jqlang/jq/releases/latest"
-TAG_NAME="$(curl -sL https://api.github.com/repos/jqlang/jq/releases/latest | grep tag_name | awk -F '"' '{print $4}')"
-#BINARY="jq-linux-amd64"
+TAG_NAME="$(gh_latest_tag_nojq jqlang/jq)"
 BINARY="jq-${OS}-${ARCH}"
-#echo $BINARY
-DOWN_LOAD_URL="https://github.com/jqlang/jq/releases/download/${TAG_NAME}/${BINARY}"
-echo "DOWN_LOAD_URL=$DOWN_LOAD_URL"
-# Download directly (no archive)
-curl -L -o "${APP_DIR}/$BIN_NAME" "${DOWN_LOAD_URL}"
-chmod +x "${APP_DIR}/$BIN_NAME" || echo "Failed to chmod"
-ln -sf "${APP_DIR}/$BIN_NAME" "${BIN_DIR}/$BIN_NAME" || echo "Failed to ln"
+DOWNLOAD_URL="https://github.com/jqlang/jq/releases/download/${TAG_NAME}/${BINARY}"
+echo "DOWNLOAD_URL=$DOWNLOAD_URL"
 
-echo "Installed $TAG_NAME to $INSTALL_DIR/$BIN_NAME"
+# Download directly to a temporary name inside APP_DIR (no archive)
+TMP_BIN="${APP_DIR}/${BIN_NAME}.tmp"
+gh_download "$DOWNLOAD_URL" "$TMP_BIN"
+
+# install_bin handles chmod, verification, ln -sfn, and confirmation
+install_bin "$TMP_BIN" "$BIN_NAME" --version

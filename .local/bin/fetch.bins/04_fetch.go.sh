@@ -1,36 +1,41 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_DIR="$HOME/.local/apps"
-BIN_DIR="$HOME/.local/bin"
+# Go installer (uses official go.dev JSON, not GitHub). Uses lib for safety,
+# temp discipline, and install_bin. Preserves version check.
+# See Context.fetch.bins.refactor.md.
+
+. "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/_lib.sh"
 
 BIN_NAME="go"
-TEMP_DIR="$(mktemp -d)"
+fb_init
 
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-ARCH="$(uname -m | sed 's/x86_64/amd64/ ; s/aarch64/arm64/')" # Normalize arch
+OS="$(fb_os linux)"  # go uses "linux", not "linux" change but consistent
+ARCH="$(fb_arch amd64)"
 
-# Fetch JSON of all versions
 JSON_URL="https://go.dev/dl/?mode=json"
-VERSIONS=$(curl -s "$JSON_URL" | jq -r '.[] | select(.stable == true) | .version' | sort -V | tail -1) # Latest stable
+VERSION="$(curl -fsSL "$JSON_URL" | jq -r '.[] | select(.stable == true) | .version' | sort -V | tail -1)"
 
-ASSET_PATH="${VERSIONS}.${OS}-${ARCH}.tar.gz"
-ASSET_URL="https://go.dev/dl/$ASSET_PATH"
+if [[ -z "$VERSION" ]]; then
+    echo "Error: could not determine latest stable Go version." >&2
+    exit 1
+fi
 
-# Install dir
-VERSION_DIR="${APP_DIR}/${VERSIONS}"
+ASSET_URL="https://go.dev/dl/${VERSION}.${OS}-${ARCH}.tar.gz"
+VERSION_DIR="${APP_DIR}/${VERSION}"
+
 if [[ -d "$VERSION_DIR" ]]; then
-    echo "Go $VERSIONS already installed"
+    echo "Go $VERSION already installed"
     exit 0
 fi
-echo "$ASSET_URL"
-curl -L -o "$TEMP_DIR/go.tar.gz" "$ASSET_URL"
-mkdir -p "${VERSION_DIR}"
-tar -C "${VERSION_DIR}" -xzf "$TEMP_DIR/go.tar.gz"
-ln -sf "${VERSION_DIR}/go/bin/go" "$BIN_DIR/$BIN_NAME"
-ln -sf "${VERSION_DIR}/go/bin/gofmt" "$BIN_DIR/gofmt" # Etc. for other tools
 
-echo "Installed Go $VERSIONS to $VERSION_DIR"
-#rm -rf "$TEMP_DIR"
+TARBALL="${FB_TMP}/go.tar.gz"
+gh_download "$ASSET_URL" "$TARBALL"  # reuses helper (works for any URL)
 
-# Set GOPATH if needed: export GOPATH=$HOME/go
+mkdir -p "$VERSION_DIR"
+tar -C "$VERSION_DIR" -xzf "$TARBALL" --strip-components=1
+
+install_bin "${VERSION_DIR}/go/bin/go" "$BIN_NAME" version
+install_bin "${VERSION_DIR}/go/bin/gofmt" "gofmt" version
+
+echo "Installed Go $VERSION (official tarball) to $VERSION_DIR"

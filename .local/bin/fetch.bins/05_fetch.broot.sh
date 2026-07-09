@@ -1,30 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_DIR="$HOME/.local/apps"
-BIN_DIR="$HOME/.local/bin"
+# broot installer (ZIP, musl binary from Canop/broot). Uses lib for safety,
+# temp discipline, and install_bin. Simplified asset selection.
+# See Context.fetch.bins.refactor.md.
+
+. "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/_lib.sh"
+
 BIN_NAME="broot"
+fb_init
 
-TEMP_DIR="$(mktemp -d)"
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-#ARCH="$(uname -m | sed 's/x86_64/amd64/')" # GitHub uses amd64
-ARCH="$(uname -m)"
+OS="$(fb_os)"
+ARCH="$(uname -m)"  # broot uses full arch in dir (x86_64, aarch64)
 
-LATEST_URL="https://api.github.com/repos/Canop/broot/releases/latest" # Note: Owner is Canop
-RELEASE_INFO=$(curl -s "$LATEST_URL")
-VERSION=$(echo "$RELEASE_INFO" | jq -r .tag_name | sed 's/v//')
+TAG_NAME="$(gh_latest_tag Canop/broot)"
+VERSION="${TAG_NAME#v}"
 
-#ASSET_URL=$(echo "$RELEASE_INFO" | jq -r ".assets[] | select(.name | contains(\"$OS\") and contains(\"$ARCH\")) | .browser_download_url" | head -1)
-ASSET_URL=$(echo "$RELEASE_INFO" | jq -r ".assets[].browser_download_url" | head -1)
-if [[ -z "$ASSET_URL" ]]; then
-    echo "Error: No matching asset" >&2
-    exit 1
-fi
+# broot publishes the first asset as the correct musl binary for the platform
+ASSET_URL="$(gh_asset_url Canop/broot 'true' '')"  # first asset
 
-curl -L -o "$TEMP_DIR/broot.zip" "$ASSET_URL"
-unzip -q "$TEMP_DIR/broot.zip" -d "$TEMP_DIR"
-cp "$TEMP_DIR/${ARCH}-unknown-${OS}-musl/broot" "$BIN_DIR/$BIN_NAME" # Assuming binary is named 'broot'
-chmod +x "$BIN_DIR/$BIN_NAME"
+TARBALL="${FB_TMP}/broot.zip"  # actually a zip
+gh_download "$ASSET_URL" "$TARBALL"
 
-echo "Installed broot $VERSION to $BIN_DIR/$BIN_NAME"
-rm -rf "$TEMP_DIR"
+unzip -q "$TARBALL" -d "$FB_TMP"
+BIN_SRC="$FB_TMP/${ARCH}-unknown-${OS}-musl/broot"
+
+install_bin "$BIN_SRC" "$BIN_NAME" --version
+
+echo "Installed broot $VERSION (zip) -> ${BIN_DIR}/${BIN_NAME}"

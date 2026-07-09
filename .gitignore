@@ -2,5 +2,13 @@
 .ssh/sockets/
 .vimbackup/*
 .local/bin/*
+!.local/bin/fetch.all.bins.sh
+!.local/bin/fetch.bins/
 .local/share/*
 .local/apps/*
+/CLAUDE.md
+/AGENTS.md
+/commit.msg
+/.claude/
+/.grok/
+/.vibe-palace/

@@ -1,34 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_DIR="$HOME/.local/apps"
-BIN_DIR="$HOME/.local/bin"
+# fzf installer (CLI/TUI). Uses lib for GitHub helpers, temp discipline,
+# verification, and safety guard. Simplified to ~10 lines.
+# See Context.fetch.bins.refactor.md.
+
+. "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/_lib.sh"
+
 BIN_NAME="fzf"
-TEMP_DIR="$(mktemp -d)"
+fb_init
 
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-ARCH="$(uname -m | sed 's/x86_64/amd64/ ; s/aarch64/arm64/ ; s/armv7l/arm/')" # Normalize for fzf naming
+OS="$(fb_os)"
+ARCH="$(fb_arch amd64)"  # fzf uses amd64/arm (armv7l->arm)
+ARCH_FOR_FZF="${ARCH/armv7l/arm}"  # extra normalization
 
-LATEST_URL="https://api.github.com/repos/junegunn/fzf/releases/latest"
-RELEASE_INFO=$(curl -s "$LATEST_URL")
-VERSION=$(echo "$RELEASE_INFO" | jq -r .tag_name) # e.g., 0.67.0 (no 'v' prefix)
+TAG_NAME="$(gh_latest_tag junegunn/fzf)"
+VERSION="${TAG_NAME#v}"  # no 'v' prefix
 
-mkdir -p ${APP_DIR}
-mkdir -p ${BIN_DIR}
+# Asset pattern: fzf-${VERSION}-linux_${arch}.tar.gz
+ASSET_URL="$(gh_asset_url junegunn/fzf 'contains("linux") and contains($arch)' "$ARCH_FOR_FZF")"
 
-# Find asset URL (pattern: fzf-{version}-linux_{arch}.tar.gz)
-ASSET_URL=$(echo "$RELEASE_INFO" | jq -r ".assets[] | select(.name | contains(\"$OS\") and contains(\"$ARCH\")) | .browser_download_url" | head -1)
-if [[ -z "$ASSET_URL" ]]; then
-    echo "Error: No matching asset for $OS/$ARCH" >&2
-    exit 1
-fi
+TARBALL="${FB_TMP}/fzf.tar.gz"
+gh_download "$ASSET_URL" "$TARBALL"
 
-# Download and extract
-curl -L -o "$TEMP_DIR/fzf.tar.gz" "$ASSET_URL"
-tar -xzf "$TEMP_DIR/fzf.tar.gz" -C "$TEMP_DIR"
-mv "$TEMP_DIR/fzf" "${APP_DIR}/$BIN_NAME"
-chmod +x "${APP_DIR}/$BIN_NAME"
-ln -sf "${APP_DIR}/$BIN_NAME" "${BIN_DIR}/$BIN_NAME"
+tar -xzf "$TARBALL" -C "$FB_TMP"
+mv "$FB_TMP/fzf" "${APP_DIR}/${BIN_NAME}"
 
-echo "Installed fzf $VERSION to $BIN_DIR/$BIN_NAME"
-rm -rf "$TEMP_DIR"
+install_bin "${APP_DIR}/${BIN_NAME}" "$BIN_NAME" --version
+
+echo "Installed fzf $VERSION (tarball) -> ${BIN_DIR}/${BIN_NAME}"
