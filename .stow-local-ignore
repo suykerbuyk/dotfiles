@@ -1,0 +1,34 @@
+# NOTE: a local ignore file REPLACES stow's built-in list (Stow.pm:1530),
+# so the defaults are re-declared verbatim below before our own additions.
+RCS
+.+,v
+CVS
+\.\#.+
+\.cvsignore
+\.svn
+_darcs
+\.hg
+\.git
+\.gitignore
+\.gitmodules
+.+~
+\#.*\#
+^/README.*
+^/LICENSE.*
+^/COPYING
+
+# vibe-palace / agent artifacts: must NEVER be linked into $HOME.
+# A .vibe-palace.toml at $HOME enrolls the whole home tree into auto-capture.
+^/\.vibe-palace\.toml$
+^/\.vibe-palace$
+^/\.claude$
+^/\.grok$
+^/commit\.msg$
+^/AGENTS\.md$
+^/CLAUDE\.md$
+^/session-history-ssh-agent\.md$
+
+# The home/ package must be stowed explicitly: `stow -t "$HOME" home`.
+# Ignoring it here makes a stray `stow -R .` a harmless no-op instead of
+# creating ~/home -> dotfiles/home.
+^/home$

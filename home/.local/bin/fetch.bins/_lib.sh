@@ -15,8 +15,9 @@
 #
 # Critical rule (enforced in fb_init):
 #   These scripts MUST NOT be run from inside the dotfiles git checkout.
-#   Run `cd ~/dotfiles && stow -R .` first, then `cd ~` and run from ~/.local/bin.
-#   This prevents contaminating the source tree with binaries/temp files.
+#   Run `stow -d ~/dotfiles -t "$HOME" home` first, then `cd ~` and run from
+#   ~/.local/bin. This prevents contaminating the source tree with
+#   binaries/temp files.
 
 set -euo pipefail
 
@@ -46,9 +47,12 @@ Running here would contaminate your source tree with installed binaries, temp
 files, or partial downloads.
 
 Correct bootstrap flow:
-  1. cd ~/dotfiles && stow -R .     # create ~/.local/bin symlinks
+  1. stow -d ~/dotfiles -t "$HOME" home   # create ~/.local/bin symlinks
   2. cd ~ (or any directory outside the checkout)
   3. Run ~/.local/bin/fetch.all.bins.sh
+
+Note: `stow -R .` is a deliberate no-op — the repo root is the stow
+directory, not a package. The home image lives in the `home/` package.
 
 If you are developing the scripts themselves, edit in ~/.local/bin/fetch.bins/
 then re-stow.

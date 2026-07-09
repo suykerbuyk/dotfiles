@@ -1,0 +1,14 @@
+[Unit]
+Description=OpenSSH key agent
+Documentation=man:ssh-agent(1) man:ssh-add(1) man:ssh(1)
+ConditionEnvironment=!SSH_AGENT_PID
+Requires=ssh-agent.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh-agent -D
+SuccessExitStatus=2
+
+[Install]
+Also=ssh-agent.socket
+WantedBy=default.target

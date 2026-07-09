@@ -1,11 +1,15 @@
-.ssh/hosts/
-.ssh/sockets/
-.vimbackup/*
-.local/bin/*
-!.local/bin/fetch.all.bins.sh
-!.local/bin/fetch.bins/
-.local/share/*
-.local/apps/*
+# Home-image content lives in the stow package home/.
+home/.ssh/hosts/
+home/.ssh/sockets/
+home/.vimbackup/*
+home/.local/bin/*
+!home/.local/bin/fetch.all.bins.sh
+!home/.local/bin/fetch.bins/
+home/.local/share/*
+home/.local/apps/*
+
+# Repo-root artifacts: agent/vibe-palace state. Never tracked, never stowed
+# (they sit outside the home/ package, so stow cannot see them).
 /CLAUDE.md
 /AGENTS.md
 /commit.msg
