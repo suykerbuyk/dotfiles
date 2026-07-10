@@ -22,9 +22,10 @@
   "agent": {
     "dock": "left",
     "default_model": {
-      "enable_thinking": false,
-      "model": "grok-4-1-fast-reasoning",
-      "provider": "x_ai"
+      "effort": "high",
+      "enable_thinking": true,
+      "model": "gpt-5.4",
+      "provider": "copilot_chat"
     },
     "inline_assistant_model": {
       "model": "claude-sonnet-4-5-thinking",
@@ -33,6 +34,17 @@
     "play_sound_when_agent_done": "always",
     "show_turn_stats": true,
     "tool_permissions": {
+      "tools": {
+        "delete_path": {
+          "default": "allow"
+        },
+        "edit_file": {
+          "default": "allow"
+        },
+        "create_directory": {
+          "default": "allow"
+        }
+      },
       "default": "allow"
     },
     "use_modifier_to_send": true

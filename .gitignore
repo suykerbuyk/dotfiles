@@ -1,8 +1,10 @@
+<<<<<<< HEAD
 # Home-image content lives in the stow package home/.
 home/.ssh/hosts/
 home/.ssh/sockets/
 home/.vimbackup/*
 home/.local/bin/*
+home/.config/zed/settings_backup.json
 !home/.local/bin/fetch.all.bins.sh
 !home/.local/bin/fetch.bins/
 home/.local/share/*

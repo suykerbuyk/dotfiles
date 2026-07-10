@@ -18,6 +18,9 @@ export XZ_OPT="-9 -T0"
 bindkey -v
 plugins=(vimode)
 
+# Git log all nice and pretty.
+alias gl='git log --oneline --graph --decorate'
+
 VIM="$(whence -p nvim || whence -p vim || whence vi)"
 export EDITOR="${VIM}"
 export VISUAL="${VIM}"
