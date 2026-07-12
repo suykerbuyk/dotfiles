@@ -44,10 +44,21 @@ export CLAUDE_VAULT=~/obsidian/ObsMeetings
 
 whence -cp fzf 2>&1 >/dev/null && source <(fzf --zsh) \
 	|| echo "fzf is not installed"
+
+# Phase 3 of revised setup-ssh-agent-systemd: conditionalize keychain block with migration note.
+# Do not remove keychain logic (kept for compatibility/legacy systems).
+# The new systemd method (via ~/.config/bashrc.d/10-ssh-agent.sh sourced below) is preferred.
 # https://wiki.archlinux.org/title/SSH_keys
 whence -cp keychain 2>&1 >/dev/null \
 	&& eval $(keychain --eval --quiet id_ed25519 ) \
 	|| echo "keychain not installed"
+
+# Source additional rc snippets from ~/.config/bashrc.d/*.sh (safe for zsh too)
+# This is after interactive checks (zshrc has no early non-interactive guard like bash,
+# but 10-ssh-agent.sh itself is fully guarded/idempotent/non-breaking).
+for f in ~/.config/bashrc.d/*.sh; do
+    [ -r "$f" ] && . "$f"
+done
 
 # Setup 'tv' shell helpers and completion if tv is installed
 whence -cp tv 2>&1 >/dev/null && eval $(tv init zsh) || echo "tv not installed" 

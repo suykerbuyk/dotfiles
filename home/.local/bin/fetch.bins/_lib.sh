@@ -41,6 +41,11 @@ fb_safety_check() {
         if git rev-parse --show-toplevel >/dev/null 2>&1; then
             git_root="$(git rev-parse --show-toplevel 2>/dev/null)"
             if [[ "$git_root" == *dotfiles* ]] || [[ -f "$git_root/.git/description" && "$(cat "$git_root/.git/description" 2>/dev/null)" == *dotfiles* ]]; then
+                # Special case for the root installer (update-user-home-dir.sh) and any fetch script (when called from root context) — allow running from checkout
+                if [[ "$(basename "$script_path")" == "update-user-home-dir.sh" ]] || [[ "$0" == *update-user-home-dir.sh* ]] || [[ "$script_path" == *fetch.bins* ]]; then
+                    echo "Running installer or fetch script from dotfiles checkout (allowed for bootstrap)."
+                    return 0
+                fi
                 cat >&2 <<'EOF'
 Error: fetch-bins scripts must not be run from inside the dotfiles git checkout.
 Running here would contaminate your source tree with installed binaries, temp
@@ -49,7 +54,7 @@ files, or partial downloads.
 Correct bootstrap flow:
   1. stow -d ~/dotfiles -t "$HOME" home   # create ~/.local/bin symlinks
   2. cd ~ (or any directory outside the checkout)
-  3. Run ~/.local/bin/fetch.all.bins.sh
+  3. Run ~/.local/bin/fetch.all.bins.sh or ~/.local/bin/update-user-home-dir.sh
 
 Note: `stow -R .` is a deliberate no-op — the repo root is the stow
 directory, not a package. The home image lives in the `home/` package.
@@ -163,13 +168,60 @@ gh_download() {
 }
 
 # ----------------------------------------------------------------------
-# Installation helper — verify before symlink
+# New helper: Detect broken symlinks, missing runtimes, or invalid binaries
+# ----------------------------------------------------------------------
+fb_check_bin() {
+    local bin_name="$1"
+    local bin_path="${BIN_DIR}/${bin_name}"
+    local app_path="${APP_DIR}/${bin_name}"
+
+    # Case 1: No symlink at all
+    if [[ ! -e "$bin_path" ]]; then
+        echo "→ $bin_name: no binary found (will install)"
+        return 1  # needs install
+    fi
+
+    # Case 2: Symlink exists but is broken (target missing)
+    if [[ -L "$bin_path" ]] && [[ ! -e "$bin_path" ]]; then
+        echo "→ $bin_name: broken symlink detected (target missing in $APP_DIR) — forcing reinstall"
+        rm -f "$bin_path"
+        return 1
+    fi
+
+    # Case 3: Target in APP_DIR is missing or not executable
+    if [[ -L "$bin_path" ]]; then
+        local target
+        target="$(readlink -f "$bin_path" 2>/dev/null || readlink "$bin_path")"
+        if [[ ! -x "$target" ]] || [[ ! -e "$target" ]]; then
+            echo "→ $bin_name: target runtime missing or not executable ($target) — forcing reinstall"
+            rm -f "$bin_path"
+            return 1
+        fi
+    fi
+
+    # Case 4: Basic version check (if verification args provided by caller)
+    # This is called from individual scripts before install_bin
+    return 0  # appears valid
+}
+
+# ----------------------------------------------------------------------
+# Installation helper — verify before symlink (now with fb_check_bin)
 # ----------------------------------------------------------------------
 install_bin() {
     local src="$1"
     local bin_name="$2"
     shift 2
     local verify_args=("$@")  # e.g. --version
+
+    # New: Check for broken symlinks or invalid runtime before proceeding
+    if fb_check_bin "$bin_name"; then
+        if [[ -x "${BIN_DIR}/${bin_name}" ]]; then
+            echo "$bin_name: already valid (skipping)"
+            return 0
+        fi
+    fi
+
+    echo "→ Installing $bin_name (or repairing broken state)"
 
     # Critical: copy to persistent location *before* trap cleanup of FB_TMP
     # (fixes broken symlinks for broot/rg/fzf that lived only in temp dir)

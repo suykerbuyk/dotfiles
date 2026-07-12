@@ -8,6 +8,14 @@ case $- in
 *) return ;;
 esac
 
+# Source additional bashrc snippets from ~/.config/bashrc.d/*.sh
+# This is Phase 3 of revised setup-ssh-agent-systemd.
+# The 10-ssh-agent.sh provides safe, idempotent systemd-preferring SSH agent setup.
+# Non-interactive shells are already guarded above; sourcing here keeps it non-breaking.
+for f in ~/.config/bashrc.d/*.sh; do
+    [ -r "$f" ] && . "$f"
+done
+
 # don't put duplicate lines or lines starting with space in the history.
 # See bash(1) for more options
 HISTCONTROL=ignoreboth
