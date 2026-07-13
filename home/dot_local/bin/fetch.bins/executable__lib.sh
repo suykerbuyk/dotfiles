@@ -52,15 +52,12 @@ Running here would contaminate your source tree with installed binaries, temp
 files, or partial downloads.
 
 Correct bootstrap flow:
-  1. stow -d ~/dotfiles -t "$HOME" home   # create ~/.local/bin symlinks
-  2. cd ~ (or any directory outside the checkout)
-  3. Run ~/.local/bin/fetch.all.bins.sh or ~/.local/bin/update-user-home-dir.sh
+  Run ./update-user-home-dir.sh from the dotfiles checkout. It fetches chezmoi,
+  runs `chezmoi apply` to lay down ~/.local/bin/fetch.bins/, and then invokes the
+  fetch scripts from ~ (outside the checkout), which satisfies this guard.
 
-Note: `stow -R .` is a deliberate no-op — the repo root is the stow
-directory, not a package. The home image lives in the `home/` package.
-
-If you are developing the scripts themselves, edit in ~/.local/bin/fetch.bins/
-then re-stow.
+If you are developing the scripts themselves, edit them in the checkout under
+home/dot_local/bin/fetch.bins/ and re-run the installer.
 EOF
                 exit 1
             fi
@@ -173,46 +170,36 @@ gh_download() {
 fb_check_bin() {
     local bin_name="$1"
     local bin_path="${BIN_DIR}/${bin_name}"
-    local app_path="${APP_DIR}/${bin_name}"
 
-    # Case 1: No symlink at all
-    if [[ ! -e "$bin_path" ]]; then
-        echo "→ $bin_name: no binary found (will install)"
-        return 1  # needs install
-    fi
-
-    # Case 2: Symlink exists but is broken (target missing)
-    if [[ -L "$bin_path" ]] && [[ ! -e "$bin_path" ]]; then
-        echo "→ $bin_name: broken symlink detected (target missing in $APP_DIR) — forcing reinstall"
+    # Broken symlink (dangling target). Test this BEFORE the plain -e check,
+    # since a dangling symlink is both -L true and -e false.
+    if [[ -L "$bin_path" && ! -e "$bin_path" ]]; then
+        echo "→ $bin_name: broken symlink (target missing) — will reinstall"
         rm -f "$bin_path"
         return 1
     fi
 
-    # Case 2b: Symlink target is a versioned dir that no longer exists or has wrong path (e.g. old Go 1.25.7 or incorrect /go/bin/go vs /bin/go in 1.26.5)
+    # Nothing installed at all
+    if [[ ! -e "$bin_path" ]]; then
+        echo "→ $bin_name: not installed"
+        return 1
+    fi
+
+    # Symlink resolves, but the resolved target is missing or not executable.
+    # Version-agnostic: no hardcoded version strings. A stale symlink pointing
+    # into an APP_DIR runtime that was removed or renamed (e.g. an old Go
+    # version dir) fails this check and triggers a clean reinstall.
     if [[ -L "$bin_path" ]]; then
         local target
-        target="$(readlink -f "$bin_path" 2>/dev/null || readlink "$bin_path")"
-        if [[ "$target" == *go1.25* ]] || [[ "$target" == *go1.26.5/go/bin/go* ]]; then
-            echo "→ $bin_name: broken or obsolete target ($target) — forcing reinstall of latest"
+        target="$(readlink -f "$bin_path" 2>/dev/null || true)"
+        if [[ -z "$target" || ! -x "$target" ]]; then
+            echo "→ $bin_name: symlink target missing or not executable — will reinstall"
             rm -f "$bin_path"
             return 1
         fi
     fi
 
-    # Case 3: Target in APP_DIR is missing or not executable
-    if [[ -L "$bin_path" ]]; then
-        local target
-        target="$(readlink -f "$bin_path" 2>/dev/null || readlink "$bin_path")"
-        if [[ ! -x "$target" ]] || [[ ! -e "$target" ]]; then
-            echo "→ $bin_name: target runtime missing or not executable ($target) — forcing reinstall"
-            rm -f "$bin_path"
-            return 1
-        fi
-    fi
-
-    # Case 4: Basic version check (if verification args provided by caller)
-    # This is called from individual scripts before install_bin
-    return 0  # appears valid
+    return 0  # valid
 }
 
 # ----------------------------------------------------------------------
@@ -264,63 +251,46 @@ install_bin() {
 # ----------------------------------------------------------------------
 remove_bin() {
     local bin_name="$1"
-    local bin_path="${BIN_DIR:-$HOME/.local/bin}/${bin_name}"
-    local app_path="${APP_DIR:-$HOME/.local/apps}/${bin_name}"
-
     if [[ -z "$bin_name" ]]; then
         echo "Error: remove_bin requires bin_name" >&2
         return 1
     fi
+    local bin_path="${BIN_DIR:-$HOME/.local/bin}/${bin_name}"
+    local app_path="${APP_DIR:-$HOME/.local/apps}/${bin_name}"
 
-    if ! fb_check_bin "$bin_name" 2>/dev/null; then
-        echo "$bin_name: not managed or missing — nothing to remove"
-        return 0
+    # Remove the PATH symlink (or stray file) and the APP_DIR runtime if present.
+    # Does NOT gate on fb_check_bin: a broken/half-installed tool must still be
+    # cleaned up (the old gating left the runtime behind on a broken symlink).
+    local removed=0
+    if [[ -e "$bin_path" || -L "$bin_path" ]]; then rm -f "$bin_path"; removed=1; fi
+    if [[ -e "$app_path" ]]; then rm -rf "$app_path"; removed=1; fi
+    if [[ "$removed" == 1 ]]; then
+        echo "→ removed $bin_name (symlink + $app_path)"
+    else
+        echo "$bin_name: nothing to remove"
     fi
-
-    echo "→ Removing $bin_name (safe: symlink + runtime only)"
-    rm -f "$bin_path" "$app_path"
-    echo "Removed $bin_name. Run 'chezmoi forget' if managed by chezmoi."
+    # Note: versioned runtimes (e.g. $APP_DIR/go1.26.5) are left in place; the
+    # PATH symlink is gone, so the tool is no longer active.
 }
 
-# Chezmoi-aware purge with safeguards (dry-run default, path guards, managed check)
-# For full uninstall: call on output of `chezmoi managed`
-chezmoi_purge_safe() {
-    local target="$1"
-    local mode="${2:-dry}"  # dry (default) or force
-
-    if [[ -z "$target" ]]; then
-        echo "Error: target required" >&2
-        return 1
-    fi
-
-    if [[ "$mode" == "dry" ]]; then
-        echo "DRY-RUN: chezmoi purge for $target"
-        if command -v chezmoi >/dev/null 2>&1; then
-            chezmoi purge --dry-run "$target" 2>&1 | cat
-        else
-            echo "  (mock: chezmoi not available)"
-        fi
-        return 0
-    fi
-
-    # Safeguards: only under ~, confirm managed by chezmoi
-    if [[ "$target" != ~/* && "$target" != "$HOME"/* ]] || [[ "$target" == */..* ]]; then
-        echo "Error: unsafe target (must be under ~)" >&2
-        return 1
-    fi
-
-    if command -v chezmoi >/dev/null 2>&1 && ! chezmoi managed | grep -q "^${target#"$HOME"/}"; then
-        echo "Warning: $target not managed by chezmoi — skipping purge"
-        return 0
-    fi
-
-    echo "→ Purging $target (destructive with --force)"
-    if command -v chezmoi >/dev/null 2>&1; then
-        chezmoi purge --force "$target"
-    else
-        echo "  (mock: chezmoi purge --force $target)"
-        rm -f "$target"
-    fi
+# ----------------------------------------------------------------------
+# chezmoi bootstrap — fetch the static release binary (chezmoi is pure Go, so
+# the plain linux_<arch> asset is statically linked; no libc/musl variant
+# needed). Same gh_* pattern as the other fetchers. Requires fb_init (FB_TMP).
+# ----------------------------------------------------------------------
+fetch_chezmoi() {
+    local arch tag ver url tarball
+    arch="$(fb_arch amd64)"                       # amd64 | arm64
+    tag="$(gh_latest_tag twpayne/chezmoi)"
+    ver="${tag#v}"
+    # Matches e.g. chezmoi_2.71.0_linux_amd64.tar.gz (not the -glibc_/-musl_ or
+    # armv*/i386 variants, which do not contain the exact "_linux_<arch>" token).
+    url="$(gh_asset_url twpayne/chezmoi 'endswith("_linux_" + $arch + ".tar.gz")' "$arch")"
+    tarball="${FB_TMP}/chezmoi.tar.gz"
+    gh_download "$url" "$tarball"
+    tar -xzf "$tarball" -C "$FB_TMP" chezmoi 2>/dev/null || tar -xzf "$tarball" -C "$FB_TMP"
+    install_bin "${FB_TMP}/chezmoi" chezmoi --version
+    echo "Installed chezmoi $ver (static release binary) -> ${BIN_DIR}/chezmoi"
 }
 
 # ----------------------------------------------------------------------

@@ -1,64 +1,75 @@
-# Fetch Bins & Home Bootstrap (unified update-user-home-dir.sh)
+# Home bootstrap (`update-user-home-dir.sh`) + fetch.bins
 
-This document describes the refactored and unified home bootstrap system for this dotfiles project (completed as part of the `replace-fetch-all-with-update-user-home-dir` task).
+This dotfiles repo is a **chezmoi source tree**. Dotfiles are applied with chezmoi
+(GNU Stow is no longer used), and CLI tools are fetched as pinned static binaries
+into `~/.local/`.
 
-## Overview
-- **Core Script**: `home/.local/bin/update-user-home-dir.sh` (stowed to `~/.local/bin/`)
-  - Works from both `~/dotfiles/` (stow safety, then delegate) and `~` (post-stow).
-  - Early call to `setup-ssh-agent.sh` (from completed SSH task) for full idempotent bootstrap (systemd socket, bashrc.d fragment, rc sourcing, keychain migration).
-  - Orchestrates all binary fetches via `fetch.bins/*.sh` + `_lib.sh` (jq-first ordering enforced via numeric sort, safety guard, verification, no git contamination).
-  - Flags: `--dry-run` (echo only), `--force`.
-  - Reuses `_lib.sh` patterns heavily (fb_safety_check via realpath, fb_init for dirs/temp/trap, clear output, cross-distro helpers).
-- **Thin Wrapper**: `fetch.all.bins.sh` now delegates to the new script for backward compatibility.
-- **SSH Integration**: Fully handled by the dependent `setup-ssh-agent-systemd` task (`doc/ssh-agent.md`). This script calls it early.
-- **Safety**: `_lib.sh` guard prevents running from inside the git checkout (prevents contamination). All operations are idempotent.
+## The installer: `update-user-home-dir.sh`
 
-## Directory Layout (in home/ stow package)
-- `home/.local/bin/`
-  - `update-user-home-dir.sh` (main orchestrator)
-  - `setup-ssh-agent.sh` (from SSH task)
-  - `fetch.all.bins.sh` (thin wrapper)
-  - `fetch.bins/`
-    - `_lib.sh` (core helpers, safety, GitHub download, verification, WSL gating)
-    - `01_fetch.jq.sh` (bootstrap, jq-first)
-    - `02_fetch.nvm.sh` ... `08_fetch.zed.sh`
+Lives at the **repo root only** (never applied into `~`). Run it from the checkout:
 
-- `home/.config/bashrc.d/10-ssh-agent.sh` (sourced by rc files)
-- `home/.config/systemd/user/ssh-agent.{service,socket}` (systemd activation)
-
-## Usage
 ```bash
-# From checkout (dev)
-cd ~/dotfiles
-home/.local/bin/update-user-home-dir.sh --dry-run
-
-# Normal use (after stow)
-update-user-home-dir.sh          # full bootstrap (SSH + fetches)
-update-user-home-dir.sh --dry-run # preview only
-update-user-home-dir.sh --force  # force reinstalls
-
-# SSH only (from dependency)
-setup-ssh-agent.sh [--dry-run]
+./update-user-home-dir.sh              # full bootstrap
+./update-user-home-dir.sh --dry-run    # preview every phase, no changes
+./update-user-home-dir.sh --force      # re-fetch the chezmoi binary, then apply
+./update-user-home-dir.sh --uninstall  # preview removal (add --force to actually remove)
 ```
 
-## Testing & Coverage
-- `test-update-user-home-dir.sh` (in `.local/bin/`) provides ~80%+ integration coverage:
-  - Dry-run assertions (no git pollution via `git status --porcelain`).
-  - Sourcing of SSH fragment and setup script.
-  - jq-first ordering verification.
-  - Non-interactive and idempotency checks.
-- Full smoke test: Run from both contexts; verify binaries (jq, rg, fzf, nvim, zed, etc.), SSH_AUTH_SOCK, no warnings, and clean git status.
-- Cross-distro: Tested via dry-run on Arch/WSL patterns (leverages `_lib.sh` OS/arch/W SL helpers).
+### Why the order is fetch-chezmoi → apply → fetch-tools
 
-## Key Design Decisions (from review)
-- Split SSH into separate foundational task (completed first).
-- Heavy reuse of `_lib.sh` (avoids duplication, inherits safety/stow guards).
-- Thin wrapper for `fetch.all.bins.sh` (preserves existing workflows).
-- Explicit call to `setup-ssh-agent.sh` for unified "update home" experience.
-- No live host modifications — everything in `home/` stow package.
+The repo is a chezmoi source, so script names are attribute-encoded
+(`executable_01_fetch.jq.sh`, `dot_zshrc`, `private_dot_ssh/…`) and are **not
+runnable in place** from the checkout. So the installer:
 
-See `tasks/replace-fetch-all-with-update-user-home-dir.md` for the full revised plan, `doc/ssh-agent.md` for SSH details, and `tasks/setup-ssh-agent-systemd.md` for the completed dependency.
+1. **Phase 1 — chezmoi binary.** Fetches the static Go release binary
+   (`fetch_chezmoi` in `_lib.sh`) into `~/.local/bin/chezmoi`. Skipped if already
+   present and valid (unless `--force`).
+2. **Phase 2 — `chezmoi apply --force`.** Lays down every dotfile *and* the
+   `~/.local/bin/` tooling (with decoded names) into `$HOME`. `--force` keeps it
+   non-interactive — chezmoi otherwise prompts (`overwrite/skip/…`) when a target
+   changed and would block a scripted run.
+3. **Phase 3 — tool fetchers.** Runs `~/.local/bin/fetch.bins/*.sh` (now present
+   and correctly named) in numeric order (jq first). `09_fetch.chezmoi.sh` is
+   skipped here (already done in Phase 1).
+4. **Phase 4 — ssh-agent.** Runs `~/.local/bin/setup-ssh-agent.sh` **only** when a
+   user session bus is present (`XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS`);
+   otherwise skipped cleanly (headless/WSL). The guard is inline in the installer.
 
-**Last updated**: 2026-07-12 (as part of `/vpc-execute-plan`).
+### Uninstall
 
-This system is idempotent, stow-safe, cross-distro, and provides a single command for full user home setup.
+`--uninstall` is a **preview by default**; pass `--force` to act. It removes the
+chezmoi-managed files from `~` (via `chezmoi managed`), removes fetched tools (via
+`remove_bin`), and clears chezmoi's own state/config. It never touches the repo.
+
+## `fetch.bins/` + `_lib.sh`
+
+Each `NN_fetch.<tool>.sh` sources `_lib.sh` and installs one tool as a **versioned
+static binary** under `~/.local/apps/`, symlinked into `~/.local/bin/`.
+
+Key `_lib.sh` helpers:
+- `fb_init` — dirs, temp dir with cleanup trap, and a guard against running inside
+  the git checkout.
+- `gh_latest_tag` / `gh_asset_url` / `gh_download` — GitHub release helpers.
+- `install_bin src name [verify-args]` — copy to `~/.local/apps`, verify, then
+  symlink (verification gate before the symlink is created).
+- `fb_check_bin name` — **version-agnostic** validity check: reinstalls on a broken
+  symlink or a target that is missing / not executable (no hardcoded versions).
+- `fetch_chezmoi` — fetch the chezmoi static release binary (same `gh_*` pattern).
+- `remove_bin name` — remove a tool's symlink and `~/.local/apps` runtime.
+
+### Notes on specific tools
+- **Go** (`04_fetch.go.sh`) is symlinked **in place** at `~/.local/apps/<version>/bin/go`
+  — never copied out — so `GOROOT` resolves correctly. The symlinks are re-asserted
+  on every run (self-healing across version bumps).
+- **chezmoi** uses the plain `chezmoi_<ver>_linux_<arch>.tar.gz` asset (statically
+  linked Go binary; no glibc/musl variant needed).
+
+## chezmoi source layout (`home/`)
+- Attribute-encoded names: `dot_*`, `private_*` (e.g. `private_dot_ssh` → 0700),
+  `executable_*`, `symlink_*` (a text file holding the link target), `empty_*` (so
+  0-byte files are not silently dropped).
+- `home/.chezmoiignore` keeps repo docs (`doc/`) out of `~`.
+- Config lives at `~/.config/chezmoi/`; the installer passes `--source`/`--destination`
+  explicitly, so no in-repo `.chezmoi.toml` is required.
+
+See `doc/ssh-agent.md` for the systemd user ssh-agent details.
