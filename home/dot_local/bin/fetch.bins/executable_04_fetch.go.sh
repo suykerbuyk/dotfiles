@@ -24,8 +24,21 @@ fi
 ASSET_URL="https://go.dev/dl/${VERSION}.${OS}-${ARCH}.tar.gz"
 VERSION_DIR="${APP_DIR}/${VERSION}"
 
+# Enhanced check for obsolete/broken versions (1.25.7 or incorrect /go/bin/go path in 1.26.5)
+if [[ -L "${BIN_DIR}/go" ]]; then
+    CURRENT_TARGET="$(readlink -f "${BIN_DIR}/go" 2>/dev/null || readlink "${BIN_DIR}/go")"
+    if [[ "$CURRENT_TARGET" == *go1.25* ]] || [[ "$CURRENT_TARGET" == *go1.26.5/go/bin/go* ]]; then
+        echo "Go symlink points to obsolete/broken target ($CURRENT_TARGET) — forcing reinstall of $VERSION"
+        rm -f "${BIN_DIR}/go" "${BIN_DIR}/gofmt"
+    fi
+fi
+
 if [[ -d "$VERSION_DIR" ]]; then
     echo "Go $VERSION already installed"
+    # Ensure correct symlink (must be VERSION/bin/go, not VERSION/go/bin/go)
+    ln -sfn "${VERSION_DIR}/bin/go" "${BIN_DIR}/go"
+    ln -sfn "${VERSION_DIR}/bin/gofmt" "${BIN_DIR}/gofmt"
+    echo "  Symlink repaired to correct path: ${VERSION_DIR}/bin/go"
     exit 0
 fi
 

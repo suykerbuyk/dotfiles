@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Home-image content lives in the stow package home/.
 home/.ssh/hosts/
 home/.ssh/sockets/
@@ -11,10 +10,14 @@ home/.local/share/*
 home/.local/apps/*
 
 # Repo-root artifacts: agent/vibe-palace state. Never tracked, never stowed
-# (they sit outside the home/ package, so stow cannot see them).
+# (they sit outside the home/ package, so stow cannot see them). These live in
+# the vibe-palace vault (Projects/dotfiles/), never in this repo.
 /CLAUDE.md
 /AGENTS.md
 /commit.msg
+/resume.md
+/iterations.md
+/tasks/
 /.claude/
 /.grok/
 /.vibe-palace/

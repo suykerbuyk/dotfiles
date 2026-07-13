@@ -188,6 +188,17 @@ fb_check_bin() {
         return 1
     fi
 
+    # Case 2b: Symlink target is a versioned dir that no longer exists or has wrong path (e.g. old Go 1.25.7 or incorrect /go/bin/go vs /bin/go in 1.26.5)
+    if [[ -L "$bin_path" ]]; then
+        local target
+        target="$(readlink -f "$bin_path" 2>/dev/null || readlink "$bin_path")"
+        if [[ "$target" == *go1.25* ]] || [[ "$target" == *go1.26.5/go/bin/go* ]]; then
+            echo "→ $bin_name: broken or obsolete target ($target) — forcing reinstall of latest"
+            rm -f "$bin_path"
+            return 1
+        fi
+    fi
+
     # Case 3: Target in APP_DIR is missing or not executable
     if [[ -L "$bin_path" ]]; then
         local target
@@ -244,6 +255,71 @@ install_bin() {
     echo "Installed ${bin_name} -> ${BIN_DIR}/${bin_name}"
     if [[ -x "${BIN_DIR}/${bin_name}" ]]; then
         echo "  version: $("${BIN_DIR}/${bin_name}" --version 2>&1 | head -1)"
+    fi
+}
+
+# ----------------------------------------------------------------------
+# Removal helper — surgical opposite of install_bin (for single binaries)
+# Reuses fb_check_bin, idempotent, safe (no data loss on unrelated files)
+# ----------------------------------------------------------------------
+remove_bin() {
+    local bin_name="$1"
+    local bin_path="${BIN_DIR:-$HOME/.local/bin}/${bin_name}"
+    local app_path="${APP_DIR:-$HOME/.local/apps}/${bin_name}"
+
+    if [[ -z "$bin_name" ]]; then
+        echo "Error: remove_bin requires bin_name" >&2
+        return 1
+    fi
+
+    if ! fb_check_bin "$bin_name" 2>/dev/null; then
+        echo "$bin_name: not managed or missing — nothing to remove"
+        return 0
+    fi
+
+    echo "→ Removing $bin_name (safe: symlink + runtime only)"
+    rm -f "$bin_path" "$app_path"
+    echo "Removed $bin_name. Run 'chezmoi forget' if managed by chezmoi."
+}
+
+# Chezmoi-aware purge with safeguards (dry-run default, path guards, managed check)
+# For full uninstall: call on output of `chezmoi managed`
+chezmoi_purge_safe() {
+    local target="$1"
+    local mode="${2:-dry}"  # dry (default) or force
+
+    if [[ -z "$target" ]]; then
+        echo "Error: target required" >&2
+        return 1
+    fi
+
+    if [[ "$mode" == "dry" ]]; then
+        echo "DRY-RUN: chezmoi purge for $target"
+        if command -v chezmoi >/dev/null 2>&1; then
+            chezmoi purge --dry-run "$target" 2>&1 | cat
+        else
+            echo "  (mock: chezmoi not available)"
+        fi
+        return 0
+    fi
+
+    # Safeguards: only under ~, confirm managed by chezmoi
+    if [[ "$target" != ~/* && "$target" != "$HOME"/* ]] || [[ "$target" == */..* ]]; then
+        echo "Error: unsafe target (must be under ~)" >&2
+        return 1
+    fi
+
+    if command -v chezmoi >/dev/null 2>&1 && ! chezmoi managed | grep -q "^${target#"$HOME"/}"; then
+        echo "Warning: $target not managed by chezmoi — skipping purge"
+        return 0
+    fi
+
+    echo "→ Purging $target (destructive with --force)"
+    if command -v chezmoi >/dev/null 2>&1; then
+        chezmoi purge --force "$target"
+    else
+        echo "  (mock: chezmoi purge --force $target)"
+        rm -f "$target"
     fi
 }
 
