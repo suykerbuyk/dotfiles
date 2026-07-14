@@ -70,6 +70,20 @@ Key `_lib.sh` helpers:
   those). On re-run it self-heals via `rustup update stable` (latest stable).
   Like nvm, it is a self-updating toolchain manager, so it bypasses
   `install_bin`/`fb_check_bin`; uninstall is `rustup self uninstall -y`.
+- **ninja** (`11_fetch.ninja.sh`) is a single statically-linked binary shipped in
+  a **.zip** (not a tarball), so it unzips instead of untars but is otherwise the
+  plain `install_bin` pattern. The release assets are named by platform, not the
+  usual arch tokens (`ninja-linux.zip`, `ninja-linux-aarch64.zip`,
+  `ninja-mac.zip`), so it matches the exact asset name. Requires `unzip` (fails
+  loud with an install hint if absent).
+- **protoc** (`12_fetch.protoc.sh`) ships a **.zip** bundling both `bin/protoc`
+  **and** `include/google/protobuf/*.proto` (the well-known types). protoc resolves
+  those imports relative to its own real binary (`../include`, via
+  `/proc/self/exe`), so — like Go's `GOROOT` — it is **not** copied out via
+  `install_bin`: the whole tree is extracted into `~/.local/apps/protoc-<ver>/` and
+  `~/.local/bin/protoc` is symlinked straight at `bin/protoc` so `../include` still
+  resolves. Asset arch tokens differ from `uname` (`x86_64`, `aarch_64`, `osx-*`)
+  and the asset version omits the tag's leading `v`. Also requires `unzip`.
 
 ## chezmoi source layout (`home/`)
 - Attribute-encoded names: `dot_*`, `private_*` (e.g. `private_dot_ssh` → 0700),

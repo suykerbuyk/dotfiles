@@ -68,9 +68,34 @@ if $UNINSTALL; then
         echo "(chezmoi not installed — skipping managed-file removal)"
     fi
     echo "-- fetched tools --"
-    for b in jq nvm rg go gofmt broot fzf nvim zed chezmoi; do
+    # Plain single-binary tools: remove_bin clears the ~/.local/bin symlink and
+    # the ~/.local/apps/<name> runtime. Versioned runtime dirs (go<ver>/,
+    # nvim-<ver>/, protoc-<ver>/) are intentionally left; the active symlink is
+    # gone, so the tool is no longer on PATH. Keep this list in lockstep with the
+    # fetch.bins/ scripts (every 0N_fetch.<tool>.sh must map to an entry here, a
+    # special case below, or the rust block).
+    for b in jq rg go gofmt broot fzf nvim ninja protoc chezmoi; do
         if $FORCE; then remove_bin "$b"; else echo "  would remove_bin $b"; fi
     done
+    # nvm does not fit remove_bin: its PATH artifact is ~/.local/bin/nvm.sh (not
+    # "nvm"), and NVM_DIR is ~/.local/apps/nvm. Remove both explicitly.
+    if $FORCE; then
+        rm -f "$HOME/.local/bin/nvm.sh"; rm -rf "$HOME/.local/apps/nvm"
+        echo "  removed nvm (~/.local/bin/nvm.sh + ~/.local/apps/nvm)"
+    else
+        echo "  would remove nvm (~/.local/bin/nvm.sh + ~/.local/apps/nvm)"
+    fi
+    # zed installs an app bundle (~/.local/apps/zed.app, not "zed") plus a desktop
+    # entry. remove_bin clears the ~/.local/bin/zed symlink; the bundle and the
+    # .desktop file need explicit removal.
+    if $FORCE; then
+        remove_bin zed
+        rm -rf "$HOME/.local/apps/zed.app"
+        rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/zed.desktop"
+        echo "  removed zed (zed.app bundle + desktop entry)"
+    else
+        echo "  would remove zed (~/.local/apps/zed.app + desktop entry)"
+    fi
     # Rust is not a remove_bin tool: rustup owns ~/.cargo and ~/.rustup, so let
     # it tear itself down cleanly (removes toolchains, cargo, and the homes).
     RUSTUP_BIN="$HOME/.cargo/bin/rustup"
