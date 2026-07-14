@@ -71,6 +71,12 @@ if $UNINSTALL; then
     for b in jq nvm rg go gofmt broot fzf nvim zed chezmoi; do
         if $FORCE; then remove_bin "$b"; else echo "  would remove_bin $b"; fi
     done
+    # Rust is not a remove_bin tool: rustup owns ~/.cargo and ~/.rustup, so let
+    # it tear itself down cleanly (removes toolchains, cargo, and the homes).
+    RUSTUP_BIN="$HOME/.cargo/bin/rustup"
+    if [[ -x "$RUSTUP_BIN" ]]; then
+        if $FORCE; then "$RUSTUP_BIN" self uninstall -y && echo "  removed rust (rustup self uninstall)"; else echo "  would run: rustup self uninstall -y"; fi
+    fi
     if $FORCE; then
         rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/chezmoi" "${XDG_CACHE_HOME:-$HOME/.cache}/chezmoi"
         echo "  removed chezmoi state/config (source repo left intact)"

@@ -63,6 +63,13 @@ Key `_lib.sh` helpers:
   on every run (self-healing across version bumps).
 - **chezmoi** uses the plain `chezmoi_<ver>_linux_<arch>.tar.gz` asset (statically
   linked Go binary; no glibc/musl variant needed).
+- **Rust** (`10_fetch.rust.sh`) installs via the official `rustup-init` into the
+  **standard layout** (`~/.cargo` + `~/.rustup`), not `~/.local/apps` — the shell
+  rc (`dot_zshrc`, `dot_bashrc-*`) already sources `~/.cargo/env`. Run with
+  `--no-modify-path` so rustup never edits `~/.profile`/`~/.bashrc` (chezmoi owns
+  those). On re-run it self-heals via `rustup update stable` (latest stable).
+  Like nvm, it is a self-updating toolchain manager, so it bypasses
+  `install_bin`/`fb_check_bin`; uninstall is `rustup self uninstall -y`.
 
 ## chezmoi source layout (`home/`)
 - Attribute-encoded names: `dot_*`, `private_*` (e.g. `private_dot_ssh` → 0700),

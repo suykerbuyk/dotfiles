@@ -6,7 +6,9 @@
 #
 #   ./test-update-user-home-dir.sh            # structural + light network (jq/chezmoi)
 #   ./test-update-user-home-dir.sh --go       # also exercise the 150 MB Go fetch
+#   ./test-update-user-home-dir.sh --rust     # also exercise the rustup toolchain fetch
 #   RUN_GO_FETCH=1 ./test-update-user-home-dir.sh
+#   RUN_RUST_FETCH=1 ./test-update-user-home-dir.sh
 #   ./test-update-user-home-dir.sh --no-net   # structural only (needs a chezmoi on PATH)
 #
 # Exit code is non-zero if any assertion fails.
@@ -19,10 +21,12 @@ LIB="home/dot_local/bin/fetch.bins/executable__lib.sh"
 SRC="$REPO/home"
 
 RUN_GO="${RUN_GO_FETCH:-0}"
+RUN_RUST="${RUN_RUST_FETCH:-0}"
 NET=1
 for a in "$@"; do
     case "$a" in
         --go) RUN_GO=1 ;;
+        --rust) RUN_RUST=1 ;;
         --no-net) NET=0 ;;
         --help|-h) sed -n '2,/^set /{/^set /d;s/^# \{0,1\}//p}' "$0"; exit 0 ;;
         *) echo "unknown arg: $a" >&2; exit 2 ;;
@@ -48,7 +52,7 @@ unset XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS   # simulate headless -> Phase 4 
 BIN_DIR="$SB/.local/bin"; APP_DIR="$SB/.local/apps"
 
 echo "sandbox HOME=$SB"
-echo "repo=$REPO   go-fetch=$([[ $RUN_GO == 1 ]] && echo on || echo off)   network=$([[ $NET == 1 ]] && echo on || echo off)"
+echo "repo=$REPO   go-fetch=$([[ $RUN_GO == 1 ]] && echo on || echo off)   rust-fetch=$([[ $RUN_RUST == 1 ]] && echo on || echo off)   network=$([[ $NET == 1 ]] && echo on || echo off)"
 
 # ---- locate a chezmoi binary (fetch into sandbox if needed) ----------------
 sec "setup: chezmoi binary"
@@ -188,6 +192,23 @@ if [[ $RUN_GO == 1 ]]; then
     fi
 else
     skip "go fetcher (pass --go or RUN_GO_FETCH=1 to enable)"
+fi
+
+# ===========================================================================
+if [[ $RUN_RUST == 1 ]]; then
+    sec "rust fetcher — rustup installs into ~/.cargo (standard layout)"
+    if [[ -x "$SB/.local/bin/fetch.bins/10_fetch.rust.sh" ]]; then
+        "$SB/.local/bin/fetch.bins/10_fetch.rust.sh" >/dev/null 2>&1
+        assert "cargo installed + runnable"      "\"$SB/.cargo/bin/cargo\" --version >/dev/null 2>&1"
+        assert "rustc installed + runnable"      "\"$SB/.cargo/bin/rustc\" --version >/dev/null 2>&1"
+        assert "toolchains under ~/.rustup"      "[[ -d \"$SB/.rustup/toolchains\" ]]"
+        # --no-modify-path: rustup must not scribble into shell profiles (chezmoi owns them)
+        assert "no rustup PATH edit in .profile" "! grep -qs '\\.cargo/env' \"$SB/.profile\" \"$SB/.bash_profile\" \"$SB/.bashrc\" 2>/dev/null"
+    else
+        skip "rust fetcher not present (apply group did not run)"
+    fi
+else
+    skip "rust fetcher (pass --rust or RUN_RUST_FETCH=1 to enable)"
 fi
 
 # ---- summary ---------------------------------------------------------------
