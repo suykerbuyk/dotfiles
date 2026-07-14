@@ -1,0 +1,7 @@
+# Files chezmoi should delete from the target on apply.
+#
+# The per-distro bashrc variants were merged into ~/.config/shell/ (they differed
+# by exactly one alias). Listing them here removes the stale copies from every
+# machine, not just the one the merge was done on.
+.bashrc-debian
+.bashrc-arch

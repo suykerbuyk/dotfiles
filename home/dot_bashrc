@@ -1,10 +1,9 @@
-# ~/.zshrc — thin stub. Managed by chezmoi; edit the source, not this file.
+# ~/.bashrc — thin stub. Managed by chezmoi; edit the source, not this file.
 #
-# The real configuration is ~/.config/shell/, shared with bash. Put host-local
+# The real configuration is ~/.config/shell/, shared with zsh. Put host-local
 # additions (things only this machine needs) in ~/.config/shell/local.d/*.sh —
 # that directory is not managed by chezmoi, so `chezmoi apply` will not clobber
-# them, and an installer that appends to this file WILL be clobbered. The grok
-# installer block that used to live at the bottom of this file now lives there.
+# them, and an installer that appends to this file WILL be clobbered.
 
 # If not running interactively, don't do anything.
 case $- in

@@ -138,6 +138,57 @@ if [[ -n "$CHEZMOI" ]]; then
     chz apply --force >/dev/null 2>&1
     n="$(chz status 2>/dev/null | wc -l)"
     assert "second apply leaves 'chezmoi status' empty" "[[ $n -eq 0 ]]"
+
+    # -----------------------------------------------------------------------
+    sec "shell: one source of truth, shared by bash and zsh"
+    assert_file "~/.bashrc applied"  "$SB/.bashrc"
+    assert_file "~/.zshrc applied"   "$SB/.zshrc"
+    for f in rc lib common bash zsh; do
+        assert_file "~/.config/shell/$f.sh applied" "$SB/.config/shell/$f.sh"
+    done
+    assert "rc files are thin (both source ~/.config/shell/rc.sh)" \
+        "grep -q '.config/shell/rc.sh' \"$SB/.bashrc\" && grep -q '.config/shell/rc.sh' \"$SB/.zshrc\""
+    # .chezmoiremove must clear the merged-away per-distro variants.
+    assert "stale .bashrc-debian removed" "[[ ! -e \"$SB/.bashrc-debian\" ]]"
+    assert "stale .bashrc-arch removed"   "[[ ! -e \"$SB/.bashrc-arch\" ]]"
+
+    # Probes run an interactive shell against the sandbox HOME, deliberately
+    # started from /tmp — never $HOME. That cwd is the whole point: the bug this
+    # config replaced was `source .bashrc-debian` (a RELATIVE path), which made
+    # bash load nothing at all unless it happened to start in $HOME.
+    sh_probe() { ( cd /tmp && env -i HOME="$SB" TERM=xterm PATH=/usr/bin:/bin "$1" -ic "$2" 2>/dev/null | tr -d '\r' | tail -1 ); }
+
+    for s in bash zsh; do
+        if ! command -v "$s" >/dev/null 2>&1; then
+            skip "$s probes ($s not installed)"
+            continue
+        fi
+
+        g="$(sh_probe "$s" 'printf "%s" "${GOPATH:-UNSET}"')"
+        assert "$s: rc loads from a cwd outside \$HOME" "[[ '$g' == '$SB/code/go' ]]"
+
+        d="$(sh_probe "$s" 'printf "%s" "$PATH"' | tr ':' '\n' | sort | uniq -d | grep -c . || true)"
+        assert "$s: PATH has no duplicate entries" "[[ '$d' -eq 0 ]]"
+
+        w="$(sh_probe "$s" 'command -v dotfiles-doctor >/dev/null && printf yes || printf no')"
+        assert "$s: dotfiles-doctor is defined" "[[ '$w' == yes ]]"
+
+        e="$(sh_probe "$s" 'printf "%s" "${EDITOR:-UNSET}"')"
+        assert "$s: EDITOR resolved" "[[ '$e' != UNSET ]]"
+    done
+
+    # Startup must be silent (it used to print 4 nag lines per zsh start). An
+    # interactive shell without a tty emits its own job-control/zle warnings, so
+    # this needs a pty to mean anything; skip rather than assert something weaker.
+    if command -v script >/dev/null 2>&1; then
+        for s in bash zsh; do
+            command -v "$s" >/dev/null 2>&1 || continue
+            noise="$(cd /tmp && script -qec "env -i HOME=$SB TERM=xterm PATH=/usr/bin:/bin $s -ic true" /dev/null 2>&1 | tr -d '\r\n \t')"
+            assert "$s: startup is silent" "[[ -z '$noise' ]]"
+        done
+    else
+        skip "startup-silence probes (no 'script' for a pty)"
+    fi
 else
     skip "apply/parity/idempotency (no chezmoi binary)"
 fi
@@ -187,6 +238,22 @@ if [[ $NET == 1 ]]; then
         assert "protoc well-known include/ present" "[[ -f \"\$(dirname \"\$(dirname \"\$(readlink -f \"$BIN_DIR/protoc\")\")\")/include/google/protobuf/timestamp.proto\" ]]"
     else
         skip "protoc fetcher not present (apply group did not run)"
+    fi
+
+    # starship is a small static musl tarball -> default group. It is the prompt
+    # for BOTH shells now, so a broken fetch degrades bash and zsh alike.
+    sec "network: starship fetcher (shared prompt)"
+    if [[ -x "$SB/.local/bin/fetch.bins/13_fetch.starship.sh" ]]; then
+        "$SB/.local/bin/fetch.bins/13_fetch.starship.sh" >/dev/null 2>&1
+        assert "starship installed + runnable"     "\"$BIN_DIR/starship\" --version >/dev/null 2>&1"
+        assert "starship symlink -> ~/.local/apps" "[[ \"\$(readlink -f \"$BIN_DIR/starship\")\" == \"$APP_DIR\"/* ]]"
+        # The merged rc calls `starship init <shell>` for both shells. That prints
+        # only a bootstrap line that evals --print-full-init, so assert against
+        # the full init — the code that actually installs the prompt hook.
+        assert "starship init bash emits prompt hook" "\"$BIN_DIR/starship\" init bash --print-full-init | grep -q starship_precmd"
+        assert "starship init zsh emits prompt hook"  "\"$BIN_DIR/starship\" init zsh  --print-full-init | grep -q starship_precmd"
+    else
+        skip "starship fetcher not present (apply group did not run)"
     fi
 else
     skip "network tests (--no-net)"

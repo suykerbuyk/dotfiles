@@ -83,6 +83,13 @@ Key `_lib.sh` helpers:
   usual arch tokens (`ninja-linux.zip`, `ninja-linux-aarch64.zip`,
   `ninja-mac.zip`), so it matches the exact asset name. Requires `unzip` (fails
   loud with an install hint if absent).
+- **starship** (`13_fetch.starship.sh`) is the prompt for **both** shells (see
+  `doc/shell.md`), fetched as a single static binary in a `.tar.gz` — the plain
+  `install_bin` pattern, same shape as fzf. Its asset arch tokens are Rust target
+  triples (`x86_64`, `aarch64`), **not** the `amd64`/`arm64` that `fb_arch`
+  normalizes to, so it uses `uname -m` directly. It selects the **musl** build:
+  it is fully static, and it is the only linux build published for aarch64, so one
+  selector covers both architectures.
 - **protoc** (`12_fetch.protoc.sh`) ships a **.zip** bundling both `bin/protoc`
   **and** `include/google/protobuf/*.proto` (the well-known types). protoc resolves
   those imports relative to its own real binary (`../include`, via
