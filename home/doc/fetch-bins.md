@@ -72,4 +72,5 @@ Key `_lib.sh` helpers:
 - Config lives at `~/.config/chezmoi/`; the installer passes `--source`/`--destination`
   explicitly, so no in-repo `.chezmoi.toml` is required.
 
-See `doc/ssh-agent.md` for the systemd user ssh-agent details.
+See `doc/chezmoi.md` for the source-layout encoding, apply/uninstall, and the
+migration gotchas; `doc/ssh-agent.md` for the systemd user ssh-agent details.
