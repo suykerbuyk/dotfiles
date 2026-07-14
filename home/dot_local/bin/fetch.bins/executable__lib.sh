@@ -224,7 +224,12 @@ install_bin() {
     # Critical: copy to persistent location *before* trap cleanup of FB_TMP
     # (fixes broken symlinks for broot/rg/fzf that lived only in temp dir)
     local final_src="${APP_DIR}/${bin_name}"
-    cp -a "$src" "$final_src" 2>/dev/null || cp "$src" "$final_src"  # cp -a may fail on some files
+    # A caller that already placed the binary at $final_src would otherwise make
+    # this a self-copy; cp fails ("are the same file") and set -e kills the script
+    # before the symlink below, leaving the runtime installed but nothing on PATH.
+    if [[ "$(realpath -m "$src")" != "$(realpath -m "$final_src")" ]]; then
+        cp -a "$src" "$final_src" 2>/dev/null || cp "$src" "$final_src"  # cp -a may fail on some files
+    fi
     chmod +x "$final_src"
     src="$final_src"  # update for symlink and verification
 

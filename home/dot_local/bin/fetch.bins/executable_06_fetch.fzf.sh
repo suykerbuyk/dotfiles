@@ -24,8 +24,10 @@ TARBALL="${FB_TMP}/fzf.tar.gz"
 gh_download "$ASSET_URL" "$TARBALL"
 
 tar -xzf "$TARBALL" -C "$FB_TMP"
-mv "$FB_TMP/fzf" "${APP_DIR}/${BIN_NAME}"
 
-install_bin "${APP_DIR}/${BIN_NAME}" "$BIN_NAME" --version
+# Hand install_bin the extracted binary in FB_TMP; it copies into APP_DIR itself.
+# Pre-moving it to ${APP_DIR}/${BIN_NAME} makes src and install_bin's dest the
+# same path, and its `cp` fails ("are the same file") before the symlink is made.
+install_bin "${FB_TMP}/${BIN_NAME}" "$BIN_NAME" --version
 
 echo "Installed fzf $VERSION (tarball) -> ${BIN_DIR}/${BIN_NAME}"

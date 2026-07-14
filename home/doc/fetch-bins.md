@@ -51,7 +51,14 @@ Key `_lib.sh` helpers:
   the git checkout.
 - `gh_latest_tag` / `gh_asset_url` / `gh_download` — GitHub release helpers.
 - `install_bin src name [verify-args]` — copy to `~/.local/apps`, verify, then
-  symlink (verification gate before the symlink is created).
+  symlink (verification gate before the symlink is created). **Pass a `src` that is
+  not already `~/.local/apps/<name>`** — idiomatically the extracted binary in
+  `$FB_TMP`; `install_bin` owns the copy into `~/.local/apps`. A caller that
+  pre-moves the binary to that destination itself makes the copy a self-copy, which
+  `cp` rejects; under `set -e` the script then dies *before* the symlink, leaving the
+  runtime installed and nothing on `PATH`. (This silently broke fzf. `install_bin`
+  now skips the copy when `src` and the destination resolve to the same path, but
+  the calling convention above is still the one to follow.)
 - `fb_check_bin name` — **version-agnostic** validity check: reinstalls on a broken
   symlink or a target that is missing / not executable (no hardcoded versions).
 - `fetch_chezmoi` — fetch the chezmoi static release binary (same `gh_*` pattern).
