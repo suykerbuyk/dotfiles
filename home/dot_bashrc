@@ -1,11 +1,22 @@
 # ~/.bashrc — thin stub. Managed by chezmoi; edit the source, not this file.
 #
 # The real configuration is ~/.config/shell/, shared with zsh. Put host-local
-# additions (things only this machine needs) in ~/.config/shell/local.d/*.sh —
-# that directory is not managed by chezmoi, so `chezmoi apply` will not clobber
-# them, and an installer that appends to this file WILL be clobbered.
+# additions (things only this machine needs) in ~/.config/shell/env.d/*.sh (PATH,
+# exports) or ~/.config/shell/local.d/*.sh (aliases, completions) — chezmoi does
+# not manage those directories, so `chezmoi apply` will not clobber them, and an
+# installer that appends to this file WILL be clobbered.
 
-# If not running interactively, don't do anything.
+# The environment layer runs ABOVE the interactivity gate, on purpose. PATH is not
+# an interactive concern: `make`, git hooks and `ssh host cmd` all need it. bash
+# reads ~/.bashrc (and nothing else) for the non-interactive shell it spawns for
+# `ssh host cmd`, so this line is what gets PATH into that shell.
+#
+# It is idempotent and costs nothing when a login shell already ran it via
+# ~/.bash_profile → ~/.profile.
+[ -r "$HOME/.config/shell/env.sh" ] && . "$HOME/.config/shell/env.sh"
+
+# If not running interactively, we are done — the environment is set, and nothing
+# below (aliases, prompt, completions) means anything without a terminal.
 case $- in
     *i*) ;;
     *) return ;;

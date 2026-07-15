@@ -1,0 +1,10 @@
+# ~/.profile — managed by chezmoi; edit the source, not this file.
+#
+# Read by POSIX login shells (sh, dash) and by display managers that start a
+# session through one. This may therefore run under dash, so everything it reaches
+# must be POSIX — see the constraints at the top of ~/.config/shell/env.sh.
+#
+# Environment only. bash login shells come here via ~/.bash_profile; zsh has its
+# own, better entry point in ~/.zshenv.
+
+[ -r "$HOME/.config/shell/env.sh" ] && . "$HOME/.config/shell/env.sh"

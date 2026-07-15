@@ -143,7 +143,7 @@ if [[ -n "$CHEZMOI" ]]; then
     sec "shell: one source of truth, shared by bash and zsh"
     assert_file "~/.bashrc applied"  "$SB/.bashrc"
     assert_file "~/.zshrc applied"   "$SB/.zshrc"
-    for f in rc lib common bash zsh; do
+    for f in rc env lib common bash zsh doctor; do
         assert_file "~/.config/shell/$f.sh applied" "$SB/.config/shell/$f.sh"
     done
     assert "rc files are thin (both source ~/.config/shell/rc.sh)" \
@@ -152,12 +152,80 @@ if [[ -n "$CHEZMOI" ]]; then
     assert "stale .bashrc-debian removed" "[[ ! -e \"$SB/.bashrc-debian\" ]]"
     assert "stale .bashrc-arch removed"   "[[ ! -e \"$SB/.bashrc-arch\" ]]"
 
-    # Probes run an interactive shell against the sandbox HOME, deliberately
-    # started from /tmp — never $HOME. That cwd is the whole point: the bug this
-    # config replaced was `source .bashrc-debian` (a RELATIVE path), which made
-    # bash load nothing at all unless it happened to start in $HOME.
-    sh_probe() { ( cd /tmp && env -i HOME="$SB" TERM=xterm PATH=/usr/bin:/bin "$1" -ic "$2" 2>/dev/null | tr -d '\r' | tail -1 ); }
+    # -----------------------------------------------------------------------
+    # The env layer: the entry points that carry env.sh into shells which never
+    # read an rc file. PATH is environment, not interactive state — `make`, git
+    # hooks and `ssh host cmd` need it as much as a terminal does.
+    sec "shell: env-layer entry points applied"
+    assert_file "~/.zshenv applied"           "$SB/.zshenv"
+    assert_file "~/.profile applied"          "$SB/.profile"
+    assert_file "~/.bash_profile applied"     "$SB/.bash_profile"
+    assert_file "environment.d PATH applied"  "$SB/.config/environment.d/10-dotfiles.conf"
+    # bash reads ~/.bash_profile INSTEAD of ~/.profile, so it must chain explicitly.
+    assert "~/.bash_profile sources ~/.profile" \
+        "grep -q 'HOME/.profile' \"$SB/.bash_profile\""
+    # The whole fix hinges on this ordering: env.sh must be sourced BEFORE the
+    # `case $- in *i*)` gate, or non-interactive bash returns without a PATH.
+    envline="$(grep -n 'shell/env.sh'  "$SB/.bashrc" | head -1 | cut -d: -f1)"
+    gateline="$(grep -n 'case \$- in' "$SB/.bashrc" | head -1 | cut -d: -f1)"
+    assert "~/.bashrc sources env.sh ABOVE its interactivity gate" \
+        "[[ -n '$envline' && -n '$gateline' && $envline -lt $gateline ]]"
 
+    # Probes run against the sandbox HOME, deliberately started from /tmp — never
+    # $HOME. That cwd is the whole point: the bug this config replaced was
+    # `source .bashrc-debian` (a RELATIVE path), which made bash load nothing at
+    # all unless it happened to start in $HOME.
+    #
+    # `env -i` strips the environment to nothing, which is what makes these honest:
+    # a shell that merely INHERITED a good PATH from its parent proves nothing.
+    probe()    { ( cd /tmp && env -i HOME="$SB" TERM=xterm PATH=/usr/bin:/bin "$1" "$2" "$3" 2>/dev/null | tr -d '\r' | tail -1 ); }
+    sh_probe() { probe "$1" -ic "$2"; }
+    HAS_LOCALBIN='case ":$PATH:" in *":'"$SB"'/.local/bin:"*) printf HAS ;; *) printf MISSING ;; esac'
+
+    # The headline fix. Before the env/rc split every row here was MISSING except
+    # the interactive one — including both LOGIN shells, because ~/.bashrc returns
+    # at its gate before PATH is ever set and no other file was managed at all.
+    sec "shell: PATH reaches non-interactive and login shells"
+    for spec in bash:-ic:interactive \
+                bash:-lc:login \
+                zsh:-ic:interactive \
+                zsh:-lc:login \
+                zsh:-c:non-interactive \
+                sh:-lc:login; do
+        IFS=: read -r s flag kind <<<"$spec"
+        if ! command -v "$s" >/dev/null 2>&1; then
+            skip "$s $flag probe ($s not installed)"
+            continue
+        fi
+        p="$(probe "$s" "$flag" "$HAS_LOCALBIN")"
+        assert "$s $flag ($kind): ~/.local/bin on PATH" "[[ '$p' == HAS ]]"
+
+        d="$(probe "$s" "$flag" 'printf "%s" "$PATH"' | tr ':' '\n' | sort | uniq -d | grep -c . || true)"
+        assert "$s $flag ($kind): PATH has no duplicate entries" "[[ '$d' -eq 0 ]]"
+    done
+
+    # Documented residual: a bare `bash -c` reads NO startup file — only $BASH_ENV,
+    # which we deliberately do not set, because it would fire for every
+    # #!/bin/bash script on the box. It works anyway because it INHERITS PATH from
+    # a parent that finally has one. Pin that reasoning with a test rather than a
+    # comment, so nobody "fixes" it by reaching for BASH_ENV.
+    p="$( cd /tmp && env -i HOME="$SB" PATH="$SB/.local/bin:/usr/bin:/bin" bash -c "$HAS_LOCALBIN" 2>/dev/null )"
+    assert "bash -c (non-interactive): inherits PATH from its parent" "[[ '$p' == HAS ]]"
+
+    # env.sh, not rc.sh, is what exports GOPATH — so a non-interactive zsh has it.
+    g="$(probe zsh -c 'printf "%s" "${GOPATH:-UNSET}"')"
+    assert "zsh -c: GOPATH exported by the env layer" "[[ '$g' == '$SB/code/go' ]]"
+
+    # ~/.keys is deliberately rc-layer: API keys stay confined to shells you typed
+    # into, and a cron job or git hook must not inherit them.
+    printf 'export DOTFILES_TEST_SECRET=leaked\n' > "$SB/.keys"
+    k="$(probe zsh -c 'printf "%s" "${DOTFILES_TEST_SECRET:-ABSENT}"')"
+    assert "zsh -c: ~/.keys NOT sourced (secrets stay interactive-only)" "[[ '$k' == ABSENT ]]"
+    k="$(sh_probe zsh 'printf "%s" "${DOTFILES_TEST_SECRET:-ABSENT}"')"
+    assert "zsh -ic: ~/.keys IS sourced" "[[ '$k' == leaked ]]"
+    rm -f "$SB/.keys"
+
+    sec "shell: rc layer still intact (regression guard)"
     for s in bash zsh; do
         if ! command -v "$s" >/dev/null 2>&1; then
             skip "$s probes ($s not installed)"
@@ -167,9 +235,6 @@ if [[ -n "$CHEZMOI" ]]; then
         g="$(sh_probe "$s" 'printf "%s" "${GOPATH:-UNSET}"')"
         assert "$s: rc loads from a cwd outside \$HOME" "[[ '$g' == '$SB/code/go' ]]"
 
-        d="$(sh_probe "$s" 'printf "%s" "$PATH"' | tr ':' '\n' | sort | uniq -d | grep -c . || true)"
-        assert "$s: PATH has no duplicate entries" "[[ '$d' -eq 0 ]]"
-
         w="$(sh_probe "$s" 'command -v dotfiles-doctor >/dev/null && printf yes || printf no')"
         assert "$s: dotfiles-doctor is defined" "[[ '$w' == yes ]]"
 
@@ -177,14 +242,25 @@ if [[ -n "$CHEZMOI" ]]; then
         assert "$s: EDITOR resolved" "[[ '$e' != UNSET ]]"
     done
 
-    # Startup must be silent (it used to print 4 nag lines per zsh start). An
-    # interactive shell without a tty emits its own job-control/zle warnings, so
-    # this needs a pty to mean anything; skip rather than assert something weaker.
+    # ~/.zshenv runs for EVERY zsh — including the one scp, sftp and rsync spawn on
+    # the remote side. Those parse the stream as protocol, so a single stray
+    # character printed from the env layer breaks file transfer outright. This is
+    # the highest-consequence assertion in the file.
+    sec "shell: startup is silent"
+    for s in bash zsh; do
+        command -v "$s" >/dev/null 2>&1 || continue
+        noise="$( cd /tmp && env -i HOME="$SB" PATH=/usr/bin:/bin "$s" -c true 2>&1 | tr -d '\r\n \t' )"
+        assert "$s -c: non-interactive startup emits nothing (scp/rsync safe)" "[[ -z '$noise' ]]"
+    done
+
+    # Interactive startup used to print 4 nag lines per zsh start. An interactive
+    # shell without a tty emits its own job-control/zle warnings, so this needs a
+    # pty to mean anything; skip rather than assert something weaker.
     if command -v script >/dev/null 2>&1; then
         for s in bash zsh; do
             command -v "$s" >/dev/null 2>&1 || continue
             noise="$(cd /tmp && script -qec "env -i HOME=$SB TERM=xterm PATH=/usr/bin:/bin $s -ic true" /dev/null 2>&1 | tr -d '\r\n \t')"
-            assert "$s: startup is silent" "[[ -z '$noise' ]]"
+            assert "$s: interactive startup is silent" "[[ -z '$noise' ]]"
         done
     else
         skip "startup-silence probes (no 'script' for a pty)"

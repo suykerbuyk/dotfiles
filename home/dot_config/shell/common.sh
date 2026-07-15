@@ -1,42 +1,21 @@
-# common.sh — the single source of truth for shell configuration.
+# common.sh — the shared INTERACTIVE configuration (rc layer).
 #
-# Sourced by both bash and zsh (after lib.sh). If a setting is not *genuinely*
-# shell-specific, it belongs here and nowhere else. The shell-specific deltas are
-# deliberately small: see bash.sh and zsh.sh.
+# Sourced by both bash and zsh from rc.sh, which only interactive shells reach.
+# If a setting is not *genuinely* shell-specific, it belongs here rather than in
+# bash.sh / zsh.sh — those deltas are deliberately small.
+#
+# What does NOT belong here: PATH and exported environment. Those are the env
+# layer (env.sh), because a non-interactive shell never gets this far, and a
+# `make` recipe or a git hook needs PATH just as much as a terminal does. That
+# split is the whole point; see doc/shell.md. If you are about to add an `export`
+# to this file, ask whether a script spawned by a tool would want it — if so, it
+# goes in env.sh.
 #
 # $DOTFILES_SHELL is "bash" or "zsh" — set by rc.sh before this file is sourced.
 
-# --- environment --------------------------------------------------------------
-export GOPATH="$HOME/code/go"
-[ -d "$GOPATH" ] || mkdir -p "$GOPATH/bin"
-
-export XZ_OPT="-9 -T0"
-export CLAUDE_VAULT="$HOME/obsidian/ObsMeetings"
-
-# --- PATH ---------------------------------------------------------------------
-# path_prepend skips directories that do not exist and never adds a duplicate,
-# so this is safe to re-source. Lowest priority first: each prepend pushes the
-# previous entries down.
-path_prepend "$HOME/.local/bin"
-path_prepend "$HOME/.cargo/bin"
-path_prepend "$HOME/.local/go/bin"
-path_prepend "$GOPATH/bin"
-
-# --- editor -------------------------------------------------------------------
-for _e in nvim vim vi; do
-    if have "$_e"; then
-        EDITOR="$(command -v "$_e")"
-        break
-    fi
-done
-if [ -n "${EDITOR:-}" ]; then
-    export EDITOR
-    export VISUAL="$EDITOR"
-    export SUDO_EDITOR="$EDITOR"
-fi
-unset _e
-
 # --- secrets ------------------------------------------------------------------
+# Deliberately rc-layer, not env: API keys stay confined to shells you typed into.
+# `bash -c`, cron and git hooks do not get them.
 [ -r "$HOME/.keys" ] && . "$HOME/.keys"
 
 # --- aliases ------------------------------------------------------------------
@@ -76,16 +55,12 @@ _br="$HOME/.config/broot/launcher/$DOTFILES_SHELL/br"
 unset _br
 
 # --- nvm ----------------------------------------------------------------------
+# $NVM_DIR is exported by env.sh (it is environment). Sourcing nvm.sh is not: it
+# defines the `nvm` shell function and costs ~150 ms, which would be a tax on
+# every `zsh -c` in every loop. So it stays here, in the interactive layer.
 # (nvm's completion script is bash-only; bash.sh sources it.)
-if [ -d "$HOME/.local/apps/nvm" ]; then
-    export NVM_DIR="$HOME/.local/apps/nvm"
-    [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-fi
-
-# --- ROCm ---------------------------------------------------------------------
-if [ -d /opt/rocm/bin ]; then
-    export ROCM_PATH=/opt/rocm
-    path_prepend "$ROCM_PATH/bin"
+if [ -n "${NVM_DIR:-}" ] && [ -s "$NVM_DIR/nvm.sh" ]; then
+    . "$NVM_DIR/nvm.sh"
 fi
 
 return 0 2>/dev/null || true

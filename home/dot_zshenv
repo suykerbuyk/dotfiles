@@ -1,0 +1,13 @@
+# ~/.zshenv — managed by chezmoi; edit the source, not this file.
+#
+# zsh reads this for EVERY invocation: interactive, `zsh -c`, `ssh host cmd`, and
+# scripts. That is exactly why the environment layer hangs off it — PATH belongs
+# to every shell, not only to the ones you typed into.
+#
+# Keep it silent. A single character printed from here breaks scp, sftp and rsync,
+# which parse the stream and choke on anything that is not protocol.
+#
+# Interactive configuration does NOT go here — it goes in ~/.zshrc, which zsh only
+# reads for interactive shells.
+
+[ -r "$HOME/.config/shell/env.sh" ] && . "$HOME/.config/shell/env.sh"

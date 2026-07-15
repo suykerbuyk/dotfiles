@@ -1,0 +1,17 @@
+# ~/.bash_profile — managed by chezmoi; edit the source, not this file.
+#
+# bash reads ~/.bash_profile for login shells and, if it exists, reads it INSTEAD
+# of ~/.profile. So this file has to source ~/.profile explicitly — otherwise the
+# environment layer is skipped for every login shell.
+#
+# That was the bug: the stock file here was `[[ -f ~/.bashrc ]] && . ~/.bashrc`,
+# and ~/.bashrc returns immediately for a non-interactive shell. A login shell that
+# was not also interactive (`bash -lc`, a display manager, `su -l`) therefore got no
+# PATH at all, and everything it spawned inherited the hole.
+
+# Environment: PATH and exports, for every login shell.
+[ -r "$HOME/.profile" ] && . "$HOME/.profile"
+
+# Interactive setup. ~/.bashrc has its own interactivity gate, so a non-interactive
+# login shell stops there and keeps just the environment.
+[ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"
