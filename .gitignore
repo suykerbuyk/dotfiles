@@ -30,3 +30,9 @@ home/dot_local/apps/
 # would be replicated onto every machine by `chezmoi apply`. The anchored rule
 # above only covers repo root, so ignore .vibe-palace/ at ANY depth as well.
 .vibe-palace/
+
+# age PRIVATE identity — NEVER commit. The encrypted_*.age secret blobs ARE
+# committed (they are ciphertext, useless without the key); the key that decrypts
+# them is not. It lives at ~/.config/chezmoi/key.txt (0600) and in 1Password
+# ("dotfiles age key"). Guard against any stray copy at any depth.
+key.txt

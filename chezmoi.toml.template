@@ -1,0 +1,14 @@
+# chezmoi configuration TEMPLATE.
+#
+# update-user-home-dir.sh renders this into ~/.config/chezmoi/chezmoi.toml,
+# substituting __SOURCE_DIR__ (this checkout's home/) and __HOME__ (your $HOME).
+#
+# The age `recipient` below is a PUBLIC key — it is safe to commit and to publish.
+# The matching PRIVATE identity lives ONLY at ~/.config/chezmoi/key.txt (mode
+# 0600, gitignored, mirrored in 1Password as "dotfiles age key") and NEVER in
+# this repo. See home/doc/secrets.md for the full model and how to rotate keys.
+sourceDir = "__SOURCE_DIR__"
+encryption = "age"
+[age]
+    identity = "__HOME__/.config/chezmoi/key.txt"
+    recipient = "age12lrqv9rnzg550hyzym257s9r6e70uh8n5n7s06qgfxzj3wkhcvvs6qcyd7"

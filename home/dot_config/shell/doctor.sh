@@ -99,6 +99,17 @@ dotfiles-doctor() {
         printf '  %-9s %-5s system package, not provisioned by this repo (/opt/rocm)\n' 'rocm' 'n/a'
     fi
 
+    # Secrets: ~/.keys is age-encrypted in the repo and decrypted here by chezmoi.
+    # Report the three states so the fix is always one glance away (see dotfiles-keys).
+    if [ -r "$HOME/.keys" ]; then
+        printf '  %-9s %-5s %s\n' 'keys' 'ok' \
+            "$HOME/.keys (mode $(stat -c %a "$HOME/.keys" 2>/dev/null), $(grep -cE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=' "$HOME/.keys" 2>/dev/null || echo 0) entries) — edit: dotfiles-keys"
+    elif [ -r "$HOME/.config/chezmoi/key.txt" ]; then
+        printf '  %-9s %-5s %s\n' 'keys' 'MISS' 'age key present but ~/.keys not applied — run: dotfiles-keys status'
+    else
+        printf '  %-9s %-5s %s\n' 'keys' 'n/a' 'no age identity — restore it: dotfiles-keys get-key'
+    fi
+
     unset _cmd _stem _note _inst
     return 0
 }

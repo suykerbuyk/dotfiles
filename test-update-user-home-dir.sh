@@ -95,14 +95,27 @@ decode_path() {  # encoded rel (under home/) -> target rel (under ~)
 # ===========================================================================
 if [[ -n "$CHEZMOI" ]]; then
     sec "apply: chezmoi source -> sandbox HOME"
+    # The source contains an age-encrypted secret (encrypted_private_dot_keys.age).
+    # chezmoi needs the encryption METHOD configured just to READ such a source —
+    # even though the sandbox has no key, so .chezmoiignore will drop ~/.keys. Render
+    # the real template (as the installer does) so apply mirrors a keyless machine.
+    mkdir -p "$SB/.config/chezmoi"
+    sed -e "s|__SOURCE_DIR__|$SRC|g" -e "s|__HOME__|$SB|g" chezmoi.toml.template > "$SB/.config/chezmoi/chezmoi.toml"
     if chz apply --force; then ok "chezmoi apply --force succeeded"; else bad "chezmoi apply failed"; fi
 
     sec "parity: every tracked source entry reproduced in ~"
-    miss=0; diffc=0; modec=0; symc=0; excl=0; okc=0
+    miss=0; diffc=0; modec=0; symc=0; excl=0; okc=0; leak=0
     while IFS=$'\t' read -r meta path; do
         mode="${meta%% *}"; rel="${path#home/}"
         base="$(basename "$rel")"
         [[ "$base" == .chezmoi* ]] && continue          # chezmoi meta, not applied
+        # age-encrypted secrets are applied ONLY when ~/.config/chezmoi/key.txt
+        # exists (.chezmoiignore drops them otherwise). The sandbox has no key, so
+        # the decrypted target must NOT appear — and never as plaintext, key or no.
+        if [[ "$base" == encrypted_* ]]; then
+            [[ -e "$SB/.keys" ]] && { echo "    LEAK .keys (secret materialized without a key!)"; leak=$((leak+1)); }
+            continue
+        fi
         target="$(decode_path "$rel")"; tgt="$SB/$target"
         # exclusions: doc/ is .chezmoiignore'd
         if [[ "$target" == doc/* ]]; then
@@ -126,6 +139,7 @@ if [[ -n "$CHEZMOI" ]]; then
     assert "parity: symlinks reproduced"       "[[ $symc  -eq 0 ]]"
     assert "parity: exec bits preserved"       "[[ $modec -eq 0 ]]"
     assert "parity: doc/ excluded from ~"      "[[ $excl  -eq 0 ]]"
+    assert "parity: no plaintext secret leak"  "[[ $leak  -eq 0 ]]"
     echo "    ($okc entries verified)"
 
     sec "attributes: private + empty encodings"
@@ -316,13 +330,17 @@ after="$(git -C "$REPO" status --porcelain)"
 assert "dry-run exits 0"                     "[[ $rc -eq 0 ]]"
 assert "dry-run reaches Phase 1 (jq FIRST)"  "grep -q 'Phase 1: jq' <<<\"\$out\""
 assert "dry-run reaches Phase 2 (chezmoi)"   "grep -q 'Phase 2: chezmoi binary' <<<\"\$out\""
-assert "dry-run reaches Phase 3 (apply)"     "grep -q 'Phase 3: chezmoi apply' <<<\"\$out\""
-assert "dry-run reaches Phase 4 (fetchers)"  "grep -q 'Phase 4: tool fetchers' <<<\"\$out\""
-assert "dry-run reaches Phase 5 (ssh-agent)" "grep -q 'Phase 5: ssh-agent' <<<\"\$out\""
-# jq must be bootstrapped BEFORE chezmoi — the whole fresh-machine fix. Compare
-# the line positions in the ordered output, not just that both appear.
-assert "jq phase precedes chezmoi phase"     "[[ \$(grep -n 'Phase 1: jq' <<<\"\$out\" | cut -d: -f1) -lt \$(grep -n 'Phase 2: chezmoi binary' <<<\"\$out\" | cut -d: -f1) ]]"
-assert "Phase 5 skips without a session bus" "grep -q 'skipped: no user session bus' <<<\"\$out\""
+assert "dry-run reaches Phase 3 (secrets)"   "grep -q 'Phase 3: secrets bootstrap' <<<\"\$out\""
+assert "dry-run reaches Phase 4 (apply)"     "grep -q 'Phase 4: chezmoi apply' <<<\"\$out\""
+assert "dry-run reaches Phase 5 (fetchers)"  "grep -q 'Phase 5: tool fetchers' <<<\"\$out\""
+assert "dry-run reaches Phase 6 (ssh-agent)" "grep -q 'Phase 6: ssh-agent' <<<\"\$out\""
+assert "dry-run shows the secrets nudge"     "grep -q 'Secrets (~/.keys)' <<<\"\$out\""
+# jq before chezmoi, and secrets (age) before apply — the two bootstrap orderings
+# the fresh-machine fixes depend on. Compare line positions in the ordered output.
+_pos() { grep -n "$1" <<<"$out" | head -1 | cut -d: -f1; }
+assert "jq phase precedes chezmoi phase"      "[[ \$(_pos 'Phase 1: jq') -lt \$(_pos 'Phase 2: chezmoi binary') ]]"
+assert "age/secrets phase precedes apply"     "[[ \$(_pos 'Phase 3: secrets') -lt \$(_pos 'Phase 4: chezmoi apply') ]]"
+assert "Phase 6 skips without a session bus" "grep -q 'skipped: no user session bus' <<<\"\$out\""
 assert "no repo contamination from dry-run"  "[[ \"\$before\" == \"\$after\" ]]"
 
 # ===========================================================================
@@ -340,6 +358,35 @@ pth="$( . "$LIB" >/dev/null 2>&1; PATH=/usr/bin:/bin; fb_init >/dev/null 2>&1; p
 assert "fb_init prepends \$BIN_DIR to PATH"        "case \":\$pth:\" in *\":$BIN_DIR:\"*) true ;; *) false ;; esac"
 # The installer bootstraps jq in Phase 1 and skips 01_fetch.jq.sh in the loop.
 assert "installer skips 01_fetch.jq.sh in fetcher loop" "grep -q '01_fetch.jq.sh ]] && continue' update-user-home-dir.sh"
+
+# ===========================================================================
+sec "secrets: age encryption is wired public-repo-safe"
+AGEBLOB="home/encrypted_private_dot_keys.age"
+# The encrypted secrets blob (working tree = what gets committed) is CIPHERTEXT.
+assert "encrypted secrets blob present"            "[[ -f $AGEBLOB ]]"
+assert "blob is age ciphertext (armored header)"   "head -1 $AGEBLOB 2>/dev/null | grep -q 'BEGIN AGE ENCRYPTED FILE'"
+assert "blob leaks no var names / key material"    "! grep -qiE 'API_KEY|ANTHROPIC|OPENAI|GEMINI|XAI|HF_TOKEN|sk-' $AGEBLOB"
+# The private identity must never be tracked, and must be ignored at any depth.
+assert "age identity (key.txt) is gitignored"      "git check-ignore key.txt >/dev/null"
+assert "no key.txt tracked anywhere"               "! git ls-files | grep -q 'key.txt'"
+# Config template: PUBLIC recipient committed, machine-specific bits as placeholders.
+assert "chezmoi.toml.template present"              "[[ -f chezmoi.toml.template ]]"
+assert "template carries a public age recipient"    "grep -qE 'recipient = \"age1[0-9a-z]+\"' chezmoi.toml.template"
+assert "template keeps __SOURCE_DIR__ placeholder"  "grep -q '__SOURCE_DIR__' chezmoi.toml.template"
+assert "template sets encryption = age"             "grep -q 'encryption = \"age\"' chezmoi.toml.template"
+# fetch_age bootstrap helper installs BOTH age and age-keygen.
+agebody="$( . "$LIB" >/dev/null 2>&1; declare -f fetch_age )"
+assert "fetch_age defined in _lib.sh"               "[[ -n \"\$agebody\" ]]"
+assert "fetch_age installs age AND age-keygen"      "grep -q 'age-keygen' <<<\"\$agebody\""
+# Installer wiring: secrets phase exists, is before apply, and the loop skips age.
+assert "installer has the secrets (age) phase"      "grep -q 'Phase 3: secrets bootstrap (age)' update-user-home-dir.sh"
+assert "installer skips 14_fetch.age.sh in loop"    "grep -q '14_fetch.age.sh ]] && continue' update-user-home-dir.sh"
+assert "config rendered before the apply phase"     "[[ \$(grep -n 'chezmoi.toml.template' update-user-home-dir.sh | head -1 | cut -d: -f1) -lt \$(grep -n 'Phase 4: chezmoi apply' update-user-home-dir.sh | cut -d: -f1) ]]"
+# Keyless machines apply cleanly: .chezmoiignore drops .keys when no identity.
+assert ".chezmoiignore guards .keys on missing key" "grep -q 'key.txt' home/.chezmoiignore"
+# The memorable helper.
+assert "dotfiles-keys helper present"               "[[ -f home/dot_local/bin/executable_dotfiles-keys ]]"
+assert "dotfiles-keys is valid bash"                "bash -n home/dot_local/bin/executable_dotfiles-keys"
 
 # ===========================================================================
 if [[ $NET == 1 ]]; then
@@ -368,6 +415,36 @@ if [[ $NET == 1 ]]; then
       remove_bin jq >/dev/null 2>&1
       fb_init; fetch_jq >/dev/null 2>&1 )
     assert "fetch_jq installed a working jq with jq poisoned" "\"$BIN_DIR/jq\" --version >/dev/null 2>&1"
+
+    # age is a bootstrap tool (chezmoi decrypts ~/.keys with it during apply).
+    # Prove fetch_age installs BOTH binaries, then drive a full encrypt -> apply
+    # -> 0600 round-trip with a THROWAWAY key. (The committed blob is encrypted to
+    # the real key, which the sandbox never has, so we mint our own here.)
+    sec "network: age bootstrap + chezmoi encrypt/apply round-trip"
+    ( set +e; . "$LIB" >/dev/null 2>&1; remove_bin age >/dev/null 2>&1; remove_bin age-keygen >/dev/null 2>&1; fb_init; fetch_age >/dev/null 2>&1 )
+    assert "fetch_age installed a working age"     "\"$BIN_DIR/age\" --version >/dev/null 2>&1"
+    assert "fetch_age installed age-keygen"        "[[ -x \"$BIN_DIR/age-keygen\" ]]"
+    if [[ -x "$BIN_DIR/age" && -x "$CHEZMOI" ]]; then
+        RT="$(mktemp -d)"; mkdir -p "$RT/src" "$RT/dst/.config/chezmoi"
+        rcpt="$("$BIN_DIR/age-keygen" -o "$RT/dst/.config/chezmoi/key.txt" 2>&1 | grep -oE 'age1[0-9a-z]+')"
+        chmod 600 "$RT/dst/.config/chezmoi/key.txt"
+        # Config must live at HOME/.config/chezmoi (not passed via --config, whose
+        # directory chezmoi treats as "protected" and refuses to add files beneath).
+        printf 'encryption = "age"\n[age]\n  identity = "%s/dst/.config/chezmoi/key.txt"\n  recipient = "%s"\n' "$RT" "$rcpt" > "$RT/dst/.config/chezmoi/chezmoi.toml"
+        printf 'export RT_SECRET=hunter2\n' > "$RT/dst/.keys"; chmod 600 "$RT/dst/.keys"
+        cz() { HOME="$RT/dst" XDG_CONFIG_HOME="$RT/dst/.config" PATH="$BIN_DIR:$PATH" "$CHEZMOI" --source "$RT/src" --destination "$RT/dst" --no-tty "$@"; }
+        cz add --encrypt "$RT/dst/.keys" >/dev/null 2>&1
+        assert "round-trip: source blob is ciphertext"     "head -1 \"$RT/src/encrypted_private_dot_keys.age\" 2>/dev/null | grep -q 'BEGIN AGE ENCRYPTED FILE'"
+        assert "round-trip: blob hides the secret value"   "[[ -s \"$RT/src/encrypted_private_dot_keys.age\" ]] && ! grep -q 'hunter2' \"$RT/src/encrypted_private_dot_keys.age\""
+        rm -f "$RT/dst/.keys"
+        cz apply --force "$RT/dst/.keys" >/dev/null 2>&1
+        assert "round-trip: apply re-materialized ~/.keys" "[[ -r \"$RT/dst/.keys\" ]]"
+        assert "round-trip: applied secret is mode 0600"   "[[ \"\$(stat -c %a \"$RT/dst/.keys\" 2>/dev/null)\" == 600 ]]"
+        assert "round-trip: decrypted content is correct"  "grep -q 'RT_SECRET=hunter2' \"$RT/dst/.keys\""
+        rm -rf "$RT"
+    else
+        skip "chezmoi+age round-trip (age or chezmoi unavailable)"
+    fi
 
     # ninja + protoc are small, fast release-zip fetchers -> default group.
     sec "network: zip-based fetchers (ninja, protoc)"

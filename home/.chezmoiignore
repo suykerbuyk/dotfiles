@@ -1,1 +1,7 @@
 doc
+{{- /* Drop ~/.keys on a machine with no age identity, so a keyless clone (or a
+       brand-new box before the key is placed) applies cleanly instead of failing
+       to decrypt. Once ~/.config/chezmoi/key.txt is in place, .keys applies. */}}
+{{- if not (lstat (joinPath .chezmoi.homeDir ".config/chezmoi/key.txt")) }}
+.keys
+{{- end }}

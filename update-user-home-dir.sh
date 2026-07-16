@@ -10,11 +10,14 @@
 #      every other fetcher parse GitHub release JSON with jq, and ~/.local/bin
 #      is not yet on the running shell's PATH (fb_init adds it for this run).
 #   2. Fetch the chezmoi binary (static Go release; uses the jq from step 1).
-#   3. chezmoi apply  -> lays down all dotfiles AND ~/.local/bin tooling
-#      (with decoded names) into $HOME.
-#   4. Run the remaining tool fetchers from ~/.local/bin/fetch.bins (jq and
-#      chezmoi already bootstrapped above, so both are skipped there).
-#   5. Set up the systemd user ssh-agent (only when a session bus is present).
+#   3. Secrets bootstrap (age): fetch age, render the chezmoi config, and fetch
+#      the age identity from 1Password (or guide you to place it). age must exist
+#      before apply so chezmoi can decrypt the encrypted ~/.keys.
+#   4. chezmoi apply  -> lays down all dotfiles AND ~/.local/bin tooling (with
+#      decoded names) into $HOME, decrypting ~/.keys when the key is present.
+#   5. Run the remaining tool fetchers from ~/.local/bin/fetch.bins (jq, chezmoi
+#      and age already bootstrapped above, so all three are skipped there).
+#   6. Set up the systemd user ssh-agent (only when a session bus is present).
 #
 # Usage:
 #   ./update-user-home-dir.sh [--dry-run] [--force] [--uninstall]
@@ -78,7 +81,7 @@ if $UNINSTALL; then
     # gone, so the tool is no longer on PATH. Keep this list in lockstep with the
     # fetch.bins/ scripts (every 0N_fetch.<tool>.sh must map to an entry here, a
     # special case below, or the rust block).
-    for b in jq rg go gofmt broot fzf nvim ninja protoc starship chezmoi; do
+    for b in jq rg go gofmt broot fzf nvim ninja protoc starship chezmoi age age-keygen; do
         if $FORCE; then remove_bin "$b"; else echo "  would remove_bin $b"; fi
     done
     # nvm does not fit remove_bin: its PATH artifact is ~/.local/bin/nvm.sh (not
@@ -147,9 +150,59 @@ fi
 echo
 
 # ---------------------------------------------------------------------------
-# 3. Apply dotfiles + tooling into ~   (--force => never blocks on prompts)
+# 3. Secrets bootstrap (age). age must exist BEFORE apply (Phase 4) so chezmoi
+#    can decrypt the encrypted ~/.keys — same pre-apply logic as jq/chezmoi.
+#    Then render the chezmoi config (public recipient + sourceDir) and make sure
+#    the age identity is present, fetching it from 1Password when possible. A
+#    machine with no identity still applies cleanly: .chezmoiignore drops ~/.keys
+#    when the key is absent, so this never blocks the rest of the bootstrap.
 # ---------------------------------------------------------------------------
-echo "=== Phase 3: chezmoi apply ==="
+echo "=== Phase 3: secrets bootstrap (age) ==="
+AGE_KEY="$HOME/.config/chezmoi/key.txt"
+CHEZMOI_CFG="$HOME/.config/chezmoi/chezmoi.toml"
+CFG_TEMPLATE="$PWD/chezmoi.toml.template"
+OP_ITEM="dotfiles age key"; OP_VAULT="Personal"
+if $DRY_RUN; then
+    echo "DRY-RUN: fetch_age (if missing); render $CFG_TEMPLATE -> $CHEZMOI_CFG"
+    [[ -r "$AGE_KEY" ]] && echo "DRY-RUN: age identity present ($AGE_KEY)" \
+                        || echo "DRY-RUN: age identity MISSING — would fetch from 1Password (op) or prompt"
+else
+    # age binary (bootstrap tool; skipped in Phase 5's fetcher loop)
+    if ! $FORCE && fb_check_bin age && [[ -x "${BIN_DIR}/age" ]]; then
+        echo "age present: $("${BIN_DIR}/age" --version)"
+    else
+        $FORCE && { remove_bin age; remove_bin age-keygen; }
+        fetch_age
+    fi
+    # Render the chezmoi config (encryption settings + sourceDir). Recipient is public.
+    if [[ -r "$CFG_TEMPLATE" ]]; then
+        mkdir -p "$(dirname "$CHEZMOI_CFG")"
+        sed -e "s|__SOURCE_DIR__|$SRC|g" -e "s|__HOME__|$HOME|g" "$CFG_TEMPLATE" > "$CHEZMOI_CFG"
+        echo "Rendered chezmoi config -> $CHEZMOI_CFG"
+    else
+        echo "warning: $CFG_TEMPLATE not found — encryption not configured" >&2
+    fi
+    # age identity: present already, else fetch from 1Password, else guide the user.
+    if [[ -r "$AGE_KEY" ]]; then
+        echo "age identity present: $AGE_KEY"
+    elif command -v op >/dev/null 2>&1 && ( umask 077; mkdir -p "$(dirname "$AGE_KEY")"
+             op document get "$OP_ITEM" --vault "$OP_VAULT" --out-file "$AGE_KEY" 2>/dev/null ); then
+        chmod 600 "$AGE_KEY"
+        echo "Fetched age identity from 1Password ('$OP_ITEM') -> $AGE_KEY"
+    else
+        rm -f "$AGE_KEY" 2>/dev/null || true   # clear any partial fetch
+        echo "  NOTE: no age identity and 1Password unavailable — ~/.keys will be skipped."
+        echo "        Place the key, then re-run this script:"
+        echo "          op document get '$OP_ITEM' --vault $OP_VAULT --out-file $AGE_KEY && chmod 600 $AGE_KEY"
+        echo "        (or paste it from the 1Password app)."
+    fi
+fi
+echo
+
+# ---------------------------------------------------------------------------
+# 4. Apply dotfiles + tooling into ~   (--force => never blocks on prompts)
+# ---------------------------------------------------------------------------
+echo "=== Phase 4: chezmoi apply ==="
 if $DRY_RUN; then
     if [[ -x "$CHEZMOI" ]]; then
         chezmoi_cmd apply --dry-run --force || true
@@ -163,10 +216,10 @@ fi
 echo
 
 # ---------------------------------------------------------------------------
-# 4. Fetch remaining tools, from ~. jq (Phase 1) and chezmoi (Phase 2) are
-#    already bootstrapped, so both are skipped in the loop below.
+# 5. Fetch remaining tools, from ~. jq (Phase 1), chezmoi (Phase 2) and age
+#    (Phase 3) are already bootstrapped, so all three are skipped in the loop.
 # ---------------------------------------------------------------------------
-echo "=== Phase 4: tool fetchers ==="
+echo "=== Phase 5: tool fetchers ==="
 FBD="$HOME/.local/bin/fetch.bins"
 if $DRY_RUN && [[ ! -d "$FBD" ]]; then
     echo "DRY-RUN: would run $SRC fetchers from $FBD after apply"
@@ -175,6 +228,7 @@ elif [[ -d "$FBD" ]]; then
     for s in "${scripts[@]}"; do
         [[ "$s" == 01_fetch.jq.sh ]] && continue        # already bootstrapped in Phase 1
         [[ "$s" == 09_fetch.chezmoi.sh ]] && continue   # already bootstrapped in Phase 2
+        [[ "$s" == 14_fetch.age.sh ]] && continue       # already bootstrapped in Phase 3
         echo "→ $s"
         if $DRY_RUN; then
             echo "  DRY-RUN: $FBD/$s"
@@ -188,11 +242,11 @@ fi
 echo
 
 # ---------------------------------------------------------------------------
-# 5. systemd user ssh-agent — only when a user session bus exists.
+# 6. systemd user ssh-agent — only when a user session bus exists.
 #    (This is the C2 fix: the dbus guard is inline here, not an undefined
 #    function, so the SSH phase actually runs on a normal desktop session.)
 # ---------------------------------------------------------------------------
-echo "=== Phase 5: ssh-agent (systemd user) ==="
+echo "=== Phase 6: ssh-agent (systemd user) ==="
 SSH_SETUP="$HOME/.local/bin/setup-ssh-agent.sh"
 if [[ -n "${XDG_RUNTIME_DIR:-}" || -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
     if [[ -x "$SSH_SETUP" ]]; then
@@ -203,6 +257,21 @@ if [[ -n "${XDG_RUNTIME_DIR:-}" || -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
     fi
 else
     echo "  skipped: no user session bus (XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS unset — headless/WSL)"
+fi
+echo
+
+echo "=== Secrets (~/.keys) ==="
+if [[ -r "$HOME/.keys" && -r "${AGE_KEY:-}" ]]; then
+    echo "  ✓ age key present · ~/.keys decrypted (mode $(stat -c %a "$HOME/.keys" 2>/dev/null))"
+    echo "  Change a key later:   dotfiles-keys       (edits, re-encrypts, re-applies)"
+    echo "  Then publish:         (cd \"$PWD\" && git add -A && git commit -m 'update keys' && git push)"
+elif [[ -r "${AGE_KEY:-}" ]]; then
+    echo "  ✓ age key present, but ~/.keys is not applied yet — check:  dotfiles-keys status"
+else
+    echo "  ✗ no age identity (${AGE_KEY:-~/.config/chezmoi/key.txt}) — ~/.keys stays encrypted/absent."
+    echo "    Restore it, then re-run this script:"
+    echo "      op document get 'dotfiles age key' --vault Personal --out-file ${AGE_KEY:-~/.config/chezmoi/key.txt} && chmod 600 ${AGE_KEY:-~/.config/chezmoi/key.txt}"
+    echo "    (or paste it from the 1Password app)."
 fi
 echo
 

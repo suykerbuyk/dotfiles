@@ -330,6 +330,32 @@ fetch_chezmoi() {
 }
 
 # ----------------------------------------------------------------------
+# age bootstrap — fetch age (modern file encryption, github.com/FiloSottile/age).
+# age is a BOOTSTRAP tool like chezmoi: `chezmoi apply` invokes `age` to decrypt
+# the encrypted_ secrets (~/.keys), so the installer fetches it BEFORE the apply
+# phase. The release tarball (age-vX.Y.Z-<os>-<arch>.tar.gz) unpacks to age/{age,
+# age-keygen}; we install BOTH — age to decrypt/encrypt, age-keygen to mint the
+# identity on a machine that is setting secrets up for the first time. Callable
+# from the checkout (like fetch_jq/fetch_chezmoi). Requires fb_init (FB_TMP).
+# ----------------------------------------------------------------------
+fetch_age() {
+    local os arch tag ver url tarball dir
+    os="$(fb_os darwin)"          # age uses "linux"/"darwin"
+    arch="$(fb_arch amd64)"       # amd64 | arm64
+    tag="$(gh_latest_tag FiloSottile/age)"
+    ver="${tag#v}"
+    # Asset e.g. age-v1.2.1-linux-amd64.tar.gz -> extracts to age/{age,age-keygen}
+    url="$(gh_asset_url FiloSottile/age 'contains("-'"$os"'-") and endswith("-" + $arch + ".tar.gz")' "$arch")"
+    tarball="${FB_TMP}/age.tar.gz"
+    gh_download "$url" "$tarball"
+    tar -xzf "$tarball" -C "$FB_TMP"
+    dir="${FB_TMP}/age"
+    install_bin "${dir}/age" age --version
+    install_bin "${dir}/age-keygen" age-keygen   # no --version verify: flag varies by release
+    echo "Installed age $ver (age + age-keygen, static release) -> ${BIN_DIR}"
+}
+
+# ----------------------------------------------------------------------
 # WSL and display helpers (for GUI tools like Zed)
 # ----------------------------------------------------------------------
 is_wsl() {
