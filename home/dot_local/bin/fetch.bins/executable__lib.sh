@@ -74,6 +74,17 @@ fb_init() {
     # Ensure base directories (fresh machine case)
     mkdir -p "$APP_DIR" "$BIN_DIR"
 
+    # Put freshly-fetched binaries on PATH for the rest of THIS run. The env
+    # layer that normally adds ~/.local/bin is only laid down by `chezmoi apply`
+    # and is never sourced into the running installer process — so without this a
+    # tool fetched earlier (jq, above all) is invisible to a bare `jq` call in a
+    # later fetcher, and the whole jq-first ordering buys nothing. Idempotent:
+    # skip when BIN_DIR is already present so re-sourcing never stacks duplicates.
+    case ":$PATH:" in
+        *":$BIN_DIR:"*) ;;
+        *) PATH="$BIN_DIR:$PATH"; export PATH ;;
+    esac
+
     # Temp dir with automatic cleanup
     FB_TMP="$(mktemp -d)"
     export FB_TMP
@@ -276,6 +287,26 @@ remove_bin() {
     fi
     # Note: versioned runtimes (e.g. $APP_DIR/go1.26.5) are left in place; the
     # PATH symlink is gone, so the tool is no longer active.
+}
+
+# ----------------------------------------------------------------------
+# jq bootstrap — fetch jq FIRST and jq-free, so every other fetcher AND the
+# chezmoi bootstrap below can rely on `jq` being on PATH. jq ships one static
+# binary per os/arch under a predictable release-asset name (jq-linux-amd64), so
+# locating it needs no JSON parsing: gh_latest_tag_nojq reads the tag with
+# grep/awk and the URL is built by interpolation. This is the callable-from-
+# checkout twin of 01_fetch.jq.sh (which now just calls it), the same pattern
+# fetch_chezmoi/09_fetch.chezmoi.sh use. Requires fb_init (FB_TMP, BIN_DIR).
+# ----------------------------------------------------------------------
+fetch_jq() {
+    local os arch tag url
+    os="$(fb_os macos)"           # jq labels it "macos"/"linux"
+    arch="$(fb_arch amd64)"       # amd64 | arm64
+    tag="$(gh_latest_tag_nojq jqlang/jq)"
+    url="https://github.com/jqlang/jq/releases/download/${tag}/jq-${os}-${arch}"
+    gh_download "$url" "${FB_TMP}/jq"
+    install_bin "${FB_TMP}/jq" jq --version
+    echo "Installed jq $tag (static release binary, jq-free bootstrap) -> ${BIN_DIR}/jq"
 }
 
 # ----------------------------------------------------------------------

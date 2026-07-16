@@ -15,23 +15,32 @@ Lives at the **repo root only** (never applied into `~`). Run it from the checko
 ./update-user-home-dir.sh --uninstall  # preview removal (add --force to actually remove)
 ```
 
-### Why the order is fetch-chezmoi → apply → fetch-tools
+### Why the order is fetch-jq → fetch-chezmoi → apply → fetch-tools
 
 The repo is a chezmoi source, so script names are attribute-encoded
 (`executable_01_fetch.jq.sh`, `dot_zshrc`, `private_dot_ssh/…`) and are **not
 runnable in place** from the checkout. So the installer:
 
-1. **Phase 1 — chezmoi binary.** Fetches the static Go release binary
-   (`fetch_chezmoi` in `_lib.sh`) into `~/.local/bin/chezmoi`. Skipped if already
-   present and valid (unless `--force`).
-2. **Phase 2 — `chezmoi apply --force`.** Lays down every dotfile *and* the
+1. **Phase 1 — jq (jq-free bootstrap).** Fetches jq FIRST, via `fetch_jq` in
+   `_lib.sh`, using only the jq-free helpers (`gh_latest_tag_nojq` + an
+   interpolated URL — jq's asset name `jq-linux-amd64` is predictable). This is
+   the fresh-machine fix: `fetch_chezmoi` and every other fetcher parse GitHub
+   release JSON with `jq`, so a box with no system jq used to die at Phase 2's
+   first `jq` call. `fb_init` also puts `~/.local/bin` on `PATH` **for this run**
+   (the env layer that normally does so is only laid down in Phase 3 and is never
+   sourced into the running installer), so the jq installed here is found by the
+   phases below. Skipped if already present and valid (unless `--force`).
+2. **Phase 2 — chezmoi binary.** Fetches the static Go release binary
+   (`fetch_chezmoi` in `_lib.sh`, which uses the jq from Phase 1) into
+   `~/.local/bin/chezmoi`. Skipped if already present and valid (unless `--force`).
+3. **Phase 3 — `chezmoi apply --force`.** Lays down every dotfile *and* the
    `~/.local/bin/` tooling (with decoded names) into `$HOME`. `--force` keeps it
    non-interactive — chezmoi otherwise prompts (`overwrite/skip/…`) when a target
    changed and would block a scripted run.
-3. **Phase 3 — tool fetchers.** Runs `~/.local/bin/fetch.bins/*.sh` (now present
-   and correctly named) in numeric order (jq first). `09_fetch.chezmoi.sh` is
-   skipped here (already done in Phase 1).
-4. **Phase 4 — ssh-agent.** Runs `~/.local/bin/setup-ssh-agent.sh` **only** when a
+4. **Phase 4 — tool fetchers.** Runs `~/.local/bin/fetch.bins/*.sh` (now present
+   and correctly named) in numeric order. `01_fetch.jq.sh` and
+   `09_fetch.chezmoi.sh` are skipped here (already bootstrapped in Phases 1–2).
+5. **Phase 5 — ssh-agent.** Runs `~/.local/bin/setup-ssh-agent.sh` **only** when a
    user session bus is present (`XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS`);
    otherwise skipped cleanly (headless/WSL). The guard is inline in the installer.
 
@@ -49,7 +58,13 @@ static binary** under `~/.local/apps/`, symlinked into `~/.local/bin/`.
 Key `_lib.sh` helpers:
 - `fb_init` — dirs, temp dir with cleanup trap, and a guard against running inside
   the git checkout.
-- `gh_latest_tag` / `gh_asset_url` / `gh_download` — GitHub release helpers.
+- `gh_latest_tag` / `gh_asset_url` / `gh_download` — GitHub release helpers (the
+  first two use `jq`). `gh_latest_tag_nojq` is the `grep`/`awk` variant used only
+  by the jq bootstrap, which cannot depend on jq.
+- `fetch_jq` / `fetch_chezmoi` — the two bootstrap installers that live in
+  `_lib.sh` (not standalone scripts) so the root installer can call them from the
+  checkout before `chezmoi apply` exists. `01_fetch.jq.sh` and `09_fetch.chezmoi.sh`
+  are thin wrappers that just call them, for idempotent re-fetch / standalone use.
 - `install_bin src name [verify-args]` — copy to `~/.local/apps`, verify, then
   symlink (verification gate before the symlink is created). **Pass a `src` that is
   not already `~/.local/apps/<name>`** — idiomatically the extracted binary in

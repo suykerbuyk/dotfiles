@@ -6,11 +6,15 @@
 #
 # Because the chezmoi source encodes script names (executable_, dot_, ...), the
 # fetch scripts are NOT runnable in-place from the checkout. So the order is:
-#   1. Fetch the chezmoi binary (static Go release).
-#   2. chezmoi apply  -> lays down all dotfiles AND ~/.local/bin tooling
+#   1. Fetch jq (jq-free bootstrap). It MUST come first: chezmoi's fetch and
+#      every other fetcher parse GitHub release JSON with jq, and ~/.local/bin
+#      is not yet on the running shell's PATH (fb_init adds it for this run).
+#   2. Fetch the chezmoi binary (static Go release; uses the jq from step 1).
+#   3. chezmoi apply  -> lays down all dotfiles AND ~/.local/bin tooling
 #      (with decoded names) into $HOME.
-#   3. Run the remaining tool fetchers from ~/.local/bin/fetch.bins (jq-first).
-#   4. Set up the systemd user ssh-agent (only when a session bus is present).
+#   4. Run the remaining tool fetchers from ~/.local/bin/fetch.bins (jq and
+#      chezmoi already bootstrapped above, so both are skipped there).
+#   5. Set up the systemd user ssh-agent (only when a session bus is present).
 #
 # Usage:
 #   ./update-user-home-dir.sh [--dry-run] [--force] [--uninstall]
@@ -111,9 +115,27 @@ if $UNINSTALL; then
 fi
 
 # ---------------------------------------------------------------------------
-# 1. Bootstrap the chezmoi binary
+# 1. Bootstrap jq FIRST — jq-free, so chezmoi's fetch (Phase 2) and every other
+#    fetcher can parse GitHub release JSON. This is the fresh-machine fix: with
+#    no system jq, Phase 2's fetch_chezmoi used to die at its first `jq` call.
+#    fb_init has already put ~/.local/bin on PATH, so this jq is found below.
 # ---------------------------------------------------------------------------
-echo "=== Phase 1: chezmoi binary ==="
+echo "=== Phase 1: jq (jq-free bootstrap) ==="
+JQ="${BIN_DIR}/jq"
+if ! $FORCE && fb_check_bin jq && [[ -x "$JQ" ]]; then
+    echo "jq present: $("$JQ" --version)"
+elif $DRY_RUN; then
+    echo "DRY-RUN: fetch_jq (static release binary, no jq required)"
+else
+    $FORCE && remove_bin jq
+    fetch_jq
+fi
+echo
+
+# ---------------------------------------------------------------------------
+# 2. Bootstrap the chezmoi binary (uses jq from Phase 1)
+# ---------------------------------------------------------------------------
+echo "=== Phase 2: chezmoi binary ==="
 if ! $FORCE && fb_check_bin chezmoi && [[ -x "$CHEZMOI" ]]; then
     echo "chezmoi present: $("$CHEZMOI" --version | head -1)"
 elif $DRY_RUN; then
@@ -125,9 +147,9 @@ fi
 echo
 
 # ---------------------------------------------------------------------------
-# 2. Apply dotfiles + tooling into ~   (--force => never blocks on prompts)
+# 3. Apply dotfiles + tooling into ~   (--force => never blocks on prompts)
 # ---------------------------------------------------------------------------
-echo "=== Phase 2: chezmoi apply ==="
+echo "=== Phase 3: chezmoi apply ==="
 if $DRY_RUN; then
     if [[ -x "$CHEZMOI" ]]; then
         chezmoi_cmd apply --dry-run --force || true
@@ -141,16 +163,18 @@ fi
 echo
 
 # ---------------------------------------------------------------------------
-# 3. Fetch remaining tools, from ~ (jq-first). chezmoi already done in Phase 1.
+# 4. Fetch remaining tools, from ~. jq (Phase 1) and chezmoi (Phase 2) are
+#    already bootstrapped, so both are skipped in the loop below.
 # ---------------------------------------------------------------------------
-echo "=== Phase 3: tool fetchers (jq-first) ==="
+echo "=== Phase 4: tool fetchers ==="
 FBD="$HOME/.local/bin/fetch.bins"
 if $DRY_RUN && [[ ! -d "$FBD" ]]; then
     echo "DRY-RUN: would run $SRC fetchers from $FBD after apply"
 elif [[ -d "$FBD" ]]; then
     mapfile -t scripts < <(find "$FBD" -maxdepth 1 -name '*.sh' ! -name '_lib.sh' -perm -u+x -printf '%f\n' | sort -V)
     for s in "${scripts[@]}"; do
-        [[ "$s" == 09_fetch.chezmoi.sh ]] && continue   # already bootstrapped in Phase 1
+        [[ "$s" == 01_fetch.jq.sh ]] && continue        # already bootstrapped in Phase 1
+        [[ "$s" == 09_fetch.chezmoi.sh ]] && continue   # already bootstrapped in Phase 2
         echo "→ $s"
         if $DRY_RUN; then
             echo "  DRY-RUN: $FBD/$s"
@@ -164,11 +188,11 @@ fi
 echo
 
 # ---------------------------------------------------------------------------
-# 4. systemd user ssh-agent — only when a user session bus exists.
+# 5. systemd user ssh-agent — only when a user session bus exists.
 #    (This is the C2 fix: the dbus guard is inline here, not an undefined
 #    function, so the SSH phase actually runs on a normal desktop session.)
 # ---------------------------------------------------------------------------
-echo "=== Phase 4: ssh-agent (systemd user) ==="
+echo "=== Phase 5: ssh-agent (systemd user) ==="
 SSH_SETUP="$HOME/.local/bin/setup-ssh-agent.sh"
 if [[ -n "${XDG_RUNTIME_DIR:-}" || -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
     if [[ -x "$SSH_SETUP" ]]; then

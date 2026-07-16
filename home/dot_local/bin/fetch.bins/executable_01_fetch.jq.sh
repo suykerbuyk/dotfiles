@@ -1,30 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Bootstrap installer for jq. This runs FIRST and must NOT depend on jq itself.
-# Sourced from _lib.sh (uses only the jq-free helpers).
-# See Context.fetch.bins.refactor.md for full design and verified facts.
-# The stow safety guard (in fb_init) ensures we never run from inside the
-# dotfiles checkout.
+# 01_fetch.jq.sh — install jq via the shared fetch_jq() helper. jq is the ONE
+# tool that must bootstrap without jq (every other fetcher parses GitHub release
+# JSON with it), so fetch_jq() uses only the jq-free helpers (gh_latest_tag_nojq
+# + an interpolated URL). See Context.fetch.bins.refactor.md.
+#
+# Note: the installer (update-user-home-dir.sh) bootstraps jq itself in Phase 1,
+# BEFORE `chezmoi apply`, so this script is mainly for idempotent re-fetch or
+# standalone use from ~/.local/bin/fetch.bins/. Mirrors 09_fetch.chezmoi.sh.
+#
+# The stow safety guard (in fb_init) ensures we never run from the checkout.
 
 . "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/_lib.sh"
 
-BIN_NAME="jq"
 fb_init
 
-# Per-tool normalization (jq wants "macos" not "darwin", amd64 not x86_64)
-OS="$(fb_os macos)"
-ARCH="$(fb_arch amd64)"
-echo "OS=$OS ARCH=$ARCH"
+# Skip if already present and valid (version-agnostic check).
+if fb_check_bin jq && [[ -x "${BIN_DIR}/jq" ]]; then
+    echo "jq: already valid ($("${BIN_DIR}/jq" --version 2>&1 | head -1))"
+    exit 0
+fi
 
-TAG_NAME="$(gh_latest_tag_nojq jqlang/jq)"
-BINARY="jq-${OS}-${ARCH}"
-DOWNLOAD_URL="https://github.com/jqlang/jq/releases/download/${TAG_NAME}/${BINARY}"
-echo "DOWNLOAD_URL=$DOWNLOAD_URL"
-
-# Download directly to a temporary name inside APP_DIR (no archive)
-TMP_BIN="${APP_DIR}/${BIN_NAME}.tmp"
-gh_download "$DOWNLOAD_URL" "$TMP_BIN"
-
-# install_bin handles chmod, verification, ln -sfn, and confirmation
-install_bin "$TMP_BIN" "$BIN_NAME" --version
+fetch_jq

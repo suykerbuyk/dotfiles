@@ -314,12 +314,32 @@ before="$(git -C "$REPO" status --porcelain)"
 out="$(HOME="$SB" ./update-user-home-dir.sh --dry-run 2>&1)"; rc=$?
 after="$(git -C "$REPO" status --porcelain)"
 assert "dry-run exits 0"                     "[[ $rc -eq 0 ]]"
-assert "dry-run reaches Phase 1"             "grep -q 'Phase 1: chezmoi binary' <<<\"\$out\""
-assert "dry-run reaches Phase 2 (apply)"     "grep -q 'Phase 2: chezmoi apply' <<<\"\$out\""
-assert "dry-run reaches Phase 3 (fetchers)"  "grep -q 'Phase 3: tool fetchers' <<<\"\$out\""
-assert "dry-run reaches Phase 4 (ssh-agent)" "grep -q 'Phase 4: ssh-agent' <<<\"\$out\""
-assert "Phase 4 skips without a session bus" "grep -q 'skipped: no user session bus' <<<\"\$out\""
+assert "dry-run reaches Phase 1 (jq FIRST)"  "grep -q 'Phase 1: jq' <<<\"\$out\""
+assert "dry-run reaches Phase 2 (chezmoi)"   "grep -q 'Phase 2: chezmoi binary' <<<\"\$out\""
+assert "dry-run reaches Phase 3 (apply)"     "grep -q 'Phase 3: chezmoi apply' <<<\"\$out\""
+assert "dry-run reaches Phase 4 (fetchers)"  "grep -q 'Phase 4: tool fetchers' <<<\"\$out\""
+assert "dry-run reaches Phase 5 (ssh-agent)" "grep -q 'Phase 5: ssh-agent' <<<\"\$out\""
+# jq must be bootstrapped BEFORE chezmoi — the whole fresh-machine fix. Compare
+# the line positions in the ordered output, not just that both appear.
+assert "jq phase precedes chezmoi phase"     "[[ \$(grep -n 'Phase 1: jq' <<<\"\$out\" | cut -d: -f1) -lt \$(grep -n 'Phase 2: chezmoi binary' <<<\"\$out\" | cut -d: -f1) ]]"
+assert "Phase 5 skips without a session bus" "grep -q 'skipped: no user session bus' <<<\"\$out\""
 assert "no repo contamination from dry-run"  "[[ \"\$before\" == \"\$after\" ]]"
+
+# ===========================================================================
+sec "bootstrap: jq is fetched FIRST and jq-free (fresh-machine fix)"
+# jq is the ONE tool that must bootstrap without jq — every other fetcher, and
+# chezmoi's own fetch, parse GitHub release JSON with it. Assert fetch_jq exists
+# and uses the jq-free tag helper, never the jq-dependent gh_* helpers.
+jqbody="$( . "$LIB" >/dev/null 2>&1; declare -f fetch_jq )"
+assert "fetch_jq is defined in _lib.sh"           "[[ -n \"\$jqbody\" ]]"
+assert "fetch_jq uses gh_latest_tag_nojq"         "grep -q 'gh_latest_tag_nojq' <<<\"\$jqbody\""
+assert "fetch_jq avoids the jq-dependent gh_ helpers" "! grep -Eq 'gh_asset_url|gh_latest_tag[^_]' <<<\"\$jqbody\""
+# fb_init must put ~/.local/bin on PATH, or a just-fetched jq is invisible to the
+# bare \`jq\` calls in every later fetcher within the same installer run.
+pth="$( . "$LIB" >/dev/null 2>&1; PATH=/usr/bin:/bin; fb_init >/dev/null 2>&1; printf '%s' "$PATH" )"
+assert "fb_init prepends \$BIN_DIR to PATH"        "case \":\$pth:\" in *\":$BIN_DIR:\"*) true ;; *) false ;; esac"
+# The installer bootstraps jq in Phase 1 and skips 01_fetch.jq.sh in the loop.
+assert "installer skips 01_fetch.jq.sh in fetcher loop" "grep -q '01_fetch.jq.sh ]] && continue' update-user-home-dir.sh"
 
 # ===========================================================================
 if [[ $NET == 1 ]]; then
@@ -335,6 +355,19 @@ if [[ $NET == 1 ]]; then
     else
         skip "jq fetcher not present (apply group did not run)"
     fi
+
+    # The fresh-machine proof: fetch_jq must install a working jq WITHOUT ever
+    # shelling out to jq. Poison bare `jq` inside the subshell — any accidental
+    # `jq` call (e.g. via the jq-dependent gh_ helpers) returns 127 and aborts
+    # the fetch — while install_bin's path invocation of the downloaded binary
+    # ("$src" --version) is unaffected. If the install still succeeds, the
+    # bootstrap is genuinely jq-free.
+    sec "network: jq bootstraps with bare \`jq\` poisoned (no jq dependency)"
+    ( set +e; . "$LIB" >/dev/null 2>&1
+      jq() { echo "FAIL: fetch_jq shelled out to jq" >&2; return 127; }
+      remove_bin jq >/dev/null 2>&1
+      fb_init; fetch_jq >/dev/null 2>&1 )
+    assert "fetch_jq installed a working jq with jq poisoned" "\"$BIN_DIR/jq\" --version >/dev/null 2>&1"
 
     # ninja + protoc are small, fast release-zip fetchers -> default group.
     sec "network: zip-based fetchers (ninja, protoc)"

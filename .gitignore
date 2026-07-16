@@ -23,3 +23,10 @@ home/dot_local/apps/
 /.claude/
 /.grok/
 /.vibe-palace/
+
+# vibe-palace also drops per-session claim markers (.vibe-palace/claimed-*) in
+# whatever directory a command runs from — which can land INSIDE the home/ source
+# tree (e.g. home/dot_local/bin/fetch.bins/.vibe-palace/), where a committed copy
+# would be replicated onto every machine by `chezmoi apply`. The anchored rule
+# above only covers repo root, so ignore .vibe-palace/ at ANY depth as well.
+.vibe-palace/
