@@ -37,11 +37,20 @@ alias l='ls -CF'
 alias gl='git log --oneline --graph --decorate'
 
 # --- tool integration ---------------------------------------------------------
-# Every one of these takes the shell's name as an argument, which is precisely
-# why they can live in the shared file rather than being duplicated per shell.
-have starship && eval "$(starship init "$DOTFILES_SHELL")"
-have fzf && eval "$(fzf --"$DOTFILES_SHELL")"
-have tv && eval "$(tv init "$DOTFILES_SHELL")"
+# These emit shell-completion code, and some of it calls `compdef`: television's
+# `tv init` ends with an unguarded `compdef _tv tv`. `compdef` does not exist
+# until `compinit` has run, and rc.sh runs compinit LAST (so local.d/ can extend
+# $fpath first). So these inits cannot run inline here — they are wrapped in a
+# function that rc.sh invokes *after* the compinit step. Each takes the shell's
+# name, which is why the three share this file rather than being duplicated per
+# shell. (fzf guards its own compdef call; starship emits none; only tv needed
+# the reorder, but keeping all three together keeps the ordering rule in one place.)
+dotfiles_tool_init() {
+    have starship && eval "$(starship init "$DOTFILES_SHELL")"
+    have fzf && eval "$(fzf --"$DOTFILES_SHELL")"
+    have tv && eval "$(tv init "$DOTFILES_SHELL")"
+    return 0
+}
 
 have fzf && have tmux && export FZF_DEFAULT_OPTS='--tmux center'
 

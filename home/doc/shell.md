@@ -69,13 +69,19 @@ zsh has no equivalent gap: `~/.zshenv` is read for *every* zsh, `-c` included.
 
 ```
 env layer   lib → env.sh → env.d/
-rc  layer   env.sh (again, no-op) → common → <shell>.sh → doctor → bashrc.d/ → local.d/ → [zsh] compinit
+rc  layer   env.sh (again, no-op) → common → <shell>.sh → doctor → bashrc.d/ → local.d/ → [zsh] compinit → tool-init → greet
 ```
 
-Two invariants inside that order:
+Three invariants inside that order:
 
-- **`compinit` runs last**, because `local.d/` may extend `$fpath` (the grok
-  completions do). Initialising completions before that point silently drops them.
+- **`compinit` runs last** *of the completion setup*, because `local.d/` may extend
+  `$fpath` (the grok completions do). Initialising completions before that point
+  silently drops them.
+- **Tool completion inits run *after* `compinit`.** `starship`/`fzf`/`tv` are eval'd
+  from `dotfiles_tool_init` (defined in `common.sh`), which `rc.sh` calls only after
+  the `compinit` step. `tv init` ends with an unguarded `compdef _tv tv`, and
+  `compdef` does not exist until `compinit` has defined it — running the inits inline
+  in `common.sh` printed `(eval):230: command not found: compdef` on every login zsh.
 - **`env.sh` is idempotent.** A login shell runs it via `~/.bash_profile` →
   `~/.profile`; `rc.sh` then sources it again defensively. A non-exported
   `DOTFILES_ENV_LOADED` guard makes the second call a no-op, while each *new* shell
@@ -149,7 +155,25 @@ resolved by **globbing** `fetch.bins/*_fetch.<stem>.sh` rather than hardcoding t
 usually the command, but not always — `rg` ships from `ripgrep.sh` and `cargo` from
 `rust.sh`, which is why the registry maps command → stem explicitly.
 
-`DOTFILES_SHELL_VERBOSE=1` prints that report at every shell start.
+### The once-per-session greeting
+
+The report also runs **automatically, once per login session era**: the first
+interactive shell after you log in prints it; every shell after that (new tmux
+panes, splits, subshells) stays silent. The one-shot is a stamp file,
+`$XDG_RUNTIME_DIR/dotfiles-shell.greeted`:
+
+- `$XDG_RUNTIME_DIR` is `/run/user/$UID`, a **tmpfs** systemd-logind creates at your
+  first login and **removes when your last session ends** — so the greeting resets
+  on a full logout and on reboot, with no cleanup code of our own.
+- The create is done under `set -C` (noclobber) in a subshell, which is **atomic**:
+  when several panes open simultaneously, exactly one wins the create and prints.
+- If `$XDG_RUNTIME_DIR` is unset (a non-systemd host, some containers), the one-shot
+  simply does not fire — startup stays silent, and `dotfiles-doctor` is still there
+  on demand.
+- Caveat: with `loginctl enable-linger` set for your user, logind keeps the runtime
+  dir across a full logout, so the greeting then resets only on reboot.
+
+`DOTFILES_SHELL_VERBOSE=1` forces the report on **every** shell start instead.
 
 ## Bugs this structure fixed
 

@@ -265,6 +265,45 @@ if [[ -n "$CHEZMOI" ]]; then
     else
         skip "startup-silence probes (no 'script' for a pty)"
     fi
+
+    # A completion snippet that calls `compdef` (television's `tv init` ends with
+    # an unguarded `compdef _tv tv`) must be eval'd AFTER compinit, or zsh prints
+    # "(eval):N: command not found: compdef" on every login. The tool inits were
+    # moved out of common.sh into dotfiles_tool_init, which rc.sh calls after the
+    # compinit step. Prove it with a `tv` stub that emits exactly that pattern —
+    # no dependency on the real television being installed. (stderr only: the bug
+    # surfaced there; interactive-without-a-tty job-control warnings are ignored
+    # because the assertion greps for the specific compdef error.)
+    if command -v zsh >/dev/null 2>&1; then
+        sec "shell: tv-style compdef init is eval'd after compinit"
+        faketv="$SB/.local/bin/tv"
+        {
+            printf '#!/bin/sh\n'
+            printf '[ "$1" = init ] && printf "%%s\\n" "#compdef tv" "_tv() { :; }" "compdef _tv tv"\n'
+        } > "$faketv"
+        chmod +x "$faketv"
+        err="$( cd /tmp && env -i HOME="$SB" TERM=xterm PATH=/usr/bin:/bin zsh -ic true 2>&1 >/dev/null | tr -d '\r' )"
+        assert "tv init (unguarded compdef) raises no 'command not found'" \
+            "! grep -q 'command not found: compdef' <<<\"\$err\""
+        rm -f "$faketv"
+    fi
+
+    # dotfiles-doctor greets ONCE per login session era: the first interactive
+    # shell prints it, later shells (tmux panes) stay quiet. The one-shot is a
+    # stamp in $XDG_RUNTIME_DIR, created atomically under `set -C`. The harness
+    # unsets XDG_RUNTIME_DIR globally (line ~54), so this test supplies its own.
+    if command -v zsh >/dev/null 2>&1; then
+        sec "shell: dotfiles-doctor greets once per login session era"
+        rt="$SB/run.greet"; rm -rf "$rt"; mkdir -p "$rt"
+        greet() { ( cd /tmp && env -i HOME="$SB" TERM=xterm XDG_RUNTIME_DIR="$rt" PATH=/usr/bin:/bin zsh -ic true 2>/dev/null | tr -d '\r' ); }
+        first="$(greet)"; second="$(greet)"
+        assert "first interactive shell runs dotfiles-doctor"        "grep -q '^env:' <<<\"\$first\""
+        assert "greet stamp created in \$XDG_RUNTIME_DIR"            "[[ -e '$rt/dotfiles-shell.greeted' ]]"
+        assert "second interactive shell is quiet (one-shot spent)"  "[[ -z \"\$(tr -d '\r\n \t' <<<\"\$second\")\" ]]"
+        v="$( cd /tmp && env -i HOME="$SB" TERM=xterm XDG_RUNTIME_DIR="$rt" DOTFILES_SHELL_VERBOSE=1 PATH=/usr/bin:/bin zsh -ic true 2>/dev/null | tr -d '\r' )"
+        assert "DOTFILES_SHELL_VERBOSE forces the report despite the stamp" "grep -q '^env:' <<<\"\$v\""
+        rm -rf "$rt"
+    fi
 else
     skip "apply/parity/idempotency (no chezmoi binary)"
 fi

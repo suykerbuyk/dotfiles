@@ -24,6 +24,9 @@
 #   local.d   host-local drop-ins, NOT managed by chezmoi — completions and $fpath
 #             (host-local PATH belongs in env.d/, which env.sh sources)
 #   compinit  zsh completions, LAST, so local.d can add to $fpath before it runs
+#   tools     starship/fzf/tv completion inits — AFTER compinit, because tv's
+#             snippet calls `compdef`, which only exists once compinit has run
+#   greet     dotfiles-doctor, once per login session era (see below)
 #
 # Every path below is absolute. That is not stylistic: the old ~/.bashrc did
 # `source .bashrc-debian` with a relative path, so bash started anywhere other
@@ -57,11 +60,31 @@ if [ "$DOTFILES_SHELL" = zsh ]; then
     autoload -Uz compinit && compinit -C
 fi
 
+# Tool completion integration (starship, fzf, tv) runs HERE, after compinit, so
+# that a snippet which calls `compdef` (tv's does, unguarded) finds it defined.
+# For bash — which has no compinit — the position is immaterial. See common.sh.
+dotfiles_tool_init
+
 # Startup is quiet by design. `dotfiles-doctor` reports what is missing and the
-# exact installer that fixes it; DOTFILES_SHELL_VERBOSE=1 prints that report at
-# every shell start instead.
+# exact installer that fixes each one. It runs automatically ONCE per login
+# session era — the first interactive shell after you log in — then stays quiet
+# for every shell after it (new tmux panes, splits, subshells). The stamp lives
+# in $XDG_RUNTIME_DIR (/run/user/$UID): systemd-logind creates that tmpfs at your
+# first login and destroys it when your last session ends, so "once" resets on a
+# full logout and on reboot with no cleanup code of our own. `set -C` (noclobber)
+# makes the create atomic, so when several panes open at once exactly one wins
+# and prints. DOTFILES_SHELL_VERBOSE=1 forces the report on every shell instead.
+#
+# (If you have run `loginctl enable-linger`, the runtime dir survives a full
+# logout, so the reset then happens only on reboot — still correct, just rarer.)
+_dotfiles_greet=
 if [ -n "${DOTFILES_SHELL_VERBOSE:-}" ]; then
-    dotfiles-doctor
+    _dotfiles_greet=1
+elif [ -n "${XDG_RUNTIME_DIR:-}" ] &&
+     ( set -C; : > "$XDG_RUNTIME_DIR/dotfiles-shell.greeted" ) 2>/dev/null; then
+    _dotfiles_greet=1
 fi
+[ -n "$_dotfiles_greet" ] && dotfiles-doctor
+unset _dotfiles_greet
 
 return 0 2>/dev/null || true
