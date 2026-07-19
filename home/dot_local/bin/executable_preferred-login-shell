@@ -1,0 +1,34 @@
+#!/bin/sh
+# preferred-login-shell — exec the best available LOGIN shell for THIS box.
+#
+# Prime directive: an unprivileged user must end up fully operational without
+# root. We prefer zsh (the configured interactive shell) but must NOT assume it
+# is installed — a fresh Debian ships bash, not zsh. tmux's default-shell
+# trusts $SHELL blindly and, via checkshell(), silently drops to bare /bin/sh
+# (dash) when $SHELL names a shell that is absent — stripping every bit of
+# shell config. This resolver instead picks the best shell that actually
+# exists, degrading zsh -> bash -> sh, and never lands on a non-preferred
+# shell without first trying the preferred ones.
+#
+# Wired into ~/.tmux.conf as:
+#   set-option -g default-command 'exec "$HOME/.local/bin/preferred-login-shell"'
+# so every tmux pane (via `tm` or a bare `tmux`) resolves at spawn time.
+#
+#   preferred-login-shell            exec the resolved login shell
+#   preferred-login-shell --which    print the resolved path, do not exec (test seam)
+
+pick=''
+for s in zsh bash; do
+    if p=$(command -v "$s" 2>/dev/null); then
+        pick=$p
+        break
+    fi
+done
+[ -n "$pick" ] || pick=/bin/sh
+
+if [ "${1:-}" = "--which" ]; then
+    printf '%s\n' "$pick"
+    exit 0
+fi
+
+exec "$pick" -l

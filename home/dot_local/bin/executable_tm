@@ -2,7 +2,6 @@
 # qdbus org.kde.konsole $KONSOLE_DBUS_SESSION setTitle 1 $(uname -n)
 #printf "\033]0;%s@%s\007" "${USER}" "$(hostname)"
 #cols=$(tput cols)
-hostnamectl deployment
 HNAMECTL="$(which hostnamectl)"
 if [ -x "$(which hostnamectl)" ]; then
     # echo "We have hostnamectl"
@@ -17,7 +16,7 @@ else
 fi
 UNAME="$(whoami)"
 # echo "UNAME=$UNAME HNAME=$HNAME"
-echo -e "\e]0;${HNAME}-${1}\a"
+printf '\033]0;%s\007' "${HNAME}-${1}"
 do_tmux_default() {
     tmux attach-session -t "${UNAME}-$1" ||
         tmux new-session -s "${UNAME}-$1" \; \
