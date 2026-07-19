@@ -15,7 +15,7 @@ shopt -s checkwinsize
 # --- prompt -------------------------------------------------------------------
 # starship owns the prompt when it is installed (common.sh runs `starship init`).
 # This is the fallback for a host that does not have it yet.
-if ! have starship; then
+if ! df_have starship; then
     if [ -z "${debian_chroot:-}" ] && [ -r /etc/debian_chroot ]; then
         debian_chroot="$(cat /etc/debian_chroot)"
     fi

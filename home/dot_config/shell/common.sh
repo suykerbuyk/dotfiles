@@ -19,7 +19,7 @@
 [ -r "$HOME/.keys" ] && . "$HOME/.keys"
 
 # --- aliases ------------------------------------------------------------------
-if have dircolors; then
+if df_have dircolors; then
     if [ -r "$HOME/.dircolors" ]; then
         eval "$(dircolors -b "$HOME/.dircolors")"
     else
@@ -46,13 +46,13 @@ alias gl='git log --oneline --graph --decorate'
 # shell. (fzf guards its own compdef call; starship emits none; only tv needed
 # the reorder, but keeping all three together keeps the ordering rule in one place.)
 dotfiles_tool_init() {
-    have starship && eval "$(starship init "$DOTFILES_SHELL")"
-    have fzf && eval "$(fzf --"$DOTFILES_SHELL")"
-    have tv && eval "$(tv init "$DOTFILES_SHELL")"
+    df_have starship && eval "$(starship init "$DOTFILES_SHELL")"
+    df_have fzf && eval "$(fzf --"$DOTFILES_SHELL")"
+    df_have tv && eval "$(tv init "$DOTFILES_SHELL")"
     return 0
 }
 
-have fzf && have tmux && export FZF_DEFAULT_OPTS='--tmux center'
+df_have fzf && df_have tmux && export FZF_DEFAULT_OPTS='--tmux center'
 
 # broot's `br` function comes from a launcher script that `broot --install`
 # generates *per shell* — the binary alone does not provide it. Source the

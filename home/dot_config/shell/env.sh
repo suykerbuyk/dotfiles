@@ -28,7 +28,7 @@ DOTFILES_ENV_LOADED=1
 
 DOTFILES_SHELL_DIR="$HOME/.config/shell"
 
-# have / path_prepend / source_dir.
+# df_have / path_prepend / source_dir.
 [ -r "$DOTFILES_SHELL_DIR/lib.sh" ] || return 0 2>/dev/null || exit 0
 . "$DOTFILES_SHELL_DIR/lib.sh"
 
@@ -71,7 +71,7 @@ fi
 # The absolute path, not the bare name: sudo resets PATH to its secure_path, so a
 # bare `nvim` in SUDO_EDITOR would not resolve to the one under ~/.local/bin.
 for _e in nvim vim vi; do
-    if have "$_e"; then
+    if df_have "$_e"; then
         EDITOR="$(command -v "$_e")"
         break
     fi

@@ -6,8 +6,11 @@
 # (dash rejects `foo-bar()` as a syntax error; that is why `dotfiles-doctor` lives
 # in doctor.sh, which only the rc layer sources).
 
-# have <cmd> — true if <cmd> is on PATH.
-have() { command -v "$1" >/dev/null 2>&1; }
+# df_have <cmd> — true if <cmd> is on PATH. Namespaced (not the bare `have`)
+# because bash-completion ships its own deprecated `have` and runs `unset -f have`
+# when it loads; a bare `have` helper would be silently destroyed the moment
+# bash.sh sources bash-completion, then error out at every later call site.
+df_have() { command -v "$1" >/dev/null 2>&1; }
 
 # path_prepend <dir> — put <dir> at the front of PATH, if it exists and is not
 # already there. The dedupe is the point: without it, re-sourcing an rc file

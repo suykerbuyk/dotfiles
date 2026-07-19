@@ -55,7 +55,7 @@ zsh has no equivalent gap: `~/.zshenv` is read for *every* zsh, `-c` included.
 | File | Layer | Role |
 |---|---|---|
 | `env.sh` | env | PATH, exports, the ssh-agent fast path. POSIX, silent, fork-free. |
-| `lib.sh` | env | Helpers `have`, `path_prepend`, `source_dir`. |
+| `lib.sh` | env | Helpers `df_have`, `path_prepend`, `source_dir`. |
 | `rc.sh` | rc | The interactive entry point. Detects the shell, sources everything below. |
 | `common.sh` | rc | Shared interactive config: aliases, prompt tools, `~/.keys`, `nvm`. |
 | `bash.sh` | rc | bash-only delta: `shopt`, history vars, PS1 fallback, bash-completion. |

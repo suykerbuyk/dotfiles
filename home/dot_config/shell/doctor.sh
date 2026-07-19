@@ -65,7 +65,7 @@ dotfiles-doctor() {
     printf 'rc:     %s (interactive only)\n\n' "$HOME/.config/shell/common.sh"
 
     _dotfiles_registry | while IFS='|' read -r _cmd _stem _note; do
-        if have "$_cmd"; then
+        if df_have "$_cmd"; then
             printf '  %-9s %-5s %s\n' "$_cmd" 'ok' "$(command -v "$_cmd")"
         elif [ -n "$_note" ]; then
             printf '  %-9s %-5s %s\n' "$_cmd" 'n/a' "$_note"
@@ -81,7 +81,7 @@ dotfiles-doctor() {
     # generates per shell. Reporting "broot is not installed" when only the shim
     # is missing (which is what the old zshrc did) sends you looking in the wrong
     # place entirely.
-    if have broot && [ ! -r "$HOME/.config/broot/launcher/${DOTFILES_SHELL}/br" ]; then
+    if df_have broot && [ ! -r "$HOME/.config/broot/launcher/${DOTFILES_SHELL}/br" ]; then
         printf '  %-9s %-5s binary present, but the `br` shim is missing → run: broot --install\n' 'broot' 'note'
     fi
 
