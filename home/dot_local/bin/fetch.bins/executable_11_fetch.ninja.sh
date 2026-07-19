@@ -11,13 +11,8 @@ set -euo pipefail
 BIN_NAME="ninja"
 fb_init
 
-# ninja needs 'unzip' (its release asset is a .zip, unlike the tarball tools).
-# Fail loud with a fixable message rather than silently skipping.
-if ! command -v unzip >/dev/null 2>&1; then
-    echo "Error: 'unzip' is required to install ninja (its release is a .zip)." >&2
-    echo "       Install it (e.g. 'sudo apt install unzip' or 'sudo pacman -S unzip') and re-run." >&2
-    exit 1
-fi
+# ninja's release asset is a .zip; fb_unzip (see _lib.sh) extracts it with any
+# no-root tool (unzip/bsdtar/busybox/python3), so no system 'unzip' is required.
 
 # ninja's release assets are named by platform, not by the usual arch tokens:
 #   ninja-linux.zip           (x86_64, statically linked)
@@ -41,7 +36,7 @@ ASSET_URL="$(gh_asset_url ninja-build/ninja '. == $arch' "$ASSET")"
 ZIP="${FB_TMP}/ninja.zip"
 gh_download "$ASSET_URL" "$ZIP"
 
-unzip -oq "$ZIP" -d "$FB_TMP"   # single 'ninja' binary at the zip root
+fb_unzip "$ZIP" "$FB_TMP"   # single 'ninja' binary at the zip root
 
 install_bin "${FB_TMP}/${BIN_NAME}" "$BIN_NAME" --version
 

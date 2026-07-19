@@ -176,6 +176,75 @@ gh_download() {
 }
 
 # ----------------------------------------------------------------------
+# Zip extraction WITHOUT a system 'unzip' (prime directive: a plain user
+# with no sudo/root must still end up fully operational). broot, ninja and
+# protoc ship their releases as .zip, and a minimal Debian install does NOT
+# include 'unzip'. fb_unzip extracts with whichever no-root tool is present,
+# in preference order, and EVERY path preserves unix permission bits — the
+# python fallback restores them from the zip's stored attributes, which a
+# bare `python3 -m zipfile -e` does NOT (that would leave protoc's bin/protoc
+# non-executable, because protoc symlinks it directly instead of going through
+# install_bin's chmod +x).
+#
+#   fb_unzip <zipfile> <destdir>
+#
+# Set FB_UNZIP_BACKEND=unzip|bsdtar|busybox|python3 to pin exactly one backend
+# (the test harness uses this to prove each path in isolation, since the
+# preference chain would otherwise always pick the first one present). A pinned
+# backend that is absent is a hard error, never a silent fallthrough.
+# ----------------------------------------------------------------------
+_fb_have_busybox_unzip() {
+    command -v busybox >/dev/null 2>&1 && busybox --list 2>/dev/null | grep -qx unzip
+}
+
+# python zip extractor that RESTORES unix permission bits from the archive's
+# external attributes (plain `python3 -m zipfile -e` discards them).
+_fb_unzip_python() {
+    python3 - "$1" "$2" <<'PY'
+import sys, zipfile, os
+src, dest = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(src) as z:
+    for info in z.infolist():
+        path = z.extract(info, dest)
+        mode = (info.external_attr >> 16) & 0o7777
+        if mode:
+            os.chmod(path, mode)
+PY
+}
+
+fb_unzip() {
+    local zip="$1" dest="$2"
+    mkdir -p "$dest"
+
+    # Explicit pin (testing / override): use ONLY the named backend, fail loud
+    # if it is absent rather than quietly falling through to another.
+    case "${FB_UNZIP_BACKEND:-}" in
+        unzip)   command -v unzip  >/dev/null 2>&1 || { echo "fb_unzip: pinned backend 'unzip' not found" >&2; return 1; };   unzip -oq "$zip" -d "$dest"; return ;;
+        bsdtar)  command -v bsdtar >/dev/null 2>&1 || { echo "fb_unzip: pinned backend 'bsdtar' not found" >&2; return 1; };   bsdtar -x -f "$zip" -C "$dest"; return ;;
+        busybox) _fb_have_busybox_unzip            || { echo "fb_unzip: pinned backend 'busybox unzip' not found" >&2; return 1; }; busybox unzip -oq "$zip" -d "$dest"; return ;;
+        python3) command -v python3 >/dev/null 2>&1 || { echo "fb_unzip: pinned backend 'python3' not found" >&2; return 1; }; _fb_unzip_python "$zip" "$dest"; return ;;
+        "")      ;;  # no pin — auto-select below
+        *)       echo "fb_unzip: unknown FB_UNZIP_BACKEND '${FB_UNZIP_BACKEND}' (want unzip|bsdtar|busybox|python3)" >&2; return 1 ;;
+    esac
+
+    # Auto-select: most-compatible / perms-preserving first, python last.
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -oq "$zip" -d "$dest"
+    elif command -v bsdtar >/dev/null 2>&1; then
+        bsdtar -x -f "$zip" -C "$dest"
+    elif _fb_have_busybox_unzip; then
+        busybox unzip -oq "$zip" -d "$dest"
+    elif command -v python3 >/dev/null 2>&1; then
+        _fb_unzip_python "$zip" "$dest"
+    else
+        echo "Error: no zip extractor available (need one of: unzip, bsdtar, busybox, python3)." >&2
+        echo "       This tool ships as a .zip. Install any ONE of those — python3, or a" >&2
+        echo "       user-local build of unzip/bsdtar, needs no root — then re-run." >&2
+        return 1
+    fi
+}
+
+# ----------------------------------------------------------------------
 # New helper: Detect broken symlinks, missing runtimes, or invalid binaries
 # ----------------------------------------------------------------------
 fb_check_bin() {

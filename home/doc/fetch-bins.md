@@ -61,6 +61,15 @@ Key `_lib.sh` helpers:
 - `gh_latest_tag` / `gh_asset_url` / `gh_download` — GitHub release helpers (the
   first two use `jq`). `gh_latest_tag_nojq` is the `grep`/`awk` variant used only
   by the jq bootstrap, which cannot depend on jq.
+- `fb_unzip zip destdir` — extract a `.zip` with **no root and no system `unzip`**
+  (the prime directive: an unprivileged user must still end up fully operational).
+  Tries, in order, `unzip` → `bsdtar` → `busybox unzip` → `python3`; every path
+  **preserves the unix exec bit** (the `python3` fallback restores it from the
+  archive's stored attributes, which a bare `python3 -m zipfile -e` drops — that
+  would leave protoc's `bin/protoc` non-executable). Fails loud only if *none* of
+  the four exist. Set `FB_UNZIP_BACKEND=unzip|bsdtar|busybox|python3` to pin a
+  single backend (used by the test harness to prove each path in isolation). Used
+  by broot, ninja, and protoc.
 - `fetch_jq` / `fetch_chezmoi` — the two bootstrap installers that live in
   `_lib.sh` (not standalone scripts) so the root installer can call them from the
   checkout before `chezmoi apply` exists. `01_fetch.jq.sh` and `09_fetch.chezmoi.sh`
@@ -96,8 +105,8 @@ Key `_lib.sh` helpers:
   a **.zip** (not a tarball), so it unzips instead of untars but is otherwise the
   plain `install_bin` pattern. The release assets are named by platform, not the
   usual arch tokens (`ninja-linux.zip`, `ninja-linux-aarch64.zip`,
-  `ninja-mac.zip`), so it matches the exact asset name. Requires `unzip` (fails
-  loud with an install hint if absent).
+  `ninja-mac.zip`), so it matches the exact asset name. Extracted via `fb_unzip`,
+  so no system `unzip` is required.
 - **starship** (`13_fetch.starship.sh`) is the prompt for **both** shells (see
   `doc/shell.md`), fetched as a single static binary in a `.tar.gz` — the plain
   `install_bin` pattern, same shape as fzf. Its asset arch tokens are Rust target
@@ -112,7 +121,8 @@ Key `_lib.sh` helpers:
   `install_bin`: the whole tree is extracted into `~/.local/apps/protoc-<ver>/` and
   `~/.local/bin/protoc` is symlinked straight at `bin/protoc` so `../include` still
   resolves. Asset arch tokens differ from `uname` (`x86_64`, `aarch_64`, `osx-*`)
-  and the asset version omits the tag's leading `v`. Also requires `unzip`.
+  and the asset version omits the tag's leading `v`. Extracted via `fb_unzip`
+  (which preserves `bin/protoc`'s exec bit), so no system `unzip` is required.
 
 ## chezmoi source layout (`home/`)
 - Attribute-encoded names: `dot_*`, `private_*` (e.g. `private_dot_ssh` → 0700),

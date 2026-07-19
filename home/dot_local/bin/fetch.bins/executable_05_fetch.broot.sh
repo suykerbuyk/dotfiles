@@ -22,7 +22,7 @@ ASSET_URL="$(gh_asset_url Canop/broot 'true' '')"  # first asset
 TARBALL="${FB_TMP}/broot.zip"  # actually a zip
 gh_download "$ASSET_URL" "$TARBALL"
 
-unzip -q "$TARBALL" -d "$FB_TMP"
+fb_unzip "$TARBALL" "$FB_TMP"   # no system 'unzip' needed (see _lib.sh fb_unzip)
 BIN_SRC="$FB_TMP/${ARCH}-unknown-${OS}-musl/broot"
 
 install_bin "$BIN_SRC" "$BIN_NAME" --version

@@ -15,12 +15,9 @@ set -euo pipefail
 BIN_NAME="protoc"
 fb_init
 
-# protoc needs 'unzip' (its release asset is a .zip, unlike the tarball tools).
-if ! command -v unzip >/dev/null 2>&1; then
-    echo "Error: 'unzip' is required to install protoc (its release is a .zip)." >&2
-    echo "       Install it (e.g. 'sudo apt install unzip' or 'sudo pacman -S unzip') and re-run." >&2
-    exit 1
-fi
+# protoc's release asset is a .zip; fb_unzip (see _lib.sh) extracts it with any
+# no-root tool (unzip/bsdtar/busybox/python3) and preserves the exec bit on
+# bin/protoc, so no system 'unzip' is required.
 
 # protoc's asset arch tokens differ from uname: x86_64 stays, aarch64 -> aarch_64.
 # macOS uses the 'osx-<arch>' prefix. The asset version omits the tag's leading 'v'.
@@ -59,7 +56,7 @@ gh_download "$ASSET_URL" "$ZIP"
 # partial/old extraction of this exact version first.
 rm -rf "$VERSION_DIR"
 mkdir -p "$VERSION_DIR"
-unzip -oq "$ZIP" -d "$VERSION_DIR"   # yields bin/protoc, include/…, readme.txt
+fb_unzip "$ZIP" "$VERSION_DIR"   # yields bin/protoc, include/…, readme.txt
 
 # Verify in place (include/ sits next to bin/) before linking.
 if ! "$PROTOC_BIN" --version >/dev/null 2>&1; then
