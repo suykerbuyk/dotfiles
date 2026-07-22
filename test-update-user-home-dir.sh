@@ -7,8 +7,10 @@
 #   ./test-update-user-home-dir.sh            # structural + light network (jq/chezmoi)
 #   ./test-update-user-home-dir.sh --go       # also exercise the 150 MB Go fetch
 #   ./test-update-user-home-dir.sh --rust     # also exercise the rustup toolchain fetch
+#   ./test-update-user-home-dir.sh --podman   # also exercise the 32 MB podman static fetch
 #   RUN_GO_FETCH=1 ./test-update-user-home-dir.sh
 #   RUN_RUST_FETCH=1 ./test-update-user-home-dir.sh
+#   RUN_PODMAN_FETCH=1 ./test-update-user-home-dir.sh
 #   ./test-update-user-home-dir.sh --no-net   # structural only (needs a chezmoi on PATH)
 #
 # ninja is a small, fast release-zip fetcher, so it runs in the default
@@ -25,11 +27,13 @@ SRC="$REPO/home"
 
 RUN_GO="${RUN_GO_FETCH:-0}"
 RUN_RUST="${RUN_RUST_FETCH:-0}"
+RUN_PODMAN="${RUN_PODMAN_FETCH:-0}"
 NET=1
 for a in "$@"; do
     case "$a" in
         --go) RUN_GO=1 ;;
         --rust) RUN_RUST=1 ;;
+        --podman) RUN_PODMAN=1 ;;
         --no-net) NET=0 ;;
         --help|-h) sed -n '2,/^set /{/^set /d;s/^# \{0,1\}//p}' "$0"; exit 0 ;;
         *) echo "unknown arg: $a" >&2; exit 2 ;;
@@ -55,7 +59,7 @@ unset XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS   # simulate headless -> Phase 4 
 BIN_DIR="$SB/.local/bin"; APP_DIR="$SB/.local/apps"
 
 echo "sandbox HOME=$SB"
-echo "repo=$REPO   go-fetch=$([[ $RUN_GO == 1 ]] && echo on || echo off)   rust-fetch=$([[ $RUN_RUST == 1 ]] && echo on || echo off)   network=$([[ $NET == 1 ]] && echo on || echo off)"
+echo "repo=$REPO   go-fetch=$([[ $RUN_GO == 1 ]] && echo on || echo off)   rust-fetch=$([[ $RUN_RUST == 1 ]] && echo on || echo off)   podman-fetch=$([[ $RUN_PODMAN == 1 ]] && echo on || echo off)   network=$([[ $NET == 1 ]] && echo on || echo off)"
 
 # ---- locate a chezmoi binary (fetch into sandbox if needed) ----------------
 sec "setup: chezmoi binary"
@@ -389,6 +393,38 @@ assert "dotfiles-keys helper present"               "[[ -f home/dot_local/bin/ex
 assert "dotfiles-keys is valid bash"                "bash -n home/dot_local/bin/executable_dotfiles-keys"
 
 # ===========================================================================
+# Structural checks for the podman fetcher — source-only (grep/bash -n), so they
+# run in every group. The real fetch is 32 MB and network-gated behind --podman
+# (below), and MUST NOT run in the default group.
+sec "structural: podman fetcher wiring (no network)"
+PODMAN_FETCHER="home/dot_local/bin/fetch.bins/executable_12_fetch.podman.sh"
+assert "podman fetcher present"                     "[[ -f $PODMAN_FETCHER ]]"
+assert "podman fetcher is valid bash"               "bash -n $PODMAN_FETCHER"
+assert "podman fetcher sources _lib.sh"             "grep -q '_lib.sh' $PODMAN_FETCHER"
+assert "podman fetcher uses whole-tree extract"     "grep -q 'strip-components=1' $PODMAN_FETCHER"
+assert "podman fetcher sets conmon_path (spike-critical)" "grep -q 'conmon_path' $PODMAN_FETCHER"
+assert "podman fetcher generates containers.conf"   "grep -q 'containers.conf' $PODMAN_FETCHER"
+assert "podman fetcher generates storage.conf"      "grep -q 'storage.conf' $PODMAN_FETCHER"
+# The fetcher NAMES runroot in a comment ("OMIT runroot"), so assert it writes no
+# runroot KEY (a `runroot = ...` TOML assignment), not that the word is absent.
+assert "podman fetcher writes no runroot key"       "! grep -qE 'runroot[[:space:]]*=' $PODMAN_FETCHER"
+assert "podman fetcher emits podman-rootless-setup" "grep -q 'podman-rootless-setup' $PODMAN_FETCHER"
+# The generated setup script must itself be valid bash. Extract the quoted-heredoc
+# body (between the `<<'SETUP_EOF'` open line and the bare `SETUP_EOF` close) and
+# bash -n it, so a typo in the generated helper fails here, not at the user's sudo.
+SETUP_TMP="$(mktemp)"
+awk "/<<'SETUP_EOF'/{f=1; next} /^SETUP_EOF\$/{f=0} f" "$PODMAN_FETCHER" > "$SETUP_TMP"
+assert "generated podman-rootless-setup is valid bash" "[[ -s $SETUP_TMP ]] && bash -n $SETUP_TMP"
+rm -f "$SETUP_TMP"
+# Doctor registry + protoc fold-in (protoc was removed in iter 27).
+assert "doctor registry lists podman"               "grep -q 'podman|podman|' home/dot_config/shell/doctor.sh"
+assert "protoc fully removed from doctor.sh"         "! grep -q protoc home/dot_config/shell/doctor.sh"
+assert "protoc fully removed from installer"         "! grep -q protoc update-user-home-dir.sh"
+# Installer uninstall special-case for podman (versioned dir + generated helper).
+assert "installer uninstall handles podman versioned dir" "grep -q 'podman-\*' update-user-home-dir.sh"
+assert "installer uninstall removes podman-rootless-setup" "grep -q 'podman-rootless-setup' update-user-home-dir.sh"
+
+# ===========================================================================
 if [[ $NET == 1 ]]; then
     sec "network: fetch_chezmoi + a real fetcher (jq) + remove_bin"
     ( set +e; . "$LIB" >/dev/null 2>&1; fb_init; fetch_chezmoi >/dev/null 2>&1 )
@@ -514,6 +550,29 @@ if [[ $RUN_RUST == 1 ]]; then
     fi
 else
     skip "rust fetcher (pass --rust or RUN_RUST_FETCH=1 to enable)"
+fi
+
+# ===========================================================================
+if [[ $RUN_PODMAN == 1 ]]; then
+    sec "podman fetcher (32 MB static) — whole-tree install + host-local config"
+    if [[ -x "$SB/.local/bin/fetch.bins/12_fetch.podman.sh" ]]; then
+        "$SB/.local/bin/fetch.bins/12_fetch.podman.sh" >/dev/null 2>&1
+        # Headless-safe: XDG_RUNTIME_DIR is unset (line ~54) and the fetcher only
+        # runs `podman --version` (never info/run), so no userns/runtime needed.
+        assert "podman installed + --version works" "\"$BIN_DIR/podman\" --version >/dev/null 2>&1"
+        assert "podman symlink -> ~/.local/apps"    "[[ \"\$(readlink -f \"$BIN_DIR/podman\")\" == \"$APP_DIR\"/* ]]"
+        # XDG_CONFIG_HOME=$SB/.config, so the generated config lands here.
+        CCONF="$SB/.config/containers/containers.conf"
+        SCONF="$SB/.config/containers/storage.conf"
+        assert "containers.conf generated with conmon_path" "[[ -f \"$CCONF\" ]] && grep -q conmon_path \"$CCONF\""
+        assert "storage.conf generated and omits runroot"   "[[ -f \"$SCONF\" ]] && ! grep -q runroot \"$SCONF\""
+        assert "podman-rootless-setup generated + executable + valid bash" \
+            "[[ -x \"$BIN_DIR/podman-rootless-setup\" ]] && bash -n \"$BIN_DIR/podman-rootless-setup\""
+    else
+        skip "podman fetcher not present (apply group did not run)"
+    fi
+else
+    skip "podman fetcher (pass --podman or RUN_PODMAN_FETCH=1 to enable)"
 fi
 
 # ---- summary ---------------------------------------------------------------

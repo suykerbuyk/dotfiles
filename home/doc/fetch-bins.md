@@ -114,6 +114,27 @@ Key `_lib.sh` helpers:
   normalizes to, so it uses `uname -m` directly. It selects the **musl** build:
   it is fully static, and it is the only linux build published for aarch64, so one
   selector covers both architectures.
+- **podman** (`12_fetch.podman.sh`) is **not** a single-binary `install_bin`
+  fetcher — it mirrors the go whole-tree pattern. The `mgoltzsche/podman-static`
+  release tarball is a complete static userland (podman + crun/runc/pasta/
+  fuse-overlayfs plus the helper binaries conmon/netavark/aardvark-dns/
+  rootlessport/quadlet), extracted into `~/.local/apps/podman-<ver>/` with
+  `--strip-components=1`; **only** `podman` is symlinked onto `PATH` (the helpers
+  are resolved by config, not `PATH`). Because podman finds those helpers via
+  *config files that embed absolute paths* into the version dir, the fetcher
+  **regenerates host-local `~/.config/containers/{containers,storage}.conf` every
+  run** so the embedded paths always point at the live version. `containers.conf`
+  must set `conmon_path` explicitly — `helper_binaries_dir` does **not** cover
+  conmon, and without it podman dies "could not find a working conmon binary".
+  `storage.conf` **omits `runroot`** so podman derives `$XDG_RUNTIME_DIR/containers`
+  (a fixed on-disk runroot would be wrong). `policy.json`/`registries.conf`/
+  `seccomp.json` are copied verbatim (no path substitution). It also emits
+  `~/.local/bin/podman-rootless-setup` — a distro-aware, root-run helper for the
+  one-time host steps full multi-UID rootless needs (subuid/subgid range, the
+  `uidmap` package, the userns sysctl). The fetcher itself **never calls sudo**: it
+  detects the rootless state and prints advisory guidance, always exiting 0. Its
+  network test is gated behind `--podman` (`RUN_PODMAN_FETCH=1`), since the fetch
+  is 32 MB.
 
 ## chezmoi source layout (`home/`)
 - Attribute-encoded names: `dot_*`, `private_*` (e.g. `private_dot_ssh` → 0700),

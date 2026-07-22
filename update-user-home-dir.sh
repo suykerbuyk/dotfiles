@@ -77,11 +77,11 @@ if $UNINSTALL; then
     echo "-- fetched tools --"
     # Plain single-binary tools: remove_bin clears the ~/.local/bin symlink and
     # the ~/.local/apps/<name> runtime. Versioned runtime dirs (go<ver>/,
-    # nvim-<ver>/, protoc-<ver>/) are intentionally left; the active symlink is
+    # nvim-<ver>/) are intentionally left; the active symlink is
     # gone, so the tool is no longer on PATH. Keep this list in lockstep with the
     # fetch.bins/ scripts (every 0N_fetch.<tool>.sh must map to an entry here, a
     # special case below, or the rust block).
-    for b in jq rg go gofmt broot fzf nvim ninja protoc starship chezmoi age age-keygen; do
+    for b in jq rg go gofmt broot fzf nvim ninja starship chezmoi age age-keygen; do
         if $FORCE; then remove_bin "$b"; else echo "  would remove_bin $b"; fi
     done
     # nvm does not fit remove_bin: its PATH artifact is ~/.local/bin/nvm.sh (not
@@ -102,6 +102,26 @@ if $UNINSTALL; then
         echo "  removed zed (zed.app bundle + desktop entry)"
     else
         echo "  would remove zed (~/.local/apps/zed.app + desktop entry)"
+    fi
+    # podman needs a special case like zed/nvm: remove_bin podman would only
+    # clear the ~/.local/bin/podman symlink, but the podman fetcher also drops a
+    # versioned whole-userland tree (~/.local/apps/podman-<ver>/), a generated
+    # PATH helper (~/.local/bin/podman-rootless-setup), and host-local config
+    # under ~/.config/containers — none of which remove_bin knows about.
+    if $FORCE; then
+        rm -rf "$HOME"/.local/apps/podman-*
+        rm -f  "$HOME/.local/bin/podman" "$HOME/.local/bin/podman-rootless-setup"
+        # Surgical config removal: ~/.config/containers may pre-exist from a
+        # system podman/buildah, so DON'T rm -rf the dir. Delete only the exact
+        # files our fetcher generates, then rmdir the dir if that left it empty
+        # (rmdir fails harmlessly on a non-empty dir, preserving a foreign one).
+        CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/containers"
+        rm -f "$CONF_DIR"/containers.conf "$CONF_DIR"/storage.conf \
+              "$CONF_DIR"/policy.json "$CONF_DIR"/registries.conf "$CONF_DIR"/seccomp.json
+        rmdir "$CONF_DIR" 2>/dev/null || true
+        echo "  removed podman (~/.local/apps/podman-* + podman symlink + podman-rootless-setup + generated ~/.config/containers config)"
+    else
+        echo "  would remove podman (~/.local/apps/podman-* + podman symlink + podman-rootless-setup + generated ~/.config/containers config)"
     fi
     # Rust is not a remove_bin tool: rustup owns ~/.cargo and ~/.rustup, so let
     # it tear itself down cleanly (removes toolchains, cargo, and the homes).

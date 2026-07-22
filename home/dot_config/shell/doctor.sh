@@ -30,7 +30,7 @@ _dotfiles_registry() {
         'go|go|' \
         'cargo|rust|' \
         'ninja|ninja|' \
-        'protoc|protoc|' \
+        'podman|podman|' \
         'zed|zed|' \
         'chezmoi|chezmoi|' \
         'tv|| not provisioned by fetch.bins' \
