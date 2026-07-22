@@ -66,10 +66,10 @@ Key `_lib.sh` helpers:
   Tries, in order, `unzip` → `bsdtar` → `busybox unzip` → `python3`; every path
   **preserves the unix exec bit** (the `python3` fallback restores it from the
   archive's stored attributes, which a bare `python3 -m zipfile -e` drops — that
-  would leave protoc's `bin/protoc` non-executable). Fails loud only if *none* of
+  would leave `ninja` non-executable). Fails loud only if *none* of
   the four exist. Set `FB_UNZIP_BACKEND=unzip|bsdtar|busybox|python3` to pin a
   single backend (used by the test harness to prove each path in isolation). Used
-  by broot, ninja, and protoc.
+  by broot and ninja.
 - `fetch_jq` / `fetch_chezmoi` — the two bootstrap installers that live in
   `_lib.sh` (not standalone scripts) so the root installer can call them from the
   checkout before `chezmoi apply` exists. `01_fetch.jq.sh` and `09_fetch.chezmoi.sh`
@@ -114,15 +114,6 @@ Key `_lib.sh` helpers:
   normalizes to, so it uses `uname -m` directly. It selects the **musl** build:
   it is fully static, and it is the only linux build published for aarch64, so one
   selector covers both architectures.
-- **protoc** (`12_fetch.protoc.sh`) ships a **.zip** bundling both `bin/protoc`
-  **and** `include/google/protobuf/*.proto` (the well-known types). protoc resolves
-  those imports relative to its own real binary (`../include`, via
-  `/proc/self/exe`), so — like Go's `GOROOT` — it is **not** copied out via
-  `install_bin`: the whole tree is extracted into `~/.local/apps/protoc-<ver>/` and
-  `~/.local/bin/protoc` is symlinked straight at `bin/protoc` so `../include` still
-  resolves. Asset arch tokens differ from `uname` (`x86_64`, `aarch_64`, `osx-*`)
-  and the asset version omits the tag's leading `v`. Extracted via `fb_unzip`
-  (which preserves `bin/protoc`'s exec bit), so no system `unzip` is required.
 
 ## chezmoi source layout (`home/`)
 - Attribute-encoded names: `dot_*`, `private_*` (e.g. `private_dot_ssh` → 0700),

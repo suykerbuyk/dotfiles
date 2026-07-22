@@ -11,7 +11,7 @@
 #   RUN_RUST_FETCH=1 ./test-update-user-home-dir.sh
 #   ./test-update-user-home-dir.sh --no-net   # structural only (needs a chezmoi on PATH)
 #
-# ninja + protoc are small, fast release-zip fetchers, so they run in the default
+# ninja is a small, fast release-zip fetcher, so it runs in the default
 # network group (no opt-in flag); only the heavy go/rust toolchains are gated.
 #
 # Exit code is non-zero if any assertion fails.
@@ -446,23 +446,14 @@ if [[ $NET == 1 ]]; then
         skip "chezmoi+age round-trip (age or chezmoi unavailable)"
     fi
 
-    # ninja + protoc are small, fast release-zip fetchers -> default group.
-    sec "network: zip-based fetchers (ninja, protoc)"
+    # ninja is a small, fast release-zip fetcher -> default group.
+    sec "network: zip-based fetchers (ninja)"
     if [[ -x "$SB/.local/bin/fetch.bins/11_fetch.ninja.sh" ]]; then
         "$SB/.local/bin/fetch.bins/11_fetch.ninja.sh" >/dev/null 2>&1
         assert "ninja installed + runnable"      "\"$BIN_DIR/ninja\" --version >/dev/null 2>&1"
         assert "ninja symlink -> ~/.local/apps"  "[[ \"\$(readlink -f \"$BIN_DIR/ninja\")\" == \"$APP_DIR\"/* ]]"
     else
         skip "ninja fetcher not present (apply group did not run)"
-    fi
-    if [[ -x "$SB/.local/bin/fetch.bins/12_fetch.protoc.sh" ]]; then
-        "$SB/.local/bin/fetch.bins/12_fetch.protoc.sh" >/dev/null 2>&1
-        assert "protoc installed + runnable"      "\"$BIN_DIR/protoc\" --version >/dev/null 2>&1"
-        assert "protoc symlink -> ~/.local/apps"  "[[ \"\$(readlink -f \"$BIN_DIR/protoc\")\" == \"$APP_DIR\"/* ]]"
-        # well-known types must resolve relative to the binary (../include)
-        assert "protoc well-known include/ present" "[[ -f \"\$(dirname \"\$(dirname \"\$(readlink -f \"$BIN_DIR/protoc\")\")\")/include/google/protobuf/timestamp.proto\" ]]"
-    else
-        skip "protoc fetcher not present (apply group did not run)"
     fi
 
     # starship is a small static musl tarball -> default group. It is the prompt
