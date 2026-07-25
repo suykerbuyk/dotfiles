@@ -41,6 +41,27 @@ the source name carries `empty_`. A 0-byte or whitespace-only tracked file will
 so repo docs don't leak into `~/doc`). The machine-specific broot launcher
 (`.config/broot/launcher/bash/br`, an absolute symlink) is simply not tracked.
 
+## nvim plugin lockfile (`lazy-lock.json`)
+
+`home/dot_config/nvim-kickstart-modular/lazy-lock.json` is **tracked**, so a
+fresh machine's first `Lazy! restore` reproduces the exact plugin set that was
+last health-checked, instead of floating to latest of everything. (The
+`.gitignore` *inside* the nvim config dir ignores it — that file is upstream
+kickstart's and only matters if the applied dir were its own git repo; this
+repo tracks the lockfile normally.)
+
+The lockfile is rewritten by nvim itself whenever plugins move, which makes it
+the one managed file with a **reverse** flow (machine → repo):
+
+1. update on one machine: `nvim --headless "+Lazy! update" +qa`, then reverify
+   (checkhealth clean, suite green),
+2. `chezmoi re-add ~/.config/nvim-kickstart-modular/lazy-lock.json` (or
+   `chezmoi add` — same effect) to pull it back into the source,
+3. commit; other machines converge on their next `chezmoi apply`.
+
+Skipping step 2 means the next `chezmoi apply` **reverts the local update** to
+the committed lockfile — same trap as hand-editing the managed rc stubs.
+
 ## Bootstrap order: fetch → apply → fetch tools
 
 Because script names are encoded (`executable_01_fetch.jq.sh`), the fetch scripts

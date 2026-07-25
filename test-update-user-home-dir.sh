@@ -451,6 +451,28 @@ assert "treesitter spec installs go+rust parsers"   "grep -q \"'go',\" $TS_SPEC 
 assert "no nvim-treesitter.configs left in config"  "! grep -rq 'nvim-treesitter.configs' home/dot_config/nvim-kickstart-modular/"
 assert "duplicate custom treesitter spec removed"   "[[ ! -e home/dot_config/nvim-kickstart-modular/lua/custom/plugins/treesitter.lua ]]"
 
+# lazy-lock.json is tracked so fresh machines `Lazy! restore` to a verified
+# plugin set instead of floating to latest. It must stay valid JSON with a
+# pinned lazy.nvim entry (jq is a phase-1 install, present on any working box).
+LAZY_LOCK="home/dot_config/nvim-kickstart-modular/lazy-lock.json"
+assert "lazy-lock.json tracked in nvim source"      "[[ -f $LAZY_LOCK ]]"
+assert "lazy-lock.json is valid JSON"               "jq empty $LAZY_LOCK"
+assert "lazy-lock.json pins lazy.nvim itself"       "jq -e '.[\"lazy.nvim\"].commit' $LAZY_LOCK >/dev/null"
+
+# Format-on-save consolidation: conform is the ONLY formatter driver. none-ls
+# must stay diagnostics-only (its old vim.lsp.buf.format autocmd re-formatted
+# every buffer conform had just formatted), no GoFormat autocmd may return
+# (go.nvim's goimports() is an async gopls action that can write after the
+# save), and python must keep ruff_organize_imports or import sorting is lost.
+NVIM_LUA="home/dot_config/nvim-kickstart-modular/lua"
+assert "conform python keeps import sorting"        "grep -q 'ruff_organize_imports' $NVIM_LUA/custom/plugins/conform.lua"
+assert "none-ls has no formatting sources"          "! grep -qE 'builtins\.formatting|LspFormatting' $NVIM_LUA/custom/plugins/none-ls.lua"
+assert "no GoFormat autocmd in config"              "! grep -rq \"nvim_create_augroup('GoFormat'\" $NVIM_LUA/"
+assert "duplicate kickstart conform spec removed"   "[[ ! -e $NVIM_LUA/kickstart/plugins/conform.lua ]]"
+assert "fzf-lua dependency removed"                 "! grep -rq 'ibhagwan/fzf-lua' $NVIM_LUA/"
+assert "mason-null-ls removed"                      "! grep -rq 'mason-null-ls' $NVIM_LUA/"
+assert "unused host providers disabled"             "grep -q 'loaded_node_provider = 0' home/dot_config/nvim-kickstart-modular/init.lua"
+
 # ===========================================================================
 if [[ $NET == 1 ]]; then
     sec "network: fetch_chezmoi + a real fetcher (jq) + remove_bin"

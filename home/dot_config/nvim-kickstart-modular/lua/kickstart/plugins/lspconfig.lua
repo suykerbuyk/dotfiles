@@ -252,7 +252,15 @@ return {
       -- for you, so that they are available from within Neovim.
       local ensure_installed = vim.tbl_keys(servers or {})
       vim.list_extend(ensure_installed, {
+        -- The single install list for every non-server tool. conform.nvim
+        -- drives these as formatters but has no installer of its own, and
+        -- none-ls needs checkmake for its diagnostics source.
         'stylua', -- Used to format Lua code
+        'prettier', -- js/json/markdown/html/yaml formatter
+        'shfmt', -- shell formatter
+        'ruff', -- python formatter + import sorter
+        'taplo', -- toml formatter
+        'checkmake', -- Makefile diagnostics (none-ls source)
       })
       require('mason-tool-installer').setup { ensure_installed = ensure_installed }
 

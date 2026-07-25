@@ -1,4 +1,3 @@
-local utils = require 'utils'
 local Job = require 'plenary.job'
 
 -- local _anthropic = {
@@ -46,9 +45,9 @@ local Job = require 'plenary.job'
 
 local M = {
   'frankroeder/parrot.nvim',
-  event = 'VeryLazy',
-  dependencies = { 'ibhagwan/fzf-lua', 'nvim-lua/plenary.nvim' },
-  dev = vim.fn.has 'macunix' == 1 and vim.fn.expand '$USER' == 'frankroeder',
+  -- parrot's chat finder falls back fzf-lua -> telescope -> vim.ui.select;
+  -- telescope is already this config's picker, so no fzf-lua dependency
+  dependencies = { 'nvim-lua/plenary.nvim' },
   lazy = false,
   config = function(_, opts)
     -- add ollama if executable found
@@ -318,10 +317,10 @@ local M = {
     command_auto_select_response = true,
     show_context_hints = true,
     model_cache_expiry_hours = 72,
-    prompts = {
-      ['git commit message'] = [[Given the following git diff, I want you to compose a short git commit message ]]
-        .. vim.fn.system 'git diff --no-color --no-ext-diff --staged',
-    },
+    -- No `prompts` entries: their values are plain strings built at config
+    -- time (a function here errors inside parrot), so anything dynamic —
+    -- like a staged git diff — belongs in a hook (see CommitMsg below),
+    -- which runs at invocation time.
     hooks = {
       Complete = function(prt, params)
         local template = [[

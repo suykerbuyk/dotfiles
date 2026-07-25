@@ -31,7 +31,8 @@ require('lazy').setup({
 
   require 'kickstart.plugins.lspconfig',
 
-  require 'kickstart.plugins.conform',
+  -- conform comes from custom/plugins/conform.lua (the sole formatting owner);
+  -- the kickstart fragment was fully shadowed by lazy's spec merge and is not loaded
 
   require 'kickstart.plugins.blink-cmp',
 
