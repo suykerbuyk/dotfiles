@@ -69,6 +69,11 @@ require('lazy').setup({
   -- In normal mode type `<space>sh` then write `lazy.nvim-plugin`
   -- you can continue same window with `<space>sr` which resumes last telescope search
 }, {
+  -- No plugin in this config uses luarocks dependencies, so keep lazy.nvim's
+  -- rocks machinery (and its hererocks lua-5.1 checkhealth demands) off.
+  -- If a future plugin ships a rockspec, re-enable this — lazy then builds a
+  -- local lua 5.1 + luarocks under stdpath('data')/lazy-rocks via hererocks.
+  rocks = { enabled = false },
   ui = {
     -- If you are using a Nerd Font: set icons to an empty table which will use the
     -- default lazy.nvim defined Nerd Font icons, otherwise define a unicode icons table

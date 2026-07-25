@@ -6,6 +6,10 @@ return {
     'nvim-treesitter/nvim-treesitter',
   },
   opts = {
+    -- go.nvim configures gopls itself (found on PATH) with go-tuned defaults;
+    -- kickstart's lspconfig leaves gopls commented out, so without this no
+    -- LSP attaches to Go buffers at all.
+    lsp_cfg = true,
     -- lsp_keymaps = false,
     -- other options
   },
