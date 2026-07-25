@@ -114,6 +114,18 @@ Key `_lib.sh` helpers:
   normalizes to, so it uses `uname -m` directly. It selects the **musl** build:
   it is fully static, and it is the only linux build published for aarch64, so one
   selector covers both architectures.
+- **nvim** (`07_fetch.nvim.sh`) extracts the release tarball whole into
+  `~/.local/apps/nvim-<ver>/` and symlinks `~/.local/bin/nvim` **directly at
+  the in-tree binary** — the go pattern, **never** `install_bin`: its copy step
+  detaches the binary from `share/nvim/runtime`, `$VIMRUNTIME` then falls back
+  to the compile-time `/usr/local` paths, and startup floods with E5113/E484.
+  The fetcher also deletes the legacy detached copy at `~/.local/apps/nvim`
+  left by the old install_bin flow, so machines self-heal on their next run.
+- **tree-sitter** (`15_fetch.tree-sitter.sh`) is the tree-sitter CLI, required
+  by nvim-treesitter's `main` branch (>= 0.26.1) to build parser grammars. A
+  single static binary shipped as a **bare `.gz`** (no tarball), so it gunzips
+  then follows the plain `install_bin` pattern. Its asset arch tokens are
+  node-style (`x64`/`arm64`), so it maps `uname -m` explicitly.
 - **podman** (`12_fetch.podman.sh`) is **not** a single-binary `install_bin`
   fetcher — it mirrors the go whole-tree pattern. The `mgoltzsche/podman-static`
   release tarball is a complete static userland (podman + crun/runc/pasta/

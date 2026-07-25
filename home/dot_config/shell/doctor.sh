@@ -31,6 +31,7 @@ _dotfiles_registry() {
         'cargo|rust|' \
         'ninja|ninja|' \
         'podman|podman|' \
+        'tree-sitter|tree-sitter| parser CLI for nvim-treesitter' \
         'zed|zed|' \
         'chezmoi|chezmoi|' \
         'tv|| not provisioned by fetch.bins' \

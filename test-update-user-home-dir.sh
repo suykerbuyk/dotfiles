@@ -425,6 +425,33 @@ assert "installer uninstall handles podman versioned dir" "grep -q 'podman-\*' u
 assert "installer uninstall removes podman-rootless-setup" "grep -q 'podman-rootless-setup' update-user-home-dir.sh"
 
 # ===========================================================================
+# Structural checks for the nvim runtime fix + tree-sitter CLI fetcher — source
+# only, run in every group. The nvim fetcher must NEVER route through
+# install_bin: its copy step detaches the binary from the release tree, nvim
+# then can't find its runtime (VIMRUNTIME falls back to compile-time
+# /usr/local paths) and startup floods with E5113/E484.
+sec "structural: nvim in-place symlink + tree-sitter fetcher wiring (no network)"
+NVIM_FETCHER="home/dot_local/bin/fetch.bins/executable_07_fetch.nvim.sh"
+assert "nvim fetcher is valid bash"                 "bash -n $NVIM_FETCHER"
+assert "nvim fetcher never CALLS install_bin"       "! grep -qE '^[[:space:]]*install_bin[[:space:]]' $NVIM_FETCHER"
+assert "nvim fetcher symlinks into versioned tree"  "grep -q 'ln -sfn \"\$NVIM_BIN\"' $NVIM_FETCHER"
+assert "nvim fetcher removes legacy detached copy"  "grep -q 'rm -f \"\${APP_DIR}/\${BIN_NAME}\"' $NVIM_FETCHER"
+TS_FETCHER="home/dot_local/bin/fetch.bins/executable_15_fetch.tree-sitter.sh"
+assert "tree-sitter fetcher present"                "[[ -f $TS_FETCHER ]]"
+assert "tree-sitter fetcher is valid bash"          "bash -n $TS_FETCHER"
+assert "tree-sitter fetcher sources _lib.sh"        "grep -q '_lib.sh' $TS_FETCHER"
+assert "tree-sitter fetcher gunzips the bare .gz"   "grep -q 'gunzip' $TS_FETCHER"
+assert "doctor registry lists tree-sitter"          "grep -q 'tree-sitter|tree-sitter|' home/dot_config/shell/doctor.sh"
+# nvim-treesitter main-branch migration: the old configs-module API must be
+# gone from the config source, and the duplicate custom spec stays deleted
+# (its go/rust parsers are folded into the kickstart spec).
+TS_SPEC="home/dot_config/nvim-kickstart-modular/lua/kickstart/plugins/treesitter.lua"
+assert "treesitter spec pins branch = 'main'"       "grep -q \"branch = 'main'\" $TS_SPEC"
+assert "treesitter spec installs go+rust parsers"   "grep -q \"'go',\" $TS_SPEC && grep -q \"'rust',\" $TS_SPEC"
+assert "no nvim-treesitter.configs left in config"  "! grep -rq 'nvim-treesitter.configs' home/dot_config/nvim-kickstart-modular/"
+assert "duplicate custom treesitter spec removed"   "[[ ! -e home/dot_config/nvim-kickstart-modular/lua/custom/plugins/treesitter.lua ]]"
+
+# ===========================================================================
 if [[ $NET == 1 ]]; then
     sec "network: fetch_chezmoi + a real fetcher (jq) + remove_bin"
     ( set +e; . "$LIB" >/dev/null 2>&1; fb_init; fetch_chezmoi >/dev/null 2>&1 )
