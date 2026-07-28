@@ -1,11 +1,10 @@
 #!/bin/sh
-# dotfiles-keys — trampoline into the checkout's ./keys management CLI.
-# Implementation lives at the repo root (see ./keys). Applied to
-# ~/.local/bin/dotfiles-keys so the command works from any directory after apply.
+# dotfiles-doctor — trampoline into the checkout's ./doctor management CLI.
+# Implementation lives at the repo root (see ./doctor). Applied to
+# ~/.local/bin/dotfiles-doctor for use from any directory after apply.
 set -eu
 
 resolve_root() {
-	# 1) chezmoi.toml sourceDir (works even when chezmoi is not on PATH)
 	cfg="${HOME}/.config/chezmoi/chezmoi.toml"
 	if [ -r "$cfg" ]; then
 		src=$(sed -n 's/^[[:space:]]*sourceDir[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' "$cfg" | head -1)
@@ -14,7 +13,6 @@ resolve_root() {
 			return 0
 		fi
 	fi
-	# 2) chezmoi source-path
 	cm=
 	if [ -x "${HOME}/.local/bin/chezmoi" ]; then
 		cm=${HOME}/.local/bin/chezmoi
@@ -32,11 +30,11 @@ resolve_root() {
 }
 
 root=$(resolve_root) || {
-	echo "dotfiles-keys: cannot find the dotfiles checkout (set sourceDir in ~/.config/chezmoi/chezmoi.toml)" >&2
+	echo "dotfiles-doctor: cannot find the dotfiles checkout (set sourceDir in ~/.config/chezmoi/chezmoi.toml)" >&2
 	exit 1
 }
-[ -x "$root/keys" ] || {
-	echo "dotfiles-keys: missing $root/keys" >&2
+[ -x "$root/doctor" ] || {
+	echo "dotfiles-doctor: missing $root/doctor" >&2
 	exit 1
 }
-exec "$root/keys" "$@"
+exec "$root/doctor" "$@"

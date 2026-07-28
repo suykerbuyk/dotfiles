@@ -134,7 +134,22 @@ its completions/`fpath` line in `local.d/50-grok.sh`. The `fpath=(…)` line in
 particular *cannot* be re-sourced (it stacks duplicates), which is the concrete
 reason the two directories are separate rather than one sourced from both layers.
 
-## Dotfiles awareness — `dotfiles-doctor`
+## Dotfiles awareness — `./doctor` / `dotfiles-doctor`
+
+The health report is a **real CLI** at the repo root (`./doctor`). The
+implementation and tool registry live under [`lib/`](../../lib/)
+(`doctor-report.sh`, `doctor-registry.sh`). After apply,
+`~/.local/bin/dotfiles-doctor` trampolines into that script.
+
+Interactive shells still expose the hyphenated name as a thin function in
+`doctor.sh` (rc layer only — dash cannot parse `foo-bar()` in the env layer)
+so the once-per-login greet and `command -v dotfiles-doctor` keep working:
+
+```sh
+dotfiles-doctor() { "$HOME/.local/bin/dotfiles-doctor" "$@"; }
+```
+
+### Report contents
 
 Startup is **silent by design**. Rather than nag on every shell start, the config
 knows how this repo provisions tools and reports on demand:

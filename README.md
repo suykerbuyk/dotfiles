@@ -93,8 +93,9 @@ prompt, completions — interactive only). Getting that split right, and keeping
 the env layer dash-safe and byte-silent, is the kind of thing you only get to do
 once and then never think about again. See [`home/doc/shell.md`](home/doc/shell.md).
 
-A `dotfiles-doctor` command reports which tools are present and the exact
-installer for anything missing — and it greets you **once per login session**
+A `./doctor` command (also `dotfiles-doctor` on `PATH` after apply) reports
+which tools are present and the exact installer for anything missing — and the
+interactive shell greets you with that report **once per login session**
 (a tmpfs stamp under `$XDG_RUNTIME_DIR`, created atomically so ten tmux panes
 opening at once produce exactly one greeting).
 
@@ -133,16 +134,37 @@ round-trip. Dotfiles you can refactor without fear.
 
 ## Layout
 
+### Management CLIs (repo root)
+
+These stay in the checkout — they are **not** lifestyle tools. Run them from the
+project root (`./help` or `make help` lists the same catalog).
+
+| Command | What |
+|---|---|
+| [`./update-user-home-dir.sh`](update-user-home-dir.sh) | Full bootstrap / converge (jq → chezmoi → age → apply → fetchers → ssh-agent). |
+| [`./apply`](apply) | Day-2 `chezmoi apply` with this repo as `--source`. |
+| [`./status`](status) | `chezmoi status` + tool health rollup. |
+| [`./doctor`](doctor) | Tool/env health; names the exact `fetch.bins` installer for misses. |
+| [`./keys`](keys) | age-encrypted `~/.keys` workflow (`edit` / `status` / `show` / `get-key`). |
+| [`./test-update-user-home-dir.sh`](test-update-user-home-dir.sh) | Integration suite (throwaway `HOME` sandbox). |
+| [`./help`](help) / [`Makefile`](Makefile) | Catalog of the commands above. |
+| [`lib/`](lib/) | Shared helpers + the doctor registry (not user commands). |
+
+After `chezmoi apply`, `~/.local/bin/dotfiles-doctor` and `dotfiles-keys` are
+short trampolines back into `./doctor` and `./keys` so those names work from any
+directory.
+
+### Chezmoi source and payload
+
 | Path | What |
 |---|---|
 | [`home/`](home/) | The chezmoi source tree (attribute-encoded names). |
 | `home/dot_config/shell/` | The two-layer shell config (`env.sh` + `rc.sh`, plus per-shell deltas). |
 | [`home/dot_local/bin/fetch.bins/`](home/dot_local/bin/fetch.bins/) | Per-tool release fetchers + the shared `_lib.sh`. |
+| `home/dot_local/bin/` | Lifestyle CLIs applied to `~/.local/bin` (`tm`, backups, IPMI, …). |
 | `home/dot_config/` | Hyprland / sway / i3, waybar / wofi / rofi / mako, alacritty / kitty, nvim, starship, tmux, … |
 | `home/private_dot_ssh/` | SSH config + host data (rendered at `0700`/`0600`). |
 | [`home/doc/`](home/doc/) | Deep-dive docs (see below). |
-| [`update-user-home-dir.sh`](update-user-home-dir.sh) | The bootstrap installer. |
-| [`test-update-user-home-dir.sh`](test-update-user-home-dir.sh) | The integration test suite. |
 
 ## Documentation
 

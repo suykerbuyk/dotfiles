@@ -8,16 +8,25 @@ only on your machines and in 1Password, never in the repo.
 
 ## The one command you need
 
+From the checkout root (preferred when you are already there):
+
 ```
-dotfiles-keys            # edit ~/.keys (decrypted), re-encrypt + apply on save
-dotfiles-keys status     # is the age key present? is ~/.keys decrypted?
-dotfiles-keys show       # list variable NAMES only (never values)
-dotfiles-keys get-key    # restore the age identity from 1Password
+./keys            # edit ~/.keys (decrypted), re-encrypt + apply on save
+./keys status     # is the age key present? is ~/.keys decrypted?
+./keys show       # list variable NAMES only (never values)
+./keys get-key    # restore the age identity from 1Password
 ```
 
-After `dotfiles-keys` edits a key, commit & push the repo — it prints the exact
-command. That is the whole day-to-day workflow; you never call `chezmoi` or
-`age` directly.
+After apply, the same CLI is on `PATH` as `dotfiles-keys` (a trampoline into
+`./keys`), so it works from any directory:
+
+```
+dotfiles-keys status
+```
+
+After `./keys` / `dotfiles-keys` edits a key, commit & push the repo — it prints
+the exact command. That is the whole day-to-day workflow; you never call
+`chezmoi` or `age` directly.
 
 ## How it fits together
 
@@ -57,7 +66,7 @@ apply`, because apply invokes `age` to decrypt.
 
 ## Adding or rotating keys
 
-- **Add/change a value:** `dotfiles-keys`, edit, save, then commit & push.
+- **Add/change a value:** `./keys` (or `dotfiles-keys`), edit, save, then commit & push.
 - **Rotate the age key** (compromise, or periodic hygiene):
   1. `age-keygen -o ~/.config/chezmoi/key.txt.new` → note the new `age1…` recipient.
   2. Update `recipient` in `chezmoi.toml.template` and re-render the config.

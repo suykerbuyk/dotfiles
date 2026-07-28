@@ -1,0 +1,28 @@
+#!/usr/bin/env sh
+# doctor — report tool/env health and the exact installer for anything missing.
+#
+# Repo-root management CLI (not applied into ~). After apply, also available as
+# ~/.local/bin/dotfiles-doctor (trampoline into this script).
+#
+# Usage:
+#   ./doctor
+#   ./doctor -h
+set -eu
+
+ROOT=$(CDPATH= cd "$(dirname "$0")" && pwd)
+# shellcheck source=lib/df-common.sh
+. "${ROOT}/lib/df-common.sh"
+df_init "${ROOT}/doctor" || exit 1
+# shellcheck source=lib/doctor-registry.sh
+. "${ROOT}/lib/doctor-registry.sh"
+# shellcheck source=lib/doctor-report.sh
+. "${ROOT}/lib/doctor-report.sh"
+
+case ${1-} in
+-h | --help | help)
+	awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next}{exit}' "$0"
+	exit 0
+	;;
+esac
+
+df_doctor_report

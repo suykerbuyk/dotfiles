@@ -1,0 +1,26 @@
+# doctor-registry.sh — single source of truth for tool health rows.
+#
+# Each row:  <command>|<fetch.bins stem>|<note>
+# Stem is the name inside fetch.bins/NN_fetch.<stem>.sh (or executable_NN_…).
+# Empty stem + note = not provisioned by this repo.
+#
+# Sourced by ./doctor and (indirectly) by the interactive greet path.
+
+df_doctor_registry() {
+	printf '%s\n' \
+		'starship|starship|' \
+		'fzf|fzf|' \
+		'broot|broot|' \
+		'nvim|nvim|' \
+		'rg|ripgrep|' \
+		'jq|jq|' \
+		'go|go|' \
+		'cargo|rust|' \
+		'ninja|ninja|' \
+		'podman|podman|' \
+		'tree-sitter|tree-sitter| parser CLI for nvim-treesitter' \
+		'zed|zed|' \
+		'chezmoi|chezmoi|' \
+		'tv|| not provisioned by fetch.bins' \
+		'keychain|| superseded by ~/.config/bashrc.d/10-ssh-agent.sh'
+}

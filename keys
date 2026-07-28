@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# keys — manage the age-encrypted secrets file (~/.keys).
+#
+# Repo-root management CLI. After apply, also ~/.local/bin/dotfiles-keys
+# (trampoline into this script).
+#
+# Your API keys live ENCRYPTED in the dotfiles repo (encrypted_private_dot_keys.age)
+# and are decrypted to ~/.keys (mode 0600) by `chezmoi apply`.
+#
+#   ./keys            edit ~/.keys: opens it DECRYPTED in $EDITOR, then
+#   ./keys edit       re-encrypts + applies on save, and reminds you to push
+#   ./keys status     is the age key present? is ~/.keys decrypted?
+#   ./keys show       list variable NAMES only (never values)
+#   ./keys get-key    restore the age identity from 1Password
+#
+# The age identity lives at ~/.config/chezmoi/key.txt (0600) and is mirrored in
+# 1Password as the document "dotfiles age key" (vault: Personal).
+set -euo pipefail
+
+ROOT=$(CDPATH= cd "$(dirname "$0")" && pwd)
+# shellcheck source=lib/df-common.sh
+. "${ROOT}/lib/df-common.sh"
+df_init "${ROOT}/keys" || exit 1
+
+KEY="${HOME}/.config/chezmoi/key.txt"
+KEYS="${HOME}/.keys"
+OP_ITEM="dotfiles age key"
+OP_VAULT="Personal"
+
+die() { echo "keys: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+cmd_get_key() {
+	[ -r "$KEY" ] && { echo "age key already present: $KEY"; return 0; }
+	have op || die "1Password CLI (op) not installed — paste the key into $KEY by hand (chmod 600)."
+	umask 077
+	mkdir -p "$(dirname "$KEY")"
+	op document get "$OP_ITEM" --vault "$OP_VAULT" --out-file "$KEY" \
+		|| die "could not fetch '$OP_ITEM' from 1Password (signed in? op signin)"
+	chmod 600 "$KEY"
+	echo "Restored age identity from 1Password -> $KEY"
+}
+
+cmd_status() {
+	if [ -r "$KEY" ]; then echo "age key:  present ($KEY)"
+	else echo "age key:  MISSING — restore it:  ./keys get-key  (or: dotfiles-keys get-key)"; fi
+	if [ -r "$KEYS" ]; then
+		printf '~/.keys:  present, mode %s, %s entries\n' \
+			"$(stat -c %a "$KEYS" 2>/dev/null)" \
+			"$(grep -cE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=' "$KEYS" 2>/dev/null || echo 0)"
+	else echo "~/.keys:  absent (not decrypted — run: ./keys get-key, then ./apply)"; fi
+}
+
+cmd_show() {
+	[ -r "$KEYS" ] || die "~/.keys absent."
+	echo "Defined variables (names only):"
+	grep -oE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=' "$KEYS" \
+		| sed -E 's/=$//; s/^[[:space:]]*(export[[:space:]]+)?/  /' | sort -u
+}
+
+cmd_edit() {
+	have chezmoi || [ -x "${HOME}/.local/bin/chezmoi" ] \
+		|| die "chezmoi not installed — run ./update-user-home-dir.sh first."
+	[ -r "$KEY" ] || die "age key missing — restore it first:  ./keys get-key"
+	df_chezmoi edit --apply "$KEYS"
+	echo
+	echo "Edited, re-encrypted, and applied. Publish the change:"
+	echo "  (cd \"${DF_ROOT}\" && git add home/encrypted_private_dot_keys.age && git commit -m 'update keys' && git push)"
+}
+
+case "${1:-edit}" in
+edit | "") cmd_edit ;;
+status) cmd_status ;;
+show) cmd_show ;;
+get-key) cmd_get_key ;;
+-h | --help | help)
+	awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next}{exit}' "$0"
+	;;
+*) die "unknown command '$1' (try: edit | status | show | get-key)" ;;
+esac

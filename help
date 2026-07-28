@@ -1,0 +1,38 @@
+#!/usr/bin/env sh
+# help — catalog of repo-root dotfiles management commands.
+set -eu
+
+ROOT=$(CDPATH= cd "$(dirname "$0")" && pwd)
+
+cat <<CAT
+Dotfiles management (run from the checkout root: ${ROOT})
+
+  Bootstrap / converge
+    ./update-user-home-dir.sh [--dry-run|--force|--uninstall]
+        Full install: jq → chezmoi → age → apply → fetchers → ssh-agent
+
+  Day-2 (machine already bootstrapped)
+    ./apply [chezmoi-apply-flags]
+        chezmoi apply with this repo as --source
+    ./status [--no-doctor]
+        chezmoi status + tool health report
+    ./doctor
+        Tool/env health; names the exact fetch.bins installer for misses
+    ./keys [edit|status|show|get-key]
+        age-encrypted ~/.keys workflow
+
+  Verify
+    ./test-update-user-home-dir.sh [--no-net|--go|--rust|--podman]
+        Integration suite in a throwaway HOME sandbox
+
+  Discovery
+    ./help                 this catalog
+    make help              same catalog via Makefile
+
+Lifestyle tools (tm, backups, IPMI, …) live under home/dot_local/bin/ and
+install into ~/.local/bin via chezmoi — they are not management CLIs.
+
+After apply, these PATH names trampoline back into this checkout:
+    dotfiles-doctor  →  ./doctor
+    dotfiles-keys    →  ./keys
+CAT

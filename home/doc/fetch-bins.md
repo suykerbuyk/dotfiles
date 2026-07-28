@@ -6,7 +6,9 @@ into `~/.local/`.
 
 ## The installer: `update-user-home-dir.sh`
 
-Lives at the **repo root only** (never applied into `~`). Run it from the checkout:
+Lives at the **repo root only** (never applied into `~`), alongside the other
+management CLIs (`./doctor`, `./keys`, `./apply`, `./status`, `./help`). Those
+are day-2 tools; this installer is the ordered bootstrap. Run it from the checkout:
 
 ```bash
 ./update-user-home-dir.sh              # full bootstrap

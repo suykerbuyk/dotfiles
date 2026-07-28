@@ -388,9 +388,24 @@ assert "installer skips 14_fetch.age.sh in loop"    "grep -q '14_fetch.age.sh ]]
 assert "config rendered before the apply phase"     "[[ \$(grep -n 'chezmoi.toml.template' update-user-home-dir.sh | head -1 | cut -d: -f1) -lt \$(grep -n 'Phase 4: chezmoi apply' update-user-home-dir.sh | cut -d: -f1) ]]"
 # Keyless machines apply cleanly: .chezmoiignore drops .keys when no identity.
 assert ".chezmoiignore guards .keys on missing key" "grep -q 'key.txt' home/.chezmoiignore"
-# The memorable helper.
-assert "dotfiles-keys helper present"               "[[ -f home/dot_local/bin/executable_dotfiles-keys ]]"
-assert "dotfiles-keys is valid bash"                "bash -n home/dot_local/bin/executable_dotfiles-keys"
+# Keys/doctor: implementation at repo root; chezmoi entries are trampolines.
+assert "root keys CLI present"                      "[[ -x keys ]]"
+assert "root keys CLI is valid bash"                "bash -n keys"
+assert "root doctor CLI present"                    "[[ -x doctor ]]"
+assert "root doctor CLI is valid sh"                "sh -n doctor"
+assert "root apply CLI present"                     "[[ -x apply ]]"
+assert "root status CLI present"                    "[[ -x status ]]"
+assert "root help CLI present"                      "[[ -x help ]]"
+assert "Makefile help facade present"               "[[ -f Makefile ]]"
+assert "doctor registry single-sourced in lib/"     "[[ -f lib/doctor-registry.sh ]]"
+assert "dotfiles-keys trampoline present"           "[[ -f home/dot_local/bin/executable_dotfiles-keys ]]"
+assert "dotfiles-keys trampoline is valid sh"       "sh -n home/dot_local/bin/executable_dotfiles-keys"
+assert "dotfiles-keys trampoline stays thin"        "[[ \$(wc -l < home/dot_local/bin/executable_dotfiles-keys) -le 50 ]]"
+assert "dotfiles-keys trampoline execs ./keys"      "grep -q root/keys home/dot_local/bin/executable_dotfiles-keys"
+assert "dotfiles-doctor trampoline present"         "[[ -f home/dot_local/bin/executable_dotfiles-doctor ]]"
+assert "dotfiles-doctor trampoline is valid sh"     "sh -n home/dot_local/bin/executable_dotfiles-doctor"
+assert "dotfiles-doctor trampoline stays thin"      "[[ \$(wc -l < home/dot_local/bin/executable_dotfiles-doctor) -le 50 ]]"
+assert "dotfiles-doctor trampoline execs ./doctor"  "grep -q root/doctor home/dot_local/bin/executable_dotfiles-doctor"
 
 # ===========================================================================
 # Structural checks for the podman fetcher — source-only (grep/bash -n), so they
@@ -417,8 +432,9 @@ awk "/<<'SETUP_EOF'/{f=1; next} /^SETUP_EOF\$/{f=0} f" "$PODMAN_FETCHER" > "$SET
 assert "generated podman-rootless-setup is valid bash" "[[ -s $SETUP_TMP ]] && bash -n $SETUP_TMP"
 rm -f "$SETUP_TMP"
 # Doctor registry + protoc fold-in (protoc was removed in iter 27).
-assert "doctor registry lists podman"               "grep -q 'podman|podman|' home/dot_config/shell/doctor.sh"
-assert "protoc fully removed from doctor.sh"         "! grep -q protoc home/dot_config/shell/doctor.sh"
+assert "doctor registry lists podman"               "grep -q 'podman|podman|' lib/doctor-registry.sh"
+assert "protoc fully removed from doctor registry"  "! grep -q protoc lib/doctor-registry.sh"
+assert "shell doctor.sh is thin wrapper only"       "grep -q 'dotfiles-doctor()' home/dot_config/shell/doctor.sh && ! grep -q 'df_doctor_registry' home/dot_config/shell/doctor.sh"
 assert "protoc fully removed from installer"         "! grep -q protoc update-user-home-dir.sh"
 # Installer uninstall special-case for podman (versioned dir + generated helper).
 assert "installer uninstall handles podman versioned dir" "grep -q 'podman-\*' update-user-home-dir.sh"
@@ -441,7 +457,7 @@ assert "tree-sitter fetcher present"                "[[ -f $TS_FETCHER ]]"
 assert "tree-sitter fetcher is valid bash"          "bash -n $TS_FETCHER"
 assert "tree-sitter fetcher sources _lib.sh"        "grep -q '_lib.sh' $TS_FETCHER"
 assert "tree-sitter fetcher gunzips the bare .gz"   "grep -q 'gunzip' $TS_FETCHER"
-assert "doctor registry lists tree-sitter"          "grep -q 'tree-sitter|tree-sitter|' home/dot_config/shell/doctor.sh"
+assert "doctor registry lists tree-sitter"          "grep -q 'tree-sitter|tree-sitter|' lib/doctor-registry.sh"
 # nvim-treesitter main-branch migration: the old configs-module API must be
 # gone from the config source, and the duplicate custom spec stays deleted
 # (its go/rust parsers are folded into the kickstart spec).

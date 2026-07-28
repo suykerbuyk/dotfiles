@@ -1,0 +1,24 @@
+#!/usr/bin/env sh
+# apply — chezmoi apply for this checkout (day-2; does not fetch tools).
+#
+# Usage:
+#   ./apply              # apply source tree into $HOME
+#   ./apply --dry-run    # pass-through flags to chezmoi apply
+#
+# Fresh machines need the full bootstrap instead:
+#   ./update-user-home-dir.sh
+set -eu
+
+ROOT=$(CDPATH= cd "$(dirname "$0")" && pwd)
+# shellcheck source=lib/df-common.sh
+. "${ROOT}/lib/df-common.sh"
+df_init "${ROOT}/apply" || exit 1
+
+case ${1-} in
+-h | --help | help)
+	awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next}{exit}' "$0"
+	exit 0
+	;;
+esac
+
+df_chezmoi apply "$@"

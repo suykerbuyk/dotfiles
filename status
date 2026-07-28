@@ -1,0 +1,40 @@
+#!/usr/bin/env sh
+# status — chezmoi status for this checkout, plus a short doctor rollup.
+#
+# Usage:
+#   ./status
+#   ./status --no-doctor   # chezmoi status only
+set -eu
+
+ROOT=$(CDPATH= cd "$(dirname "$0")" && pwd)
+# shellcheck source=lib/df-common.sh
+. "${ROOT}/lib/df-common.sh"
+df_init "${ROOT}/status" || exit 1
+
+DOCTOR=1
+for arg in "$@"; do
+	case $arg in
+	--no-doctor) DOCTOR=0 ;;
+	-h | --help | help)
+		awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next}{exit}' "$0"
+		exit 0
+		;;
+	esac
+done
+
+echo "=== chezmoi status ==="
+if df_chezmoi_bin >/dev/null 2>&1; then
+	df_chezmoi status || true
+else
+	echo "(chezmoi not installed — run ./update-user-home-dir.sh)"
+fi
+
+if [ "$DOCTOR" -eq 1 ]; then
+	echo
+	echo "=== doctor ==="
+	# shellcheck source=lib/doctor-registry.sh
+	. "${ROOT}/lib/doctor-registry.sh"
+	# shellcheck source=lib/doctor-report.sh
+	. "${ROOT}/lib/doctor-report.sh"
+	df_doctor_report
+fi
