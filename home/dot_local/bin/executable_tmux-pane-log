@@ -1,0 +1,38 @@
+#!/usr/bin/env sh
+# tmux-pane-log — append pane output to a state-dir log with consecutive-line
+# dedup (prompts/redraws often emit the same line repeatedly).
+#
+# Usage (from tmux pipe-pane):
+#   tmux-pane-log '#H-#S-#I-#P'
+#
+# Logs: ${XDG_STATE_HOME:-~/.local/state}/tmux/pane-logs/<name>.log
+# Soft-rotates to <name>.log.1 once the active file exceeds ~20 MiB.
+
+set -eu
+
+name=${1:-pane}
+# Keep filenames boring (tmux formats can include dots/slashes on odd hosts).
+name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
+
+state_root=${XDG_STATE_HOME:-$HOME/.local/state}
+dir=$state_root/tmux/pane-logs
+mkdir -p "$dir"
+umask 077
+
+log=$dir/${name}.log
+max_bytes=$((20 * 1024 * 1024))
+
+if [ -f "$log" ]; then
+	# wc -c prints leading spaces on some platforms; trim via arithmetic.
+	size=$(wc -c <"$log" | tr -d '[:space:]')
+	if [ "${size:-0}" -gt "$max_bytes" ]; then
+		mv -f "$log" "${log}.1"
+	fi
+fi
+
+# Line-buffer if available so tail -f sees output promptly.
+if command -v stdbuf >/dev/null 2>&1; then
+	exec stdbuf -oL awk '$0 != prev { print; prev = $0; fflush() }' >>"$log"
+else
+	exec awk '$0 != prev { print; prev = $0; fflush() }' >>"$log"
+fi

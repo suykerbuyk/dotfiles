@@ -1,85 +1,251 @@
 #!/usr/bin/env sh
-# qdbus org.kde.konsole $KONSOLE_DBUS_SESSION setTitle 1 $(uname -n)
-#printf "\033]0;%s@%s\007" "${USER}" "$(hostname)"
-#cols=$(tput cols)
-HNAMECTL="$(which hostnamectl)"
-if [ -x "$(which hostnamectl)" ]; then
-    # echo "We have hostnamectl"
-    HNAME=$(hostnamectl deployment)
-    # echo "HNAME=$HNAME"
-    if [ -z $HNAME ] || [ "X${HNAME}" = "X" ]; then
-        HNAME=$(hostnamectl hostname)
-        # echo "HNAME=$HNAME"
-    fi
-else
-    HNAME=$(hostname -s)
+# tm — attach to or create a named tmux session (layout varies by host).
+#
+# Usage:
+#   tm              Interactive picker: choose a session or create one
+#   tm ls           List sessions (tmux ls) and exit
+#   tm <name>       Attach to $USER-<name>, or create it with a host layout
+#
+# Chezmoi installs this as ~/.local/bin/tm (source: executable_tm).
+
+set_title() {
+	printf '\033]0;%s\007' "$1"
+}
+
+resolve_hname() {
+	if command -v hostnamectl >/dev/null 2>&1; then
+		HNAME=$(hostnamectl deployment 2>/dev/null || true)
+		if [ -z "${HNAME}" ]; then
+			HNAME=$(hostnamectl hostname 2>/dev/null || true)
+		fi
+	fi
+	if [ -z "${HNAME}" ]; then
+		HNAME=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown)
+	fi
+}
+
+resolve_host_id() {
+	# Machine id for layout selection (short hostname, not deployment label).
+	if [ -r /etc/hostname ]; then
+		HOST_ID=$(tr -d ' \t\r\n' </etc/hostname)
+	else
+		HOST_ID=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown)
+	fi
+}
+
+# Attach to an existing session. Detach other clients when outside tmux;
+# switch client when already inside a session (avoids nested tmux).
+do_attach() {
+	_session=$1
+	if [ -n "${TMUX-}" ]; then
+		tmux switch-client -t "${_session}"
+	else
+		tmux attach-session -d -t "${_session}"
+	fi
+}
+
+# Drop typeahead that leaked into a pane (OSC 11 bg-colour replies, DA fragments,
+# etc.). -R resets terminal state; C-u clears any partial line at the prompt.
+clear_pane_typeahead() {
+	_target=$1
+	tmux send-keys -t "${_target}" -R C-u 2>/dev/null || true
+}
+
+# Create a new session with the host-appropriate pane layout.
+# $1 = full session name (already prefixed).
+#
+# Always create detached, finish the layout, scrub typeahead, then attach.
+# Building the layout while already attached races the outer terminal's replies
+# to tmux capability/colour queries into the active pane as literal keystrokes —
+# classic on Windows Terminal → WSL2 → ssh ("rgb:0c0c/0c0c/0c0c" on the last split).
+do_create() {
+	_session=$1
+
+	case "${HOST_ID}" in
+	syke-01A)
+		tmux new-session -d -s "${_session}" \; \
+			split-window -v -d \; \
+			split-window -v -d \; \
+			select-layout even-horizontal \; \
+			split-window -v -t 0 \; \
+			split-window -v -t 3 \; \
+			select-pane -t 3
+		;;
+	dz68)
+		tmux new-session -d -s "${_session}" \; \
+			split-window -h -l 66% \; \
+			split-window -h -l 50% \; \
+			split-window -v -d -l 50% \; \
+			resize-pane -U 100 \; \
+			resize-pane -D 6 \; \
+			select-pane -t 2 \; \
+			split-window -h -l 60 \; \
+			split-window -h -l 35 \; \
+			clock-mode \; \
+			select-pane -t 3 \; \
+			send-keys 'cal  && read' 'C-m' \; \
+			select-pane -t 4 \; \
+			select-pane -t 1
+		;;
+	*)
+		tmux new-session -d -s "${_session}" \; \
+			split-window -d \; \
+			split-window -d \; \
+			select-layout tiled \; \
+			select-pane -t 2
+		;;
+	esac
+
+	# Scrub every pane; the active one is where WT/xterm OSC replies land.
+	tmux list-panes -t "${_session}" -F '#{pane_id}' 2>/dev/null |
+		while IFS= read -r _pane; do
+			clear_pane_typeahead "${_pane}"
+		done
+
+	do_attach "${_session}"
+}
+
+# Attach if the session exists, otherwise create it.
+# $1 = short name (suffix); full name is ${UNAME}-$1
+connect() {
+	_short=$1
+	if [ -z "${_short}" ]; then
+		printf 'tm: session name required\n' >&2
+		return 1
+	fi
+	# Reject names that would confuse tmux targets (.: = are special).
+	case ${_short} in
+	*[.:]*)
+		printf 'tm: session name must not contain "." or ":"\n' >&2
+		return 1
+		;;
+	esac
+
+	_session="${UNAME}-${_short}"
+	set_title "${HNAME}-${_short}"
+
+	if tmux has-session -t "=${_session}" 2>/dev/null; then
+		do_attach "${_session}"
+	else
+		do_create "${_session}"
+	fi
+}
+
+list_sessions() {
+	tmux list-sessions -F '#{session_name}' 2>/dev/null || true
+}
+
+# Interactive: pick an existing session or create a new one.
+interactive() {
+	_sessions=$(list_sessions)
+	_choice=
+
+	if command -v fzf >/dev/null 2>&1; then
+		_menu=$(printf '%s\n' "${_sessions}" "[create new session]" "[quit]")
+		# Drop leading blank line if there were no sessions.
+		_menu=$(printf '%s\n' "${_menu}" | sed '/^$/d')
+		_choice=$(printf '%s\n' "${_menu}" | fzf --prompt='tmux session> ' --height=40% --reverse) || true
+		case ${_choice} in
+		'' | '[quit]')
+			return 0
+			;;
+		'[create new session]')
+			_choice=__new__
+			;;
+		esac
+	else
+		printf 'Active tmux sessions:\n'
+		_i=0
+		# Portable numbered menu without map arrays.
+		_tmp=$(mktemp) || return 1
+		printf '%s\n' "${_sessions}" | sed '/^$/d' >"${_tmp}"
+		while IFS= read -r _line; do
+			_i=$((_i + 1))
+			printf '  %2d) %s\n' "${_i}" "${_line}"
+		done <"${_tmp}"
+		printf '   n) Create new session\n'
+		printf '   q) Quit\n'
+		printf 'Choice: '
+		read -r _reply || {
+			rm -f "${_tmp}"
+			return 1
+		}
+		case ${_reply} in
+		q | Q | '')
+			rm -f "${_tmp}"
+			return 0
+			;;
+		n | N)
+			_choice=__new__
+			;;
+		*)
+			if printf '%s' "${_reply}" | grep -Eq '^[0-9]+$'; then
+				_choice=$(sed -n "${_reply}p" "${_tmp}")
+				if [ -z "${_choice}" ]; then
+					printf 'tm: invalid choice\n' >&2
+					rm -f "${_tmp}"
+					return 1
+				fi
+			else
+				printf 'tm: invalid choice\n' >&2
+				rm -f "${_tmp}"
+				return 1
+			fi
+			;;
+		esac
+		rm -f "${_tmp}"
+	fi
+
+	if [ "${_choice}" = "__new__" ]; then
+		printf 'New session name (short; will be %s-<name>): ' "${UNAME}"
+		read -r _short || return 1
+		# Allow typing either short name or already-prefixed full name.
+		case ${_short} in
+		"${UNAME}"-*)
+			_short=${_short#"${UNAME}"-}
+			;;
+		esac
+		connect "${_short}"
+		return
+	fi
+
+	# Existing session: attach by full name as listed.
+	set_title "${HNAME}-${_choice}"
+	if tmux has-session -t "=${_choice}" 2>/dev/null; then
+		do_attach "${_choice}"
+	else
+		printf 'tm: session vanished: %s\n' "${_choice}" >&2
+		return 1
+	fi
+}
+
+# --- main -------------------------------------------------------------------
+
+if ! command -v tmux >/dev/null 2>&1; then
+	printf 'tm: tmux not found in PATH\n' >&2
+	exit 1
 fi
-UNAME="$(whoami)"
-# echo "UNAME=$UNAME HNAME=$HNAME"
-printf '\033]0;%s\007' "${HNAME}-${1}"
-do_tmux_default() {
-    tmux attach-session -t "${UNAME}-$1" ||
-        tmux new-session -s "${UNAME}-$1" \; \
-            split-window -h \; \
-            split-window -v -d \; \
-            resize-pane -U 100 \; \
-            resize-pane -D 6 \; \
-            select-pane -t 1 \; \
-            split-window -h -l 60 \; \
-            split-window -h -l 35 \; \
-            clock-mode \; \
-            select-pane -t 2 \; \
-            send-keys 'cal  && read' 'C-m' \; \
-            select-pane -t 4 \; \
-            select-pane -t 0\;
-}
 
-do_tmux_standard() {
-    tmux attach-session -d -t "${UNAME}-$1" ||
-        tmux new-session -s "${UNAME}-$1" \; \
-            split-window -h -l 66% \; \
-            split-window -h -l 50% \; \
-            split-window -v -d -l 50% \; \
-            resize-pane -U 100 \; \
-            resize-pane -D 6 \; \
-            select-pane -t 2 \; \
-            split-window -h -l 60 \; \
-            split-window -h -l 35 \; \
-            clock-mode \; \
-            select-pane -t 3 \; \
-            send-keys 'cal  && read' 'C-m' \; \
-            select-pane -t 4 \; \
-            select-pane -t 1\;
-}
+UNAME=$(whoami)
+resolve_hname
+resolve_host_id
 
-do_tmux_tripane() {
-    tmux attach-session -d -t "${UNAME}-$1" ||
-        tmux new-session -s "${UNAME}-$1" \; \
-            split-window -v -d \; \
-            split-window -v -d \; \
-            select-layout even-horizontal \; \
-            split-window -v -t 0 \; \
-            split-window -v -t 3 \; \
-            select-pane -t 3 \;
-}
-
-do_tmux_lores() {
-    tmux attach-session -d -t "${UNAME}-$1" ||
-        tmux new-session -s "${UNAME}-$1" \; \
-            split-window -d \; \
-            split-window -d \; \
-            select-layout tiled \; \
-            select-pane -t 2 \;
-}
-
-case $(cat /etc/hostname) in
-'syke-01A')
-    do_tmux_tripane $*
-    ;;
-'dz68')
-    do_tmux_standard $*
-    ;;
+case ${1-} in
+ls | list)
+	tmux ls
+	exit $?
+	;;
+-h | --help | help)
+	printf 'Usage: tm [ls|list|<session-name>]\n'
+	printf '  tm           interactive session picker\n'
+	printf '  tm ls        list sessions and exit\n'
+	printf '  tm <name>    attach or create %s-<name>\n' "${UNAME}"
+	exit 0
+	;;
+'')
+	interactive
+	;;
 *)
-    do_tmux_lores $*
-    ;;
+	connect "$1"
+	;;
 esac
