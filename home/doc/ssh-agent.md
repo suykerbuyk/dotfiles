@@ -20,20 +20,30 @@ setup-ssh-agent.sh --dry-run # preview only
 setup-ssh-agent.sh --help   # usage
 ```
 
-The fragment is automatically sourced by the rc files on shell startup. It sets `SSH_AUTH_SOCK` preferring the systemd socket (`$XDG_RUNTIME_DIR/openssh_agent`).
+The fragment is automatically sourced by the rc files on shell startup.
+
+**Agent priority (final detection order)**:
+1. **1Password agent** (`~/.1password/agent.sock` + `op` CLI present) — sets `TELEPORT_USE_LOCAL_SSH_AGENT=false` automatically. Only activated on desktops where both exist (no impact on headless/WSL/servers). **This check now runs first** (before any guard) so it reliably wins on machines like this Pop!_OS laptop.
+2. Systemd OpenSSH socket (`$XDG_RUNTIME_DIR/openssh_agent`).
+3. Keychain fallback.
+4. Manual `ssh-agent`.
+
+Competing agents (`gpg-agent-ssh.socket`, `gcr-ssh-agent.socket`) are detected with a note on desktops. Consider masking them (`systemctl --user mask gpg-agent-ssh.socket`) to eliminate conflicts with tsh and ssh-add.
 
 ## Migration from keychain
 
-The original `keychain` block in `.zshrc` is preserved but commented with a migration note. The new fragment falls back to keychain if the systemd socket is not active. After verification, you can remove the keychain lines.
+The original `keychain` block in `.zshrc` is preserved but commented with a migration note. The new fragment falls back to keychain if higher-priority agents are not present. After verification, you can remove the keychain lines.
 
 ## Testing
 
-- `setup-ssh-agent.sh --dry-run`
+- `setup-ssh-agent.sh --dry-run` (now shows updated priority and competing-agent note)
 - `systemctl --user status ssh-agent.socket`
-- `echo $SSH_AUTH_SOCK` and `ssh-add -l`
+- `echo $SSH_AUTH_SOCK` and `ssh-add -l` (should succeed quickly; no hangs)
+- `tsh version` / `tsh ls` (no manual `TELEPORT_USE_LOCAL_SSH_AGENT=false` needed on desktops)
 - Non-interactive: `bash -c 'source ~/.config/bashrc.d/10-ssh-agent.sh; echo $SSH_AUTH_SOCK'`
+- 1Password detection test: `ls -l ~/.1password/agent.sock && command -v op` (should prefer it + set Teleport var)
 - Keychain migration simulation (comment keychain block and re-source).
-- WSL/Arch/Debian cross-check (systemd user units work on all).
+- WSL/Arch/Debian/Pop!_OS cross-check (1Password path skipped on headless; systemd works everywhere; no breakage after reboot).
 
 ## Integration with Other Tasks
 

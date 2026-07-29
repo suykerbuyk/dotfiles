@@ -12,11 +12,25 @@
 # - Idempotent: can be sourced multiple times safely
 # - Non-breaking: only sets if not already functional
 
+# 1Password agent detection — FIRST and unconditional (per user guidance)
+# Only activates on desktops where both the socket and `op` CLI exist.
+# Safe on headless/WSL/servers (neither will be present). Overrides any
+# prior SSH_AUTH_SOCK to prevent hangs with tsh/teleport.
+OP_AGENT_SOCK="${HOME}/.1password/agent.sock"
+if [[ -S "$OP_AGENT_SOCK" ]] && command -v op >/dev/null 2>&1; then
+    export SSH_AUTH_SOCK="$OP_AGENT_SOCK"
+    export TELEPORT_USE_LOCAL_SSH_AGENT=false
+    # Optional: ensure 1Password app is running (non-blocking)
+    true
+    return 0 2>/dev/null || true
+fi
+
 # Safety / Init style from _lib.sh (early guard, no-op if already good)
+# (1Password check above already returned if applicable)
 if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
     # Existing sock — quick validation (dry-run style check)
     if [[ -S "$SSH_AUTH_SOCK" ]]; then
-        # Already have a working agent socket (systemd, keychain, or manual)
+        # Already have a working agent socket (systemd, keychain, manual)
         # Idempotent: do nothing
         return 0 2>/dev/null || true  # works in both bash/zsh
     fi
@@ -36,6 +50,7 @@ if [[ -S "$SYSTEMD_SOCK" ]]; then
 fi
 
 # Check if systemd socket unit is available (even if not yet activated)
+# (skipped if 1Password agent was used above)
 if systemctl --user list-unit-files --type=socket 2>/dev/null | grep -q 'ssh-agent\.socket'; then
     # Activate the socket (systemd will handle the agent on first use)
     systemctl --user start ssh-agent.socket 2>/dev/null || true
@@ -45,7 +60,16 @@ if systemctl --user list-unit-files --type=socket 2>/dev/null | grep -q 'ssh-age
     fi
 fi
 
+# Optional: detect and note competing agents (GPG/GCR often conflict on desktops)
+for competing in gpg-agent-ssh.socket gcr-ssh-agent.socket; do
+    if systemctl --user is-active --quiet "$competing" 2>/dev/null; then
+        echo "Note: Competing SSH agent detected ($competing). Consider: systemctl --user mask $competing" >&2
+        break
+    fi
+done
+
 # Fallback 1: keychain (common on many systems, manages ssh-agent)
+# (skipped if 1Password or systemd socket already succeeded)
 if command -v keychain >/dev/null 2>&1; then
     # keychain --eval style, but guarded and non-interactive
     # Uses --quiet to avoid output spam on every shell

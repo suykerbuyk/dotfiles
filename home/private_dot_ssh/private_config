@@ -430,7 +430,9 @@ Host cl-al-pc1-768888
 	Hostname 38.101.146.235
 	#password ***REMOVED***
 
-Host *
+# 1Password SSH agent (only for hosts that benefit from it; scoped narrowly
+# to avoid breaking headless/WSL/servers where 1Password is absent).
+Host *.syketech.com syketech.com 1password *.1password.com
 	IdentityAgent ~/.1password/agent.sock
 
 # Google Compute Engine Section

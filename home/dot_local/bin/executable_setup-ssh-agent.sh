@@ -101,9 +101,19 @@ print_status() {
     fi
 
     echo ""
+    echo "Agent priority (final):"
+    echo "  1. 1Password agent (~/.1password/agent.sock + op CLI) — if present"
+    echo "     (sets TELEPORT_USE_LOCAL_SSH_AGENT=false automatically)"
+    echo "  2. Systemd OpenSSH socket (our ssh-agent.socket)"
+    echo "  3. keychain fallback"
+    echo "  4. Manual ssh-agent"
+    echo ""
+    echo "Note: Competing agents (gpg-agent-ssh.socket, gcr-ssh-agent.socket) are"
+    echo "detected and noted on desktops. Consider: systemctl --user mask gpg-agent-ssh.socket"
+    echo ""
     echo "Migration note: keychain users — this replaces keychain ssh-agent management."
-    echo "The bashrc.d fragment (10-ssh-agent.sh) prefers the systemd socket and falls"
-    echo "back gracefully. Remove keychain ssh-agent lines if desired after verification."
+    echo "The bashrc.d fragment (10-ssh-agent.sh) now prefers 1Password (if present),"
+    echo "then systemd. Remove keychain lines if desired after verification."
     echo ""
     echo "Done. Reload shell or run: systemctl --user start ssh-agent.socket"
 }
