@@ -22,7 +22,7 @@ Dotfiles management (run from the checkout root: ${ROOT})
         age-encrypted ~/.keys workflow
 
   Verify
-    ./test-update-user-home-dir.sh [--no-net|--go|--rust|--podman]
+    ./test-update-user-home-dir.sh [--no-net|--go|--rust|--podman|--ghostty]
         Integration suite in a throwaway HOME sandbox
 
   Discovery

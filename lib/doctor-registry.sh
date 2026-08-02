@@ -20,6 +20,7 @@ df_doctor_registry() {
 		'podman|podman|' \
 		'tree-sitter|tree-sitter| parser CLI for nvim-treesitter' \
 		'zed|zed|' \
+		'ghostty|ghostty| community AppImage; upstream ships Linux via distros' \
 		'chezmoi|chezmoi|' \
 		'tv|| not provisioned by fetch.bins' \
 		'keychain|| superseded by ~/.config/bashrc.d/10-ssh-agent.sh'

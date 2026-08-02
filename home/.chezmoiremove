@@ -5,3 +5,11 @@
 # machine, not just the one the merge was done on.
 .bashrc-debian
 .bashrc-arch
+
+# alacritty is no longer used. Deleting home/dot_config/alacritty/ from the
+# source stops it being applied to NEW machines, but leaves the already-applied
+# copies orphaned in ~ on every machine that ran an earlier apply — chezmoi does
+# not remove a target just because its source vanished. Listing them here does.
+.config/alacritty/alacritty.toml
+.config/alacritty/catppuccin-mocha.toml
+.config/alacritty

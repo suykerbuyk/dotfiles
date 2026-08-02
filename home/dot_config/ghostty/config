@@ -1,0 +1,37 @@
+# Ghostty configuration.
+#
+# Matched to the rest of this repo rather than to ghostty's defaults: Catppuccin
+# Mocha is the dominant theme repo-wide (hyprland, nvim), and CaskaydiaCove Nerd
+# Font is a Nerd Font that is actually installed here. Kitty names "jetbrains
+# mono nerd font", which is NOT installed and silently falls back to monospace —
+# do not copy that font choice.
+#
+# Validate after editing:  ghostty +validate-config --config-file=<this file>
+
+# --- appearance -------------------------------------------------------------
+# Catppuccin Mocha ships built into ghostty; there is no theme file to vendor.
+theme = Catppuccin Mocha
+
+font-family = CaskaydiaCove Nerd Font
+font-size = 14
+
+window-padding-x = 8
+window-padding-y = 4
+window-padding-balance = true
+
+# --- terminal ---------------------------------------------------------------
+# TERM is deliberately left at ghostty's default (xterm-ghostty) rather than
+# forced to xterm-256color. The slot-16 fetcher installs
+# the matching compiled terminfo entry into ~/.terminfo/x/xterm-ghostty, which
+# is what makes the default safe for local tools. Remote hosts are a separate
+# problem: ghostty's built-in `ssh-terminfo` integration below propagates the
+# entry on connect, so ssh into a box that has never seen xterm-ghostty works.
+shell-integration = detect
+shell-integration-features = cursor,sudo,title,ssh-env,ssh-terminfo
+
+scrollback-limit = 10000000
+
+# --- behaviour --------------------------------------------------------------
+copy-on-select = clipboard
+confirm-close-surface = true
+mouse-hide-while-typing = true

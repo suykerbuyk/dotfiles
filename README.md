@@ -162,7 +162,7 @@ directory.
 | `home/dot_config/shell/` | The two-layer shell config (`env.sh` + `rc.sh`, plus per-shell deltas). |
 | [`home/dot_local/bin/fetch.bins/`](home/dot_local/bin/fetch.bins/) | Per-tool release fetchers + the shared `_lib.sh`. |
 | `home/dot_local/bin/` | Lifestyle CLIs applied to `~/.local/bin` (`tm`, backups, IPMI, …). |
-| `home/dot_config/` | Hyprland / sway / i3, waybar / wofi / rofi / mako, alacritty / kitty, nvim, starship, tmux, … |
+| `home/dot_config/` | Hyprland / sway / i3, waybar / wofi / rofi / mako, kitty / ghostty, nvim, starship, tmux, … |
 | `home/private_dot_ssh/` | SSH config + host data (rendered at `0700`/`0600`). |
 | [`home/doc/`](home/doc/) | Deep-dive docs (see below). |
 

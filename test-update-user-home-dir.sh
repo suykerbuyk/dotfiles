@@ -8,9 +8,11 @@
 #   ./test-update-user-home-dir.sh --go       # also exercise the 150 MB Go fetch
 #   ./test-update-user-home-dir.sh --rust     # also exercise the rustup toolchain fetch
 #   ./test-update-user-home-dir.sh --podman   # also exercise the 32 MB podman static fetch
+#   ./test-update-user-home-dir.sh --ghostty  # also exercise the 48 MB ghostty AppImage fetch
 #   RUN_GO_FETCH=1 ./test-update-user-home-dir.sh
 #   RUN_RUST_FETCH=1 ./test-update-user-home-dir.sh
 #   RUN_PODMAN_FETCH=1 ./test-update-user-home-dir.sh
+#   RUN_GHOSTTY_FETCH=1 ./test-update-user-home-dir.sh
 #   ./test-update-user-home-dir.sh --no-net   # structural only (needs a chezmoi on PATH)
 #
 # ninja is a small, fast release-zip fetcher, so it runs in the default
@@ -28,12 +30,14 @@ SRC="$REPO/home"
 RUN_GO="${RUN_GO_FETCH:-0}"
 RUN_RUST="${RUN_RUST_FETCH:-0}"
 RUN_PODMAN="${RUN_PODMAN_FETCH:-0}"
+RUN_GHOSTTY="${RUN_GHOSTTY_FETCH:-0}"
 NET=1
 for a in "$@"; do
     case "$a" in
         --go) RUN_GO=1 ;;
         --rust) RUN_RUST=1 ;;
         --podman) RUN_PODMAN=1 ;;
+        --ghostty) RUN_GHOSTTY=1 ;;
         --no-net) NET=0 ;;
         --help|-h) sed -n '2,/^set /{/^set /d;s/^# \{0,1\}//p}' "$0"; exit 0 ;;
         *) echo "unknown arg: $a" >&2; exit 2 ;;
@@ -59,7 +63,7 @@ unset XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS   # simulate headless -> Phase 4 
 BIN_DIR="$SB/.local/bin"; APP_DIR="$SB/.local/apps"
 
 echo "sandbox HOME=$SB"
-echo "repo=$REPO   go-fetch=$([[ $RUN_GO == 1 ]] && echo on || echo off)   rust-fetch=$([[ $RUN_RUST == 1 ]] && echo on || echo off)   podman-fetch=$([[ $RUN_PODMAN == 1 ]] && echo on || echo off)   network=$([[ $NET == 1 ]] && echo on || echo off)"
+echo "repo=$REPO   go-fetch=$([[ $RUN_GO == 1 ]] && echo on || echo off)   rust-fetch=$([[ $RUN_RUST == 1 ]] && echo on || echo off)   podman-fetch=$([[ $RUN_PODMAN == 1 ]] && echo on || echo off)   ghostty-fetch=$([[ $RUN_GHOSTTY == 1 ]] && echo on || echo off)   network=$([[ $NET == 1 ]] && echo on || echo off)"
 
 # ---- locate a chezmoi binary (fetch into sandbox if needed) ----------------
 sec "setup: chezmoi binary"
@@ -441,6 +445,69 @@ assert "installer uninstall handles podman versioned dir" "grep -q 'podman-\*' u
 assert "installer uninstall removes podman-rootless-setup" "grep -q 'podman-rootless-setup' update-user-home-dir.sh"
 
 # ===========================================================================
+# Structural checks for the ghostty AppImage fetcher (slot 16) — source only,
+# run in every group. Ghostty is the ONLY AppImage in fetch.bins/, so several
+# invariants here have no other fetcher to lean on: it must gate on a display
+# (48 MB GUI download), must NOT route through install_bin (whose hardcoded
+# ~/.local/apps/<name> destination cannot carry a version, which is what makes
+# the no-redownload fast path possible), must carry a no-FUSE fallback, and must
+# install the bundled xterm-ghostty terminfo — without which ghostty's default
+# TERM is unresolvable outside the AppImage (the ssh breakage).
+sec "structural: ghostty AppImage fetcher (slot 16, no network)"
+GH_FETCHER="home/dot_local/bin/fetch.bins/executable_16_fetch.ghostty.sh"
+assert "ghostty fetcher present"                    "[[ -f $GH_FETCHER ]]"
+assert "ghostty fetcher is valid bash"              "bash -n $GH_FETCHER"
+assert "ghostty fetcher sources _lib.sh"            "grep -q '_lib.sh' $GH_FETCHER"
+assert "ghostty fetcher gates on a display"         "grep -q 'require_display_or_skip' $GH_FETCHER"
+assert "ghostty fetcher never CALLS install_bin"    "! grep -qE '^[[:space:]]*install_bin[[:space:]]' $GH_FETCHER"
+assert "ghostty fetcher installs a versioned image" "grep -q 'BIN_NAME}-\${VERSION}.AppImage' $GH_FETCHER"
+assert "ghostty fetcher has a no-redownload path"   "grep -q 'already installed' $GH_FETCHER"
+assert "ghostty fetcher prunes old versions"        "grep -q 'pruned old version' $GH_FETCHER"
+assert "ghostty fetcher carries a no-FUSE fallback" "grep -q 'APPIMAGE_EXTRACT_AND_RUN' $GH_FETCHER"
+assert "ghostty fetcher probes for FUSE"            "grep -q '/dev/fuse' $GH_FETCHER"
+# Pattern extraction keeps this to ~4 KB; a bare --appimage-extract unpacks 153 MB.
+assert "ghostty fetcher extracts BY PATTERN"        "grep -qF -e '--appimage-extract \"\$pattern\"' $GH_FETCHER"
+assert "ghostty fetcher installs xterm-ghostty"     "grep -q '.terminfo/x/xterm-ghostty' $GH_FETCHER"
+assert "ghostty fetcher rewrites desktop Exec"      "grep -q 's|^Exec=' $GH_FETCHER"
+assert "ghostty fetcher rewrites desktop TryExec"   "grep -q 's|^TryExec=' $GH_FETCHER"
+assert "ghostty fetcher verifies before symlink"    "grep -q 'verification failed' $GH_FETCHER"
+assert "doctor registry lists ghostty"              "grep -q 'ghostty|ghostty|' lib/doctor-registry.sh"
+# Uninstall lockstep: a bare remove_bin would strand the versioned image, the
+# desktop entry, the icon and the terminfo entry.
+assert "installer uninstall handles ghostty image"  "grep -q 'ghostty-\*.AppImage' update-user-home-dir.sh"
+assert "installer uninstall removes ghostty desktop" "grep -q 'com.mitchellh.ghostty.desktop' update-user-home-dir.sh"
+assert "installer uninstall removes ghostty terminfo" "grep -q 'terminfo/x/xterm-ghostty' update-user-home-dir.sh"
+# Regression: tree-sitter shipped as slot 15 in iter 30 but was never added to
+# the removal loop, so --uninstall --force stranded it. Every fetcher must map
+# to the loop, a special case, or the rust block.
+assert "installer uninstall covers tree-sitter"     "grep -qE '^[[:space:]]*for b in .*tree-sitter' update-user-home-dir.sh"
+
+# The ghostty config is chezmoi-managed (NOT a uruntime portable sidecar), so a
+# fresh machine reproduces it. It must stay coherent with the repo-wide theme
+# and must NOT force TERM: the default xterm-ghostty is what the fetcher's
+# terminfo install exists to support.
+GH_CONF="home/dot_config/ghostty/config"
+assert "ghostty config tracked in chezmoi source"   "[[ -f $GH_CONF ]]"
+assert "ghostty config sets the catppuccin theme"   "grep -qi '^theme = Catppuccin Mocha' $GH_CONF"
+assert "ghostty config pins an installed Nerd Font" "grep -q '^font-family = CaskaydiaCove Nerd Font' $GH_CONF"
+assert "ghostty config leaves TERM at the default"  "! grep -qE '^term[[:space:]]*=' $GH_CONF"
+assert "ghostty config propagates ssh terminfo"     "grep -q 'ssh-terminfo' $GH_CONF"
+
+# alacritty was retired (no longer used, and the binary is not installed). Its
+# source dir is gone; the already-applied copies are cleaned off every machine
+# via .chezmoiignore's sibling, .chezmoiremove. rofi's `terminal:` used to point
+# at it — a dangling reference to a missing binary — and now matches what
+# hyprland/sway already spawn.
+assert "alacritty source dir removed"               "[[ ! -d home/dot_config/alacritty ]]"
+# Scope: the chezmoi source + README, i.e. everything that reaches a machine or
+# describes it. .chezmoiremove is excluded because retiring the applied copies
+# REQUIRES naming them, and this harness is excluded because these very asserts
+# name it too — a bare repo-wide grep would match its own source text.
+assert "no alacritty refs in source or README"      "! grep -rin --exclude=.chezmoiremove alacritty home README.md"
+assert ".chezmoiremove retires applied alacritty"   "grep -q '^.config/alacritty\$' home/.chezmoiremove"
+assert "rofi terminal is an installed emulator"     "grep -qE '^[[:space:]]*terminal: \"(kitty|ghostty)\";' home/dot_config/rofi/config.rasi"
+
+# ===========================================================================
 # Structural checks for the nvim runtime fix + tree-sitter CLI fetcher — source
 # only, run in every group. The nvim fetcher must NEVER route through
 # install_bin: its copy step detaches the binary from the release tree, nvim
@@ -638,6 +705,46 @@ if [[ $RUN_PODMAN == 1 ]]; then
     fi
 else
     skip "podman fetcher (pass --podman or RUN_PODMAN_FETCH=1 to enable)"
+fi
+
+# ===========================================================================
+if [[ $RUN_GHOSTTY == 1 ]]; then
+    sec "ghostty fetcher (48 MB AppImage) — versioned install + terminfo + desktop"
+    if [[ -x "$SB/.local/bin/fetch.bins/16_fetch.ghostty.sh" ]]; then
+        # The fetcher gates on a display (GUI tool); the sandbox unsets
+        # XDG_RUNTIME_DIR/DBUS to simulate headless, so fake a session for the
+        # duration of this group or require_display_or_skip exits 0 immediately.
+        XDG_SESSION_TYPE=wayland WAYLAND_DISPLAY=wayland-0 \
+            "$SB/.local/bin/fetch.bins/16_fetch.ghostty.sh" >/dev/null 2>&1
+        assert "ghostty installed + --version works"  "\"$BIN_DIR/ghostty\" --version >/dev/null 2>&1"
+        # The symlink must resolve to a VERSIONED image, not a bare ~/.local/apps/ghostty
+        # (that would mean it fell back to the install_bin shape and lost the fast path).
+        assert "ghostty symlink -> versioned AppImage" \
+            "[[ \"\$(readlink -f \"$BIN_DIR/ghostty\")\" == \"$APP_DIR\"/ghostty-*.AppImage ]]"
+        # terminfo is what makes ghostty's default TERM resolvable outside the image.
+        assert "xterm-ghostty terminfo installed"     "[[ -f \"$SB/.terminfo/x/xterm-ghostty\" ]]"
+        assert "xterm-ghostty terminfo is readable"   "TERMINFO=\"$SB/.terminfo\" infocmp xterm-ghostty >/dev/null 2>&1"
+        GH_DESK="$SB/.local/share/applications/com.mitchellh.ghostty.desktop"
+        assert "ghostty desktop entry installed"      "[[ -f \"$GH_DESK\" ]]"
+        # The shipped entry's Exec points at the CI build path (/__w/...), which
+        # exists nowhere. If that survives, the launcher icon is dead.
+        assert "desktop Exec no longer the CI path"   "! grep -q '/__w/' \"$GH_DESK\""
+        assert "desktop Exec points at the symlink"   "grep -qE '^Exec=.*$BIN_DIR/ghostty' \"$GH_DESK\""
+        # No bundled D-Bus service exists, so activation must be off or the icon
+        # can silently fail to launch.
+        assert "desktop DBusActivatable forced false" "! grep -qE '^DBusActivatable=true' \"$GH_DESK\""
+        assert "ghostty icon installed"               "[[ -f \"$SB/.local/share/icons/hicolor/512x512/apps/com.mitchellh.ghostty.png\" ]]"
+        # Second run must take the fast path: no re-download of 48 MB. Capture the
+        # output instead of piping into `grep -q`: under `set -o pipefail`, grep -q
+        # exits at the first match, the still-writing fetcher takes SIGPIPE, and the
+        # pipeline reports failure even though the match succeeded.
+        assert "re-run takes the no-download fast path" \
+            "[[ \"\$(XDG_SESSION_TYPE=wayland WAYLAND_DISPLAY=wayland-0 \"$SB/.local/bin/fetch.bins/16_fetch.ghostty.sh\" 2>&1)\" == *'already installed'* ]]"
+    else
+        skip "ghostty fetcher not present (apply group did not run)"
+    fi
+else
+    skip "ghostty fetcher (pass --ghostty or RUN_GHOSTTY_FETCH=1 to enable)"
 fi
 
 # ---- summary ---------------------------------------------------------------

@@ -52,6 +52,14 @@ runnable in place** from the checkout. So the installer:
 chezmoi-managed files from `~` (via `chezmoi managed`), removes fetched tools (via
 `remove_bin`), and clears chezmoi's own state/config. It never touches the repo.
 
+**Keep the removal list in lockstep with `fetch.bins/`.** Every
+`NN_fetch.<tool>.sh` must map to an entry in the `remove_bin` loop, to a special
+case, or to the rust block — a tool that installs anything `remove_bin` does not
+know about (a versioned path, a desktop entry, generated config) needs the
+special case. zed, podman and ghostty have one; `tree-sitter` was missed when it
+was added as slot 15 and was stranded by `--uninstall --force` until it was
+added to the loop.
+
 ## `fetch.bins/` + `_lib.sh`
 
 Each `NN_fetch.<tool>.sh` sources `_lib.sh` and installs one tool as a **versioned
@@ -149,6 +157,53 @@ Key `_lib.sh` helpers:
   detects the rootless state and prints advisory guidance, always exiting 0. Its
   network test is gated behind `--podman` (`RUN_PODMAN_FETCH=1`), since the fetch
   is 32 MB.
+- **ghostty** (`16_fetch.ghostty.sh`) is the **only AppImage** in `fetch.bins/`
+  and the only fetcher that does **not** pull the upstream project's own release
+  asset. The Ghostty project ships prebuilt binaries for **macOS only**; on Linux
+  it defers to distro maintainers and community builders
+  ([ghostty.org/docs/install/binary](https://ghostty.org/docs/install/binary)),
+  which lists `pkgforge-dev/ghostty-appimage` under *Community-Maintained
+  Binaries* and warns they "carry a much higher risk compared to builds directly
+  from the Ghostty project or from distro maintainers". **Where a first-party
+  distro package exists (Arch ships `extra/ghostty`), prefer it.** Details that
+  are specific to this fetcher:
+  - It is a **GUI** tool, so it calls `require_display_or_skip` before `fb_init`
+    (zed's ordering) — a tty-only or display-less WSL box skips the 48 MB fetch.
+  - It **bypasses `install_bin`**, for a different reason than nvim's: the
+    destination is hardcoded to `~/.local/apps/<name>` and cannot carry a
+    version. The image installs to `~/.local/apps/ghostty-<ver>.AppImage`, which
+    is what enables a **fast path** — an already-current version re-asserts the
+    symlink and payloads and exits without re-downloading 48 MB (Phase 5 runs on
+    *every* installer invocation). Older versions are pruned on upgrade.
+  - Assets are `Ghostty-<ver>-<arch>.AppImage` with **raw `uname -m` tokens**
+    (`x86_64`/`aarch64`), not the `amd64`/`arm64` `fb_arch` normalizes to. Each
+    has a `.zsync` twin, which the exact-name match excludes.
+  - The runtime is **uruntime** (SquashFS + DwarFS), not the stock AppImage
+    runtime. Two of its flags are load-bearing: `--appimage-extract [PATTERN]`
+    pulls the terminfo/desktop/icon payload for ~4 KB instead of unpacking the
+    full **153 MB** tree, and `--appimage-extract-and-run` is the **no-FUSE
+    fallback**. The fetcher probes `/dev/fuse` + `fusermount`/`fusermount3` and,
+    when absent, verifies under `APPIMAGE_EXTRACT_AND_RUN=1` and prefixes the
+    generated `.desktop` `Exec=` with the same env — the no-root guarantee that
+    `fb_unzip` exists to protect, applied to AppImages.
+  - **terminfo is mandatory, not cosmetic.** Ghostty sets `TERM=xterm-ghostty`,
+    and the compiled entry ships *inside* the image, so nothing outside the
+    AppImage's own environment can resolve it — the well-known "ghostty breaks
+    over ssh" failure. The fetcher extracts `share/terminfo/x/xterm-ghostty` and
+    installs it to `~/.terminfo/x/xterm-ghostty` by **plain file copy**: it is
+    already a compiled entry, and `tic` is an ncurses extra a minimal no-root box
+    may not have.
+  - **The shipped `.desktop` is unusable as-is**: `Exec=`/`TryExec=` point at the
+    CI build path (`/__w/ghostty-appimage/...`). The fetcher rewrites whole
+    lines (the CI path is absolute and arbitrary, so substring swaps are unsafe)
+    and repoints `Icon=` at the 512x512 PNG it installs under
+    `~/.local/share/icons/hicolor/`.
+  - Config is **not** a portable sidecar. uruntime supports `<AppImage>.home` /
+    `.config`, but ghostty is left to read `~/.config/ghostty` like every other
+    tool, so `home/dot_config/ghostty/config` stays chezmoi-managed and is
+    reproduced on a fresh machine. That config pins CaskaydiaCove Nerd Font 14
+    and Catppuccin Mocha to match the repo-wide theme; validate edits with
+    `ghostty +validate-config --config-file=<path>`.
 
 ## chezmoi source layout (`home/`)
 - Attribute-encoded names: `dot_*`, `private_*` (e.g. `private_dot_ssh` → 0700),

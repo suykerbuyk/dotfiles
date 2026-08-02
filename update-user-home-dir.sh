@@ -81,7 +81,7 @@ if $UNINSTALL; then
     # gone, so the tool is no longer on PATH. Keep this list in lockstep with the
     # fetch.bins/ scripts (every 0N_fetch.<tool>.sh must map to an entry here, a
     # special case below, or the rust block).
-    for b in jq rg go gofmt broot fzf nvim ninja starship chezmoi age age-keygen; do
+    for b in jq rg go gofmt broot fzf nvim ninja starship chezmoi age age-keygen tree-sitter; do
         if $FORCE; then remove_bin "$b"; else echo "  would remove_bin $b"; fi
     done
     # nvm does not fit remove_bin: its PATH artifact is ~/.local/bin/nvm.sh (not
@@ -102,6 +102,26 @@ if $UNINSTALL; then
         echo "  removed zed (zed.app bundle + desktop entry)"
     else
         echo "  would remove zed (~/.local/apps/zed.app + desktop entry)"
+    fi
+    # ghostty is the one AppImage: remove_bin ghostty would only clear the
+    # ~/.local/bin/ghostty symlink, but the fetcher also drops a VERSIONED
+    # AppImage (~/.local/apps/ghostty-<ver>.AppImage — not the bare "ghostty"
+    # path remove_bin knows), a desktop entry, an icon, and the xterm-ghostty
+    # terminfo entry that makes ghostty's default TERM resolvable.
+    if $FORCE; then
+        rm -f "$HOME"/.local/apps/ghostty-*.AppImage
+        rm -f "$HOME/.local/bin/ghostty"
+        rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/com.mitchellh.ghostty.desktop"
+        rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/512x512/apps/com.mitchellh.ghostty.png"
+        # Surgical, like podman's config removal: ~/.terminfo may hold entries
+        # from other tools, so delete only our file and rmdir upward. rmdir
+        # fails harmlessly on a non-empty dir, preserving a foreign one.
+        rm -f "$HOME/.terminfo/x/xterm-ghostty"
+        rmdir "$HOME/.terminfo/x" 2>/dev/null || true
+        rmdir "$HOME/.terminfo" 2>/dev/null || true
+        echo "  removed ghostty (versioned AppImage + symlink + desktop entry + icon + xterm-ghostty terminfo)"
+    else
+        echo "  would remove ghostty (~/.local/apps/ghostty-*.AppImage + desktop entry + icon + xterm-ghostty terminfo)"
     fi
     # podman needs a special case like zed/nvm: remove_bin podman would only
     # clear the ~/.local/bin/podman symlink, but the podman fetcher also drops a
