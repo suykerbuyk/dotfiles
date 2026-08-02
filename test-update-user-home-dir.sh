@@ -511,16 +511,21 @@ assert "rofi terminal is an installed emulator"     "grep -qE '^[[:space:]]*term
 # silently overrides the first. kitty.conf carried a trailing
 # `font_family monospace` that beat the line above it, so the terminal rendered
 # in the fontconfig default no matter what the earlier line said. Assert exactly
-# ONE active font_family per config — a count, because the failure mode is a
-# duplicate that greps clean when you look for the name you expect.
-for KCONF in home/dot_config/kitty/kitty.conf \
-             home/dot_config/kitty/kitty.um690.conf \
-             home/dot_config/kitty/kitty.typecraft.conf; do
-    assert "kitty $(basename "$KCONF"): exactly one font_family" \
-        "[[ \$(grep -cE '^font_family' $KCONF) -eq 1 ]]"
-    assert "kitty $(basename "$KCONF"): font is CaskaydiaCove" \
-        "grep -qE '^font_family[[:space:]]+CaskaydiaCove Nerd Font Mono\$' $KCONF"
-done
+# ONE active line for each — a COUNT, because the failure mode is a duplicate
+# that greps clean when you look for the value you expect to find.
+KCONF="home/dot_config/kitty/kitty.conf"
+assert "kitty: exactly one active font_family"      "[[ \$(grep -cE '^font_family' $KCONF) -eq 1 ]]"
+assert "kitty: exactly one active font_size"        "[[ \$(grep -cE '^font_size' $KCONF) -eq 1 ]]"
+assert "kitty: font is CaskaydiaCove Mono"          "grep -qE '^font_family[[:space:]]+CaskaydiaCove Nerd Font Mono\$' $KCONF"
+# Terminal font size is unified at 14 across both emulators (iter 34).
+assert "kitty: font_size unified at 14"             "grep -qE '^font_size[[:space:]]+14(\.0)?\$' $KCONF"
+assert "ghostty: font-size unified at 14"           "grep -qE '^font-size = 14\$' $GH_CONF"
+# The dormant variants were deleted: nothing ever selected them, and um690 was a
+# near-duplicate of kitty.conf that still carried the stale jetbrains font.
+assert "dormant kitty variants removed"             "[[ ! -e home/dot_config/kitty/kitty.um690.conf && ! -e home/dot_config/kitty/kitty.typecraft.conf ]]"
+assert ".chezmoiremove retires kitty variants"      "grep -q '^.config/kitty/kitty.um690.conf\$' home/.chezmoiremove"
+# kitty.conf still includes the theme file, so it must survive the variant purge.
+assert "kitty theme include still resolves"         "grep -q '^include current-theme.conf\$' $KCONF && [[ -f home/dot_config/kitty/current-theme.conf ]]"
 
 # ===========================================================================
 # Structural checks for the nvim runtime fix + tree-sitter CLI fetcher — source

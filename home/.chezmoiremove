@@ -13,3 +13,11 @@
 .config/alacritty/alacritty.toml
 .config/alacritty/catppuccin-mocha.toml
 .config/alacritty
+
+# Dormant kitty variants. NOTHING selected them — no host-switching logic ever
+# referenced either file, so they were reference copies that drifted (um690 was
+# a near-duplicate of kitty.conf's 2000-line default dump, and still carried the
+# stale jetbrains font_family). Same orphan rule as alacritty above: deleting the
+# source alone would leave them applied in ~ forever.
+.config/kitty/kitty.typecraft.conf
+.config/kitty/kitty.um690.conf
