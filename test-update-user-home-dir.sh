@@ -507,6 +507,21 @@ assert "no alacritty refs in source or README"      "! grep -rin --exclude=.chez
 assert ".chezmoiremove retires applied alacritty"   "grep -q '^.config/alacritty\$' home/.chezmoiremove"
 assert "rofi terminal is an installed emulator"     "grep -qE '^[[:space:]]*terminal: \"(kitty|ghostty)\";' home/dot_config/rofi/config.rasi"
 
+# kitty takes the LAST occurrence of a setting, so a second active font_family
+# silently overrides the first. kitty.conf carried a trailing
+# `font_family monospace` that beat the line above it, so the terminal rendered
+# in the fontconfig default no matter what the earlier line said. Assert exactly
+# ONE active font_family per config — a count, because the failure mode is a
+# duplicate that greps clean when you look for the name you expect.
+for KCONF in home/dot_config/kitty/kitty.conf \
+             home/dot_config/kitty/kitty.um690.conf \
+             home/dot_config/kitty/kitty.typecraft.conf; do
+    assert "kitty $(basename "$KCONF"): exactly one font_family" \
+        "[[ \$(grep -cE '^font_family' $KCONF) -eq 1 ]]"
+    assert "kitty $(basename "$KCONF"): font is CaskaydiaCove" \
+        "grep -qE '^font_family[[:space:]]+CaskaydiaCove Nerd Font Mono\$' $KCONF"
+done
+
 # ===========================================================================
 # Structural checks for the nvim runtime fix + tree-sitter CLI fetcher — source
 # only, run in every group. The nvim fetcher must NEVER route through

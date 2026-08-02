@@ -2,9 +2,11 @@
 #
 # Matched to the rest of this repo rather than to ghostty's defaults: Catppuccin
 # Mocha is the dominant theme repo-wide (hyprland, nvim), and CaskaydiaCove Nerd
-# Font is a Nerd Font that is actually installed here. Kitty names "jetbrains
-# mono nerd font", which is NOT installed and silently falls back to monospace —
-# do not copy that font choice.
+# Font is what kitty now uses too.
+#
+# Ghostty gets the NON-Mono variant on purpose. kitty enforces strict cell widths
+# so it takes "CaskaydiaCove Nerd Font Mono"; ghostty does its own glyph-width
+# handling and the plain family renders better here.
 #
 # Validate after editing:  ghostty +validate-config --config-file=<this file>
 
