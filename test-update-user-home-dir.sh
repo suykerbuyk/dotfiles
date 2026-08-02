@@ -517,9 +517,12 @@ KCONF="home/dot_config/kitty/kitty.conf"
 assert "kitty: exactly one active font_family"      "[[ \$(grep -cE '^font_family' $KCONF) -eq 1 ]]"
 assert "kitty: exactly one active font_size"        "[[ \$(grep -cE '^font_size' $KCONF) -eq 1 ]]"
 assert "kitty: font is CaskaydiaCove Mono"          "grep -qE '^font_family[[:space:]]+CaskaydiaCove Nerd Font Mono\$' $KCONF"
-# Terminal font size is unified at 14 across both emulators (iter 34).
-assert "kitty: font_size unified at 14"             "grep -qE '^font_size[[:space:]]+14(\.0)?\$' $KCONF"
-assert "ghostty: font-size unified at 14"           "grep -qE '^font-size = 14\$' $GH_CONF"
+# Terminal font size is unified at 10 across both emulators (iter 34). Picked by
+# dialing kitty down live with ctrl+shift+minus (2 presses off the 14 default,
+# -2.0 each) and pinning the result — runtime resizes are per-session and are
+# never written back to the config, so without this the value resets on restart.
+assert "kitty: font_size unified at 10"             "grep -qE '^font_size[[:space:]]+10(\.0)?\$' $KCONF"
+assert "ghostty: font-size unified at 10"           "grep -qE '^font-size = 10\$' $GH_CONF"
 # The dormant variants were deleted: nothing ever selected them, and um690 was a
 # near-duplicate of kitty.conf that still carried the stale jetbrains font.
 assert "dormant kitty variants removed"             "[[ ! -e home/dot_config/kitty/kitty.um690.conf && ! -e home/dot_config/kitty/kitty.typecraft.conf ]]"
