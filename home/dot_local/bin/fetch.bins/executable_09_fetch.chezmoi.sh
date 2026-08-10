@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 set -euo pipefail
 
 # 09_fetch.chezmoi.sh — install chezmoi (static Go release binary) into

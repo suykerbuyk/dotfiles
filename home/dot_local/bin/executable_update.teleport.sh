@@ -1,4 +1,8 @@
 #!/bin/bash
+
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 #for X in $(tsh ls | awk '{print $1}' | grep -v Node | grep -v '\--' |grep -v dac | grep -v miner1 | grep -v -e '^[[:space:]]*$' ); do echo -n "$X  "; tsh ssh root@${X} 'rm -rf teleport-*; wget -q https://cdn.teleport.dev/teleport-v11.1.2-linux-amd64-bin.tar.gz ; tar -xf teleport-*.gz ; cd teleport; ./install;  teleport version'  ; sleep 1 ; done
 
 #for X in $(tsh ls | awk '{print $1}' | grep -v Node | grep -v '\--' |grep  dac | grep -v -e '^[[:space:]]*$' ); do echo -n "$X  "; tsh ssh root@${X} 'rm -rf teleport-*; wget -q https://cdn.teleport.dev/teleport-v11.1.2-linux-amd64-centos7-bin.tar.gz ; tar -xf teleport-*.gz ; cd teleport; ./install;  teleport version'  ; sleep 1 ; done

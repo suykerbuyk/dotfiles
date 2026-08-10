@@ -1,3 +1,6 @@
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 # common.sh — the shared INTERACTIVE configuration (rc layer).
 #
 # Sourced by both bash and zsh from rc.sh, which only interactive shells reach.

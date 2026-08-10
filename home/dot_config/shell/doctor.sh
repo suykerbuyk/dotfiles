@@ -1,3 +1,6 @@
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 # doctor.sh — interactive thin wrapper around the doctor CLI.
 #
 # RC layer only (sourced by rc.sh). Must never reach the env layer: the function

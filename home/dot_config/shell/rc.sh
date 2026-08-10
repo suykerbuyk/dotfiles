@@ -1,3 +1,6 @@
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 # rc.sh — the INTERACTIVE entry point. ~/.bashrc and ~/.zshrc are thin stubs that
 # source this file once they have decided the shell is interactive.
 #

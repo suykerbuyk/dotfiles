@@ -1,4 +1,8 @@
 #!/bin/bash
+
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 server="vault01.syketech.arpa"
 base_dir="/" # Optional: Prefix local mounts (e.g., /mnt/nfs/ark01/foo); set to "" for direct /ark01/foo
 fs_dir="ark01"

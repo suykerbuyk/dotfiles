@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 set -euo pipefail
 
 # Ghostty installer (GUI terminal emulator) — the ONLY AppImage in fetch.bins/.

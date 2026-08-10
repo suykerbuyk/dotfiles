@@ -1,3 +1,6 @@
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 # doctor-report.sh — print the dotfiles health report.
 # Requires: df_doctor_registry. Optional: DF_ROOT for checkout-relative installer hints.
 

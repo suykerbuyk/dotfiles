@@ -1,4 +1,8 @@
 #!/bin/bash
+
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 USER=jsuykerbuyk
 PROXY=remote.future-tech-holdings.com
 PASS="$(op item get "FTH Teleport" --fields label=password --reveal)"

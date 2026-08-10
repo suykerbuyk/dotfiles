@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 set -euo pipefail
 
 # 01_fetch.jq.sh — install jq via the shared fetch_jq() helper. jq is the ONE

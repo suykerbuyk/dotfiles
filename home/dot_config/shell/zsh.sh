@@ -1,3 +1,6 @@
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 # zsh.sh — zsh-only settings. Anything portable belongs in common.sh.
 #
 # compinit is deliberately NOT here: it runs at the very end of rc.sh, after

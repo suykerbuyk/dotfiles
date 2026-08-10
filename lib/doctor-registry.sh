@@ -1,3 +1,6 @@
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 # doctor-registry.sh — single source of truth for tool health rows.
 #
 # Each row:  <command>|<fetch.bins stem>|<note>

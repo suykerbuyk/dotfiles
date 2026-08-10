@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 # setup-ssh-agent.sh — Idempotent systemd user ssh-agent.socket setup (Phase 4)
 #
 # Part of revised setup-ssh-agent-systemd plan. Integrates with:
@@ -31,7 +35,12 @@ if [[ "${1:-}" == "--dry-run" ]]; then
 fi
 
 if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
-    sed -n '2,/^$/s/^# //p' "$0"
+    # Print the header comment block, skipping the SPDX banner above it.
+    awk '/^# SPDX-License-Identifier:/{s=1;next}
+         s==1 && /^[[:space:]]*$/{next}
+         s==1 && /^#/{s=2}
+         s==2 && /^#/{sub(/^#[[:space:]]?/,"");print;next}
+         s==2{exit}' "$0"
     exit 0
 fi
 

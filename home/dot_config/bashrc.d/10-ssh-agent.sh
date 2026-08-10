@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 # 10-ssh-agent.sh — Guarded SSH agent setup for bash and zsh
 # Part of revised setup-ssh-agent-systemd (Phase 2)
 #

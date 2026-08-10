@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 set -euo pipefail
 
 # 14_fetch.age.sh — install age (file encryption) via the shared fetch_age()

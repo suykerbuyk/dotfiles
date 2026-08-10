@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 set -euo pipefail
 
 # Zed installer (GUI). Uses require_display_or_skip for tty/WSL headless.

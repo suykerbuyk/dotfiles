@@ -1,3 +1,6 @@
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 # env.sh — the environment layer. Sourced by EVERY shell, interactive or not.
 #
 # Reached from four places, so that no shell can miss it:

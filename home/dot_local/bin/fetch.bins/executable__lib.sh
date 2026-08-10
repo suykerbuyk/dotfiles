@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 # _lib.sh — Shared hardened helpers for fetch.bins/ installers
 #
 # This library implements the design from Context.fetch.bins.refactor.md.

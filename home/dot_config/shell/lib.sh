@@ -1,3 +1,6 @@
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 # lib.sh — helpers shared by bash and zsh. Sourced, never executed.
 #
 # This is the bottom of the env layer: env.sh sources it before touching PATH, so

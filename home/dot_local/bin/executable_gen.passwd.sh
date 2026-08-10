@@ -1,4 +1,8 @@
 #!/bin/sh
+
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 # https://www.howtogeek.com/30184/10-ways-to-generate-a-random-password-from-the-command-line/
 
 < /dev/urandom tr -dc _A-Z-a-z-0-9 | head -c${1:-32};echo

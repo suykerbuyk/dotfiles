@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 # test-update-user-home-dir.sh — integration tests for the chezmoi bootstrap.
 #
 # SAFE: runs entirely in an isolated sandbox HOME + XDG dirs (mktemp), never
@@ -39,7 +43,12 @@ for a in "$@"; do
         --podman) RUN_PODMAN=1 ;;
         --ghostty) RUN_GHOSTTY=1 ;;
         --no-net) NET=0 ;;
-        --help|-h) sed -n '2,/^set /{/^set /d;s/^# \{0,1\}//p}' "$0"; exit 0 ;;
+        # Print the header block, skipping the SPDX banner above it.
+        --help|-h) awk '/^# SPDX-License-Identifier:/{s=1;next}
+                        s==1 && /^[[:space:]]*$/{next}
+                        s==1 && /^#/{s=2}
+                        s==2 && /^#/{sub(/^#[[:space:]]?/,"");print;next}
+                        s==2{exit}' "$0"; exit 0 ;;
         *) echo "unknown arg: $a" >&2; exit 2 ;;
     esac
 done
@@ -778,6 +787,31 @@ if [[ $RUN_GHOSTTY == 1 ]]; then
 else
     skip "ghostty fetcher (pass --ghostty or RUN_GHOSTTY_FETCH=1 to enable)"
 fi
+
+# ---- licensing -------------------------------------------------------------
+# Dual MIT/Apache-2.0. The repo-root LICENSE is canonical and carries BOTH texts;
+# there must be no split LICENSE-MIT / LICENSE-APACHE alongside it.
+sec "structural: dual licensing"
+assert "LICENSE present at repo root"          "[[ -f $REPO/LICENSE ]]"
+assert "LICENSE carries the MIT text"          "grep -q 'Permission is hereby granted, free of charge' $REPO/LICENSE"
+assert "LICENSE carries the Apache-2.0 text"   "grep -q 'Apache License' $REPO/LICENSE && grep -q 'Version 2.0, January 2004' $REPO/LICENSE"
+assert "LICENSE names the copyright holder"    "grep -q 'John Suykerbuyk and SykeTech LTD' $REPO/LICENSE"
+assert "no split LICENSE-MIT/-APACHE files"    "[[ ! -e $REPO/LICENSE-MIT && ! -e $REPO/LICENSE-APACHE ]]"
+# The vendored kickstart.nvim tree keeps UPSTREAM's copyright. A SykeTech banner
+# in there would assert copyright we do not hold and relicense their MIT as dual.
+assert "vendored nvim keeps its own LICENSE"   "[[ -f $REPO/home/dot_config/nvim-kickstart-modular/LICENSE.md ]]"
+assert "no SykeTech banner in vendored nvim"   "! grep -rql 'SykeTech LTD' $REPO/home/dot_config/nvim-kickstart-modular"
+# Several scripts print their own header comment block as --help. The SPDX banner
+# sits ABOVE that block, so a naive line-anchored extractor prints the banner and
+# stops — which is exactly what happened when the banners first landed: two of
+# these three emitted ONLY the copyright and no usage text at all.
+for h in test-update-user-home-dir.sh \
+         home/dot_local/bin/executable_setup-ssh-agent.sh \
+         home/dot_local/bin/executable_agent-bootstrap.sh; do
+    out="$(bash "$REPO/$h" --help 2>/dev/null)"
+    assert "--help non-empty: $(basename "$h")"      "[[ \$(printf '%s' \"\$out\" | wc -l) -ge 3 ]]"
+    assert "--help omits the banner: $(basename "$h")" "! printf '%s' \"\$out\" | grep -q 'SPDX-License-Identifier'"
+done
 
 # ---- summary ---------------------------------------------------------------
 sec "summary"

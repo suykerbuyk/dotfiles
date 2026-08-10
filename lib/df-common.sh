@@ -1,3 +1,6 @@
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 # df-common.sh — shared helpers for repo-root management CLIs.
 # Source from a root script:  . "$(dirname "$0")/lib/df-common.sh" && df_init "$0"
 #
