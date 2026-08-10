@@ -13,10 +13,12 @@
 #   ./test-update-user-home-dir.sh --rust     # also exercise the rustup toolchain fetch
 #   ./test-update-user-home-dir.sh --podman   # also exercise the 32 MB podman static fetch
 #   ./test-update-user-home-dir.sh --ghostty  # also exercise the 48 MB ghostty AppImage fetch
+#   ./test-update-user-home-dir.sh --herdr    # also exercise the 21 MB herdr binary fetch
 #   RUN_GO_FETCH=1 ./test-update-user-home-dir.sh
 #   RUN_RUST_FETCH=1 ./test-update-user-home-dir.sh
 #   RUN_PODMAN_FETCH=1 ./test-update-user-home-dir.sh
 #   RUN_GHOSTTY_FETCH=1 ./test-update-user-home-dir.sh
+#   RUN_HERDR_FETCH=1 ./test-update-user-home-dir.sh
 #   ./test-update-user-home-dir.sh --no-net   # structural only (needs a chezmoi on PATH)
 #
 # ninja is a small, fast release-zip fetcher, so it runs in the default
@@ -35,6 +37,7 @@ RUN_GO="${RUN_GO_FETCH:-0}"
 RUN_RUST="${RUN_RUST_FETCH:-0}"
 RUN_PODMAN="${RUN_PODMAN_FETCH:-0}"
 RUN_GHOSTTY="${RUN_GHOSTTY_FETCH:-0}"
+RUN_HERDR="${RUN_HERDR_FETCH:-0}"
 NET=1
 for a in "$@"; do
     case "$a" in
@@ -42,6 +45,7 @@ for a in "$@"; do
         --rust) RUN_RUST=1 ;;
         --podman) RUN_PODMAN=1 ;;
         --ghostty) RUN_GHOSTTY=1 ;;
+        --herdr) RUN_HERDR=1 ;;
         --no-net) NET=0 ;;
         # Print the header block, skipping the SPDX banner above it.
         --help|-h) awk '/^# SPDX-License-Identifier:/{s=1;next}
@@ -72,7 +76,7 @@ unset XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS   # simulate headless -> Phase 4 
 BIN_DIR="$SB/.local/bin"; APP_DIR="$SB/.local/apps"
 
 echo "sandbox HOME=$SB"
-echo "repo=$REPO   go-fetch=$([[ $RUN_GO == 1 ]] && echo on || echo off)   rust-fetch=$([[ $RUN_RUST == 1 ]] && echo on || echo off)   podman-fetch=$([[ $RUN_PODMAN == 1 ]] && echo on || echo off)   ghostty-fetch=$([[ $RUN_GHOSTTY == 1 ]] && echo on || echo off)   network=$([[ $NET == 1 ]] && echo on || echo off)"
+echo "repo=$REPO   go-fetch=$([[ $RUN_GO == 1 ]] && echo on || echo off)   rust-fetch=$([[ $RUN_RUST == 1 ]] && echo on || echo off)   podman-fetch=$([[ $RUN_PODMAN == 1 ]] && echo on || echo off)   ghostty-fetch=$([[ $RUN_GHOSTTY == 1 ]] && echo on || echo off)   herdr-fetch=$([[ $RUN_HERDR == 1 ]] && echo on || echo off)   network=$([[ $NET == 1 ]] && echo on || echo off)"
 
 # ---- locate a chezmoi binary (fetch into sandbox if needed) ----------------
 sec "setup: chezmoi binary"
@@ -566,6 +570,32 @@ assert "tree-sitter fetcher is valid bash"          "bash -n $TS_FETCHER"
 assert "tree-sitter fetcher sources _lib.sh"        "grep -q '_lib.sh' $TS_FETCHER"
 assert "tree-sitter fetcher gunzips the bare .gz"   "grep -q 'gunzip' $TS_FETCHER"
 assert "doctor registry lists tree-sitter"          "grep -q 'tree-sitter|tree-sitter|' lib/doctor-registry.sh"
+
+# herdr (slot 17) is the ONLY fetcher whose asset needs no extraction at all —
+# the release ships a bare, uncompressed binary — so the invariants worth pinning
+# are about SELECTION, which is where a bare-binary fetcher can silently go wrong.
+# Two traps, both proven by the tools already here:
+#   1. fb_arch can NEVER emit `aarch64` (its sed hardcodes s/aarch64/arm64/), so a
+#      fetcher whose assets use raw uname tokens must not call it. Calling it would
+#      pass on x86_64 and 404 on every arm64 box — invisible on this machine.
+#   2. The release also ships herdr-macos-x86_64, so `contains($arch)` would match
+#      a macOS binary on a linux host. The selector must be an EXACT name match.
+HD_FETCHER="home/dot_local/bin/fetch.bins/executable_17_fetch.herdr.sh"
+assert "herdr fetcher present"                      "[[ -f $HD_FETCHER ]]"
+assert "herdr fetcher is valid bash"                "bash -n $HD_FETCHER"
+assert "herdr fetcher sources _lib.sh"              "grep -q '_lib.sh' $HD_FETCHER"
+# Comment-aware: the fetcher's header DOCUMENTS why fb_arch is unusable, so a bare
+# grep matches the explanation. Skip comment lines. awk, not `grep -v | grep -q`:
+# under this harness's pipefail a short-circuiting grep -q SIGPIPEs the producer.
+assert "herdr fetcher never CALLS fb_arch"          "awk '/^[[:space:]]*#/{next} /fb_arch/{f=1} END{exit f?1:0}' $HD_FETCHER"
+assert "herdr fetcher uses raw uname -m"            "grep -qE 'ARCH=\"\\\$\\(uname -m\\)\"' $HD_FETCHER"
+assert "herdr fetcher matches the asset EXACTLY"    "grep -qF '. == (\"herdr-linux-\" + \$arch)' $HD_FETCHER"
+assert "herdr fetcher goes through install_bin"     "grep -qE '^[[:space:]]*install_bin[[:space:]]' $HD_FETCHER"
+assert "herdr fetcher has no extraction step"       "! grep -qE '(tar -x|gunzip|fb_unzip|appimage-extract)' $HD_FETCHER"
+assert "doctor registry lists herdr"                "grep -q 'herdr|herdr|' lib/doctor-registry.sh"
+# Same lockstep regression tree-sitter shipped with in iter 30: a fetcher that is
+# absent from the removal loop is stranded by --uninstall --force.
+assert "installer uninstall covers herdr"           "grep -qE '^[[:space:]]*for b in .*\\bherdr\\b' update-user-home-dir.sh"
 # nvim-treesitter main-branch migration: the old configs-module API must be
 # gone from the config source, and the duplicate custom spec stays deleted
 # (its go/rust parsers are folded into the kickstart spec).
@@ -786,6 +816,25 @@ if [[ $RUN_GHOSTTY == 1 ]]; then
     fi
 else
     skip "ghostty fetcher (pass --ghostty or RUN_GHOSTTY_FETCH=1 to enable)"
+fi
+
+# ===========================================================================
+if [[ $RUN_HERDR == 1 ]]; then
+    sec "herdr fetcher (21 MB bare binary) — no extraction step at all"
+    if [[ -x "$SB/.local/bin/fetch.bins/17_fetch.herdr.sh" ]]; then
+        "$SB/.local/bin/fetch.bins/17_fetch.herdr.sh" >/dev/null 2>&1
+        # Headless-safe: herdr is a TUI, but --version neither opens a terminal
+        # nor starts the server, so this needs no display and no pty.
+        assert "herdr installed + --version works" "\"$BIN_DIR/herdr\" --version >/dev/null 2>&1"
+        assert "herdr symlink -> ~/.local/apps"    "[[ \"\$(readlink -f \"$BIN_DIR/herdr\")\" == \"$APP_DIR\"/* ]]"
+        # The whole point of the bare-binary path: what lands on PATH must be the
+        # real ELF executable, not a tarball or a .gz that never got unpacked.
+        assert "installed herdr is an ELF binary"  "head -c4 \"\$(readlink -f \"$BIN_DIR/herdr\")\" | grep -q ELF"
+    else
+        skip "herdr fetcher not present (apply group did not run)"
+    fi
+else
+    skip "herdr fetcher (pass --herdr or RUN_HERDR_FETCH=1 to enable)"
 fi
 
 # ---- licensing -------------------------------------------------------------

@@ -22,6 +22,7 @@ df_doctor_registry() {
 		'ninja|ninja|' \
 		'podman|podman|' \
 		'tree-sitter|tree-sitter| parser CLI for nvim-treesitter' \
+		'herdr|herdr| agent-oriented multiplexer; overlaps tmux/tm' \
 		'zed|zed|' \
 		'ghostty|ghostty| community AppImage; upstream ships Linux via distros' \
 		'chezmoi|chezmoi|' \

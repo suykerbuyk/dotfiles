@@ -85,7 +85,7 @@ if $UNINSTALL; then
     # gone, so the tool is no longer on PATH. Keep this list in lockstep with the
     # fetch.bins/ scripts (every 0N_fetch.<tool>.sh must map to an entry here, a
     # special case below, or the rust block).
-    for b in jq rg go gofmt broot fzf nvim ninja starship chezmoi age age-keygen tree-sitter; do
+    for b in jq rg go gofmt broot fzf nvim ninja starship chezmoi age age-keygen tree-sitter herdr; do
         if $FORCE; then remove_bin "$b"; else echo "  would remove_bin $b"; fi
     done
     # nvm does not fit remove_bin: its PATH artifact is ~/.local/bin/nvm.sh (not

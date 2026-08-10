@@ -136,6 +136,23 @@ Key `_lib.sh` helpers:
   single static binary shipped as a **bare `.gz`** (no tarball), so it gunzips
   then follows the plain `install_bin` pattern. Its asset arch tokens are
   node-style (`x64`/`arm64`), so it maps `uname -m` explicitly.
+- **herdr** (`17_fetch.herdr.sh`) is a terminal multiplexer/runtime aimed at AI
+  coding agents (Rust, Apache-2.0, `herdrdev/herdr`). It is the **shortest**
+  fetcher here, because its release ships a **bare, uncompressed binary** per
+  os/arch — no tarball, no zip, not even a `.gz` — so it downloads straight into
+  `$FB_TMP` and hands the file to `install_bin`. There is no extraction step to
+  get wrong. (jq's release is bare too, but jq builds its URL by interpolation
+  because the jq-free bootstrap cannot parse the asset list.) Two things to know:
+  - Asset arch tokens are **raw `uname -m`** (`x86_64`/`aarch64`), so `fb_arch` is
+    unusable — its sed hardcodes `s/aarch64/arm64/` no matter what label it is
+    given, and can never emit `aarch64`. Uses `uname -m` directly, like starship.
+  - The selector is an **exact** name match, not `contains`: the release also
+    carries `herdr-macos-x86_64`, which a `contains("x86_64")` filter would
+    happily select on a linux box.
+  - It **overlaps tmux**, which this repo configures heavily (`dot_tmux.conf`,
+    the `tm` helper, `tmux-pane-log`). It is fetched, not adopted: nothing in the
+    shell or tmux layer references it. Its network test is gated behind `--herdr`
+    (`RUN_HERDR_FETCH=1`), since the fetch is ~21 MB.
 - **podman** (`12_fetch.podman.sh`) is **not** a single-binary `install_bin`
   fetcher — it mirrors the go whole-tree pattern. The `mgoltzsche/podman-static`
   release tarball is a complete static userland (podman + crun/runc/pasta/
