@@ -10,7 +10,7 @@ fully configured state — editor, prompt, window manager, CLI tools, SSH agent,
 and secrets — with nothing to install by hand first.
 
 ```bash
-git clone https://github.com/<you>/dotfiles.git
+git clone https://github.com/suykerbuyk/dotfiles.git
 cd dotfiles
 ./update-user-home-dir.sh
 ```
@@ -197,3 +197,21 @@ Everything runs in an isolated sandbox `HOME`; it never touches your real `~`.
 
 These are personal dotfiles, shared as a reference for anyone building something
 similar. Fork freely; the interesting parts are the docs.
+
+## License
+
+Copyright (c) 2026 John Suykerbuyk and SykeTech LTD.
+
+Dual-licensed under either of
+
+- MIT license ([LICENSE](LICENSE))
+- Apache License, Version 2.0 ([LICENSE](LICENSE))
+
+at your option — `SPDX-License-Identifier: MIT OR Apache-2.0`. Both texts are in
+the single root [LICENSE](LICENSE) file.
+
+`home/dot_config/nvim-kickstart-modular/` is a fork of
+[kickstart.nvim](https://github.com/nvim-lua/kickstart.nvim) and remains under
+its own upstream MIT license — see the `LICENSE.md` in that directory.
+`home/dot_config/waybar/mocha.css` is the
+[Catppuccin](https://github.com/catppuccin/catppuccin) Mocha palette.
