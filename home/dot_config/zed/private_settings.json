@@ -22,10 +22,10 @@
   "agent": {
     "dock": "left",
     "default_model": {
-      "effort": "high",
+      "effort": "low",
       "enable_thinking": true,
-      "model": "gpt-5.4",
-      "provider": "copilot_chat"
+      "model": "grok-4.3",
+      "provider": "x_ai"
     },
     "inline_assistant_model": {
       "model": "claude-sonnet-4-5-thinking",
@@ -56,12 +56,6 @@
         "mcp"
       ],
       "command": "vp"
-    },
-    "vibe-vault": {
-      "args": [
-        "mcp"
-      ],
-      "command": "vv"
     }
   },
   "language_models": {
@@ -95,8 +89,8 @@
   },
   "ssh_connections": [
     {
-      "args": [],
       "host": "um791",
+      "args": [],
       "projects": [
         {
           "paths": [
@@ -106,6 +100,17 @@
         {
           "paths": [
             "/home/johns/code/proteus/proteus-rs"
+          ]
+        }
+      ]
+    },
+    {
+      "host": "qa-deb13-01.syketech.com",
+      "args": [],
+      "projects": [
+        {
+          "paths": [
+            "/home/johns/code/quantum-ng/./"
           ]
         }
       ]
