@@ -526,6 +526,15 @@ assert "ghostty: font-size unified at 10"           "grep -qE '^font-size = 10\$
 # The dormant variants were deleted: nothing ever selected them, and um690 was a
 # near-duplicate of kitty.conf that still carried the stale jetbrains font.
 assert "dormant kitty variants removed"             "[[ ! -e home/dot_config/kitty/kitty.um690.conf && ! -e home/dot_config/kitty/kitty.typecraft.conf ]]"
+
+# Ruling (iter 36): kitty is the DEFAULT terminal, ghostty is OPT-IN. Both stay
+# managed, but every automated spawn point names kitty. These assert that ruling
+# so a partial switch cannot land — promoting ghostty means moving all four
+# together, and a half-move is how two terminal configs start drifting.
+assert "hyprland \$terminal is kitty"                "grep -qE '^\\\$terminal = kitty\$' home/dot_config/hypr/hyprland.conf"
+assert "hyprland autostarts kitty"                  "grep -qE '^exec-once = .*\\bkitty\\b' home/dot_config/hypr/hyprland.conf"
+assert "sway \$term is kitty"                        "grep -qE '^set \\\$term kitty\$' home/dot_config/sway/config"
+assert "rofi terminal is kitty"                     "grep -qE '^[[:space:]]*terminal: \"kitty\";\$' home/dot_config/rofi/config.rasi"
 assert ".chezmoiremove retires kitty variants"      "grep -q '^.config/kitty/kitty.um690.conf\$' home/.chezmoiremove"
 # kitty.conf still includes the theme file, so it must survive the variant purge.
 assert "kitty theme include still resolves"         "grep -q '^include current-theme.conf\$' $KCONF && [[ -f home/dot_config/kitty/current-theme.conf ]]"

@@ -201,9 +201,21 @@ Key `_lib.sh` helpers:
   - Config is **not** a portable sidecar. uruntime supports `<AppImage>.home` /
     `.config`, but ghostty is left to read `~/.config/ghostty` like every other
     tool, so `home/dot_config/ghostty/config` stays chezmoi-managed and is
-    reproduced on a fresh machine. That config pins CaskaydiaCove Nerd Font 14
+    reproduced on a fresh machine. That config pins CaskaydiaCove Nerd Font 10
     and Catppuccin Mocha to match the repo-wide theme; validate edits with
     `ghostty +validate-config --config-file=<path>`.
+  - **kitty is the default terminal; ghostty is opt-in.** This is a deliberate
+    ruling, not an oversight. Every automated spawn point names kitty —
+    hyprland `$terminal` and its `exec-once`, sway `$term`, and rofi
+    `terminal:` — so ghostty is reached only by launching it by name or from
+    the desktop entry this fetcher installs. Both are kept: kitty is the distro
+    package (`extra/kitty`) and carries the tuned 2261-line config; ghostty is
+    the no-root AppImage that also works on a box with no package manager
+    access. Font and theme are held identical across the two on purpose, so
+    switching costs nothing. If you ever do promote ghostty, all four spawn
+    points must move together — a partial switch is how you end up with two
+    terminals whose configs drift, which is exactly the bug that put a dead
+    `font_family` override in `kitty.conf` for months.
 
 ## chezmoi source layout (`home/`)
 - Attribute-encoded names: `dot_*`, `private_*` (e.g. `private_dot_ssh` → 0700),
