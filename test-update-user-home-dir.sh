@@ -323,6 +323,108 @@ if [[ -n "$CHEZMOI" ]]; then
         rm -f "$faketv"
     fi
 
+    # --- herdr completions + broot `br` ---------------------------------------
+    # Both are wired into dotfiles_tool_init as print-to-stdout forms that are
+    # eval'd. Structural first (no dependency on either tool being installed),
+    # then a functional pass driven by stubs, then the real binaries when present.
+    sec "shell: herdr completions and broot 'br'"
+
+    ti="$(sed -n '/^dotfiles_tool_init()/,/^}/p' "$SRC/dot_config/shell/common.sh")"
+    assert "herdr completion is wired into dotfiles_tool_init" \
+        "grep -q 'herdr completion' <<<\"\$ti\""
+    assert "broot br is wired into dotfiles_tool_init" \
+        "grep -q 'broot --print-shell-function' <<<\"\$ti\""
+    assert "both are guarded by df_have" \
+        "[[ \$(grep -c 'df_have herdr\|df_have broot' <<<\"\$ti\") -eq 2 ]]"
+
+    # Every assertion below is NEGATIVE — "this code is gone" — so each one must
+    # read code, not prose. Both files carry comments explaining exactly why the
+    # removed forms were wrong, and grepping the raw text matches this repo's own
+    # rationale and fails forever. Strip comments first.
+    code="$(cat "$SRC"/dot_config/shell/*.sh | sed 's/#.*//')"
+    dr="$(sed 's/#.*//' lib/doctor-report.sh)"
+
+    # The per-shell launcher path is the bug this replaced: broot NEVER creates a
+    # launcher/zsh/ directory, so that read silently no-ops under zsh forever.
+    assert "shell layer no longer reads a per-shell broot launcher" \
+        "! grep -q 'launcher/\$DOTFILES_SHELL' <<<\"\$code\""
+    # --install patches ~/.bashrc AND ~/.zshrc, which are chezmoi-managed stubs.
+    assert "nothing in the shell layer runs 'broot --install'" \
+        "! grep -q 'broot --install' <<<\"\$code\""
+    assert "doctor no longer advises 'broot --install'" \
+        "! grep -q 'broot --install' <<<\"\$dr\""
+    assert "doctor no longer tests the per-shell br launcher" \
+        "! grep -q 'launcher/\${_shell}/br' <<<\"\$dr\""
+
+    # The marker is tracked ON PURPOSE: without it broot's first TUI launch
+    # prompts 'Can I install it now? [Y/n]' (defaulting to yes) and patches the
+    # managed rc stubs. The bash launcher, by contrast, stays machine-local.
+    assert_file "broot install marker is shipped (suppresses the install prompt)" \
+        "$SRC/dot_config/broot/launcher/installed-v4"
+
+    # Functional, via stubs shaped like the real emitters — so this holds on a box
+    # with neither tool installed. The herdr stub ends in an unguarded `compdef`,
+    # exactly as `herdr completion zsh` does, which pins the after-compinit order.
+    if command -v zsh >/dev/null 2>&1; then
+        fakeherdr="$SB/.local/bin/herdr"
+        fakebroot="$SB/.local/bin/broot"
+        {
+            printf '#!/bin/sh\n'
+            printf '[ "$1" = completion ] && printf "%%s\\n" "_herdr() { :; }" "compdef _herdr herdr"\n'
+        } > "$fakeherdr"
+        {
+            printf '#!/bin/sh\n'
+            printf '[ "$1" = --print-shell-function ] && printf "%%s\\n" "br() { :; }"\n'
+        } > "$fakebroot"
+        chmod +x "$fakeherdr" "$fakebroot"
+
+        err="$( cd /tmp && env -i HOME="$SB" TERM=xterm PATH=/usr/bin:/bin zsh -ic true 2>&1 >/dev/null | tr -d '\r' )"
+        assert "herdr completion (unguarded compdef) raises no 'command not found'" \
+            "! grep -q 'command not found: compdef' <<<\"\$err\""
+
+        b="$(sh_probe zsh 'printf "%s" "$(whence -w br 2>/dev/null || printf UNDEF)"')"
+        assert "zsh: br is defined as a function" "[[ '$b' == 'br: function' ]]"
+        c="$(sh_probe zsh 'printf "%s" "${_comps[herdr]:-UNSET}"')"
+        assert "zsh: herdr completion is registered with compdef" "[[ '$c' == '_herdr' ]]"
+
+        if command -v bash >/dev/null 2>&1; then
+            b="$(sh_probe bash 'printf "%s" "$(type -t br 2>/dev/null || printf UNDEF)"')"
+            assert "bash: br is defined as a function" "[[ '$b' == function ]]"
+        fi
+
+        # Neither eval may break the silence contract (both are 2>/dev/null).
+        if command -v script >/dev/null 2>&1; then
+            noise="$(cd /tmp && script -qec "env -i HOME=$SB TERM=xterm PATH=/usr/bin:/bin zsh -ic true" /dev/null 2>&1 | tr -d '\r\n \t')"
+            assert "startup stays silent with herdr+broot wired" "[[ -z '$noise' ]]"
+        fi
+
+        rm -f "$fakeherdr" "$fakebroot"
+    else
+        skip "herdr/broot stub probes (zsh not installed)"
+    fi
+
+    # Contract check against the REAL binaries when this box has them: the
+    # subcommand is `completion` (singular) and each snippet self-registers.
+    if command -v herdr >/dev/null 2>&1; then
+        hb="$(herdr completion bash 2>/dev/null)"
+        hz="$(herdr completion zsh 2>/dev/null)"
+        assert "real herdr: bash completion self-registers" \
+            "[[ \"\$hb\" == *'complete -F _herdr'* ]]"
+        assert "real herdr: zsh completion self-registers via compdef" \
+            "[[ \"\$hz\" == *'compdef _herdr herdr'* ]]"
+    else
+        skip "real herdr completion contract (herdr not installed)"
+    fi
+    if command -v broot >/dev/null 2>&1; then
+        for s in bash zsh; do
+            bf="$(broot --print-shell-function "$s" 2>/dev/null)"
+            assert "real broot: --print-shell-function $s defines br" \
+                "[[ \"\$bf\" == *'br {'* || \"\$bf\" == *'br()'* ]]"
+        done
+    else
+        skip "real broot --print-shell-function contract (broot not installed)"
+    fi
+
     # dotfiles-doctor greets ONCE per login session era: the first interactive
     # shell prints it, later shells (tmux panes) stay quiet. The one-shot is a
     # stamp in $XDG_RUNTIME_DIR, created atomically under `set -C`. The harness

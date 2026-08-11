@@ -59,10 +59,13 @@ df_doctor_report() {
 		fi
 	done
 
-	# broot: binary alone is not enough — need the per-shell `br` launcher.
-	if df_have broot && [ ! -r "${HOME}/.config/broot/launcher/${_shell}/br" ]; then
-		printf '  %-9s %-5s binary present, but the `br` shim is missing → run: broot --install\n' 'broot' 'note'
-	fi
+	# No broot `br` special case here, deliberately. The rc layer defines `br` by
+	# eval'ing `broot --print-shell-function "$DOTFILES_SHELL"` whenever the binary
+	# is present (see ~/.config/shell/common.sh), so the shim cannot be missing
+	# independently of the binary — the plain `broot` row above already covers it.
+	# The old check tested ~/.config/broot/launcher/<shell>/br and advised
+	# `broot --install`; under zsh that path is never created by any amount of
+	# --install, so the note could never be cleared.
 
 	if [ ! -d "${HOME}/.local/apps/nvm" ]; then
 		if _inst=$(df_doctor_installer_for nvm); then

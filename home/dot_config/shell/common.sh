@@ -40,31 +40,45 @@ alias l='ls -CF'
 alias gl='git log --oneline --graph --decorate'
 
 # --- tool integration ---------------------------------------------------------
-# These emit shell-completion code, and some of it calls `compdef`: television's
-# `tv init` ends with an unguarded `compdef _tv tv`. `compdef` does not exist
-# until `compinit` has run, and rc.sh runs compinit LAST (so local.d/ can extend
-# $fpath first). So these inits cannot run inline here — they are wrapped in a
-# function that rc.sh invokes *after* the compinit step. Each takes the shell's
-# name, which is why the three share this file rather than being duplicated per
-# shell. (fzf guards its own compdef call; starship emits none; only tv needed
-# the reorder, but keeping all three together keeps the ordering rule in one place.)
+# These emit shell code, and some of it calls `compdef`: television's `tv init`
+# ends with an unguarded `compdef _tv tv`, and `herdr completion zsh` ends with
+# `compdef _herdr herdr`. `compdef` does not exist until `compinit` has run, and
+# rc.sh runs compinit LAST (so local.d/ can extend $fpath first). So these inits
+# cannot run inline here — they are wrapped in a function that rc.sh invokes
+# *after* the compinit step. Each takes the shell's name, which is why they share
+# this file rather than being duplicated per shell. (fzf guards its own compdef
+# call; starship emits none. Two of the five now depend on the ordering, so it is
+# a rule rather than a tv quirk.)
+#
+# Every one of these is a print-to-stdout form that is then eval'd. That is
+# deliberate and it is the *only* safe shape here: the alternative "install"
+# subcommands these tools ship append a source line to ~/.bashrc / ~/.zshrc,
+# which are chezmoi-managed stubs — anything written there is destroyed by the
+# next `chezmoi apply` (see doc/shell.md, "Host-local config"). Total cost is
+# ~2 ms per interactive shell, so nothing here is worth caching to disk.
+#
+# herdr: the subcommand is `completion` (singular), and the emitted snippet
+# registers itself (`complete -F _herdr herdr` / `compdef _herdr herdr`), so the
+# eval is all that is required.
+#
+# broot: `--print-shell-function` is used rather than `broot --install`, which
+# CANNOT work here. --install only ever generates the *bash* launcher
+# (~/.config/broot/launcher/bash/br) — it never creates a zsh/ directory, and for
+# zsh it instead patches ~/.zshrc to source that same bash file. So a per-shell
+# launcher path can never resolve under zsh no matter how often --install runs,
+# and --install's rc-file patching is destroyed by the next `chezmoi apply`
+# anyway. Printing the function and eval'ing it is correct for both shells and
+# touches no file at all.
 dotfiles_tool_init() {
     df_have starship && eval "$(starship init "$DOTFILES_SHELL")"
     df_have fzf && eval "$(fzf --"$DOTFILES_SHELL")"
     df_have tv && eval "$(tv init "$DOTFILES_SHELL")"
+    df_have herdr && eval "$(herdr completion "$DOTFILES_SHELL" 2>/dev/null)"
+    df_have broot && eval "$(broot --print-shell-function "$DOTFILES_SHELL" 2>/dev/null)"
     return 0
 }
 
 df_have fzf && df_have tmux && export FZF_DEFAULT_OPTS='--tmux center'
-
-# broot's `br` function comes from a launcher script that `broot --install`
-# generates *per shell* — the binary alone does not provide it. Source the
-# launcher for THIS shell (the old zshrc sourced the bash launcher under zsh) and
-# stay quiet when it is absent; `dotfiles-doctor` reports the missing shim and
-# the command that creates it.
-_br="$HOME/.config/broot/launcher/$DOTFILES_SHELL/br"
-[ -r "$_br" ] && . "$_br"
-unset _br
 
 # --- nvm ----------------------------------------------------------------------
 # $NVM_DIR is exported by env.sh (it is environment). Sourcing nvm.sh is not: it

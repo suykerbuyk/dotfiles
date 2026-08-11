@@ -8,6 +8,19 @@ set -euo pipefail
 # broot installer (ZIP, musl binary from Canop/broot). Uses lib for safety,
 # temp discipline, and install_bin. Simplified asset selection.
 # See Context.fetch.bins.refactor.md.
+#
+# This fetcher installs the BINARY ONLY, and deliberately never runs
+# `broot --install`. The `br` shell function is provided by the rc layer, which
+# eval's `broot --print-shell-function "$DOTFILES_SHELL"` (see
+# home/dot_config/shell/common.sh). `broot --install` would append a source line
+# to ~/.bashrc AND ~/.zshrc — chezmoi-managed stubs, so the next `chezmoi apply`
+# destroys it — and it only ever generates a bash launcher regardless.
+#
+# Relatedly: home/dot_config/broot/launcher/installed-v4 is tracked ON PURPOSE.
+# It is broot's "install already done" marker, and shipping it suppresses the
+# interactive `Can I install it now? [Y/n]` prompt broot raises on its first TUI
+# launch — a prompt that defaults to YES and whose only effect would be to patch
+# those same managed rc stubs. Do not "clean up" that file.
 
 . "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/_lib.sh"
 

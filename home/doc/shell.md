@@ -77,11 +77,12 @@ Three invariants inside that order:
 - **`compinit` runs last** *of the completion setup*, because `local.d/` may extend
   `$fpath` (the grok completions do). Initialising completions before that point
   silently drops them.
-- **Tool completion inits run *after* `compinit`.** `starship`/`fzf`/`tv` are eval'd
-  from `dotfiles_tool_init` (defined in `common.sh`), which `rc.sh` calls only after
-  the `compinit` step. `tv init` ends with an unguarded `compdef _tv tv`, and
-  `compdef` does not exist until `compinit` has defined it — running the inits inline
-  in `common.sh` printed `(eval):230: command not found: compdef` on every login zsh.
+- **Tool completion inits run *after* `compinit`.** `starship`/`fzf`/`tv`/`herdr`/`broot`
+  are eval'd from `dotfiles_tool_init` (defined in `common.sh`), which `rc.sh` calls
+  only after the `compinit` step. `tv init` ends with an unguarded `compdef _tv tv`
+  and `herdr completion zsh` ends with `compdef _herdr herdr`; `compdef` does not
+  exist until `compinit` has defined it — running the inits inline in `common.sh`
+  printed `(eval):230: command not found: compdef` on every login zsh.
 - **`env.sh` is idempotent.** A login shell runs it via `~/.bash_profile` →
   `~/.profile`; `rc.sh` then sources it again defensively. A non-exported
   `DOTFILES_ENV_LOADED` guard makes the second call a no-op, while each *new* shell
@@ -134,6 +135,55 @@ its completions/`fpath` line in `local.d/50-grok.sh`. The `fpath=(…)` line in
 particular *cannot* be re-sourced (it stacks duplicates), which is the concrete
 reason the two directories are separate rather than one sourced from both layers.
 
+## Tool integration: print and eval, never "install"
+
+`dotfiles_tool_init` (in `common.sh`, called by `rc.sh` after `compinit`) wires
+five tools into the interactive shell, and every one of them uses a
+**print-to-stdout** form that is then `eval`'d:
+
+| Tool | Invocation | Provides |
+|---|---|---|
+| starship | `starship init <shell>` | prompt |
+| fzf | `fzf --<shell>` | keybindings + completion |
+| tv | `tv init <shell>` | completion (unguarded `compdef`) |
+| herdr | `herdr completion <shell>` | completion (`compdef`/`complete`) |
+| broot | `broot --print-shell-function <shell>` | the `br` function |
+
+**The print form is not a style preference — the "install" alternatives are
+actively harmful here.** `broot --install` appends a `source …` line to *both*
+`~/.bashrc` and `~/.zshrc`, which are chezmoi-managed stubs, so the next
+`chezmoi apply` deletes it (the same trap the `env.d/` + `local.d/` split exists
+to solve). Printing the function writes nothing and works identically in both
+shells. Measured cost of the whole set is ~2 ms per interactive shell, so none
+of it is cached to disk.
+
+Two invocation details that are easy to get wrong:
+
+- herdr's subcommand is **`completion`**, singular — `herdr completions bash` is
+  not valid. The emitted snippet registers itself (`complete -F _herdr herdr`
+  under bash, `compdef _herdr herdr` under zsh), so the `eval` is all that is
+  needed. Because it calls `compdef`, it is subject to the after-`compinit`
+  ordering rule above.
+- broot only ever generates a **bash** launcher. There is no
+  `~/.config/broot/launcher/zsh/`, and there never will be — for zsh, `--install`
+  points `~/.zshrc` at the bash launcher. Any code that reads a *per-shell*
+  launcher path silently does nothing under zsh.
+
+### `installed-v4` is tracked on purpose
+
+`home/dot_config/broot/launcher/installed-v4` is a chezmoi-managed file whose
+content is broot's own "the installation of the br function was done" note. It
+looks like stray state committed by accident. It is not, and it must not be
+removed: without it, broot's **first TUI launch prompts `Can I install it now?
+[Y/n]`, defaulting to yes**, and the only thing that install does is patch the
+managed rc stubs. Shipping the marker suppresses that prompt on every machine,
+while the rc layer supplies `br` properly. (An explicit `broot --install` still
+works if you ever want it — the marker only suppresses the automatic offer.)
+
+Correspondingly, `home/dot_config/broot/launcher/bash/br` is **not** in the
+source tree, and a test asserts `chezmoi apply` does not produce it: it is a
+machine-local symlink into `~/.local/share`, not portable state.
+
 ## Dotfiles awareness — `./doctor` / `dotfiles-doctor`
 
 The health report is a **real CLI** at the repo root (`./doctor`). The
@@ -159,7 +209,7 @@ $ dotfiles-doctor
   starship  ok    /home/johns/.local/bin/starship
   fzf       ok    /home/johns/.local/bin/fzf
   broot     ok    /home/johns/.local/bin/broot
-  broot     note  binary present, but the `br` shim is missing → run: broot --install
+  herdr     ok    /home/johns/.local/bin/herdr
   tv        n/a   not provisioned by fetch.bins
   keychain  n/a   superseded by ~/.config/bashrc.d/10-ssh-agent.sh
 ```
@@ -210,9 +260,17 @@ panes, splits, subshells) stays silent. The one-shot is a stamp file,
   the fork-heavy fallbacks.
 - **Duplicate PATH entries.** Nothing deduped, so re-sourcing stacked entries
   (`~/.grok/bin` appeared twice). `path_prepend` skips anything already present.
-- **A lying diagnostic.** zsh printed "broot is not installed locally" when broot
-  *was* installed — it was checking for the `br` launcher shim, and sourcing the
-  **bash** launcher under zsh. `common.sh` sources the per-shell launcher, and
-  `dotfiles-doctor` distinguishes "no binary" from "no shim".
+- **A lying diagnostic, and then a second one.** zsh first printed "broot is not
+  installed locally" when broot *was* installed — it was checking for the `br`
+  launcher shim. The fix at the time was to source the **per-shell** launcher,
+  `~/.config/broot/launcher/$DOTFILES_SHELL/br`, and to have `dotfiles-doctor`
+  distinguish "no binary" from "no shim". That was still wrong, just more quietly:
+  **broot never creates a `zsh/` launcher directory at all.** `broot --install`
+  generates only `launcher/bash/br` and, for zsh, patches `~/.zshrc` to source
+  that same bash file — so under zsh the per-shell path can never resolve, `br`
+  was never defined, and doctor's `→ run: broot --install` advice could never
+  clear its own note however many times you ran it. Both are now gone: the rc
+  layer eval's `broot --print-shell-function "$DOTFILES_SHELL"` (see below) and
+  doctor carries no broot special case.
 - **Two bashrc files.** `.bashrc-debian` and `.bashrc-arch` differed by exactly one
   alias. `.chezmoiremove` deletes the stale copies from every machine.
