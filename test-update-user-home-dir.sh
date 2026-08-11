@@ -448,8 +448,24 @@ if [[ -n "$CHEZMOI" ]]; then
 
     # Parity is ADDITIVE: tmux key first, herdr's native default retained, so a
     # chord the terminal fails to deliver degrades instead of vanishing.
-    assert "detach binds tmux's prefix+d, keeping herdr's prefix+q" \
-        "grep -q 'detach = \\[\"prefix+d\", \"prefix+q\"\\]' <<<\"\$hc\""
+    # detach is the ONE deliberate exception to additive parity. prefix+q is
+    # surrendered to goto, so ctrl+b q can never detach again. The NEGATIVE
+    # assertion is the load-bearing one: re-adding herdr's native fallback here
+    # would silently restore the exact reflex-detach this removed, and the
+    # positive assertion alone would not catch it.
+    assert "detach binds ONLY tmux's prefix+d" \
+        "grep -q '^detach = \"prefix+d\"\$' <<<\"\$hc\""
+    assert "detach no longer claims prefix+q" \
+        "! grep -q '^detach.*prefix+q' <<<\"\$hc\""
+    # tmux's prefix q is display-panes. herdr has no equivalent action at all
+    # (its validator rejects display_panes/select_pane_by_number as unknown), so
+    # prefix+q is aliased to goto — herdr's NAVIGATE mode — keeping prefix+g.
+    assert "goto claims prefix+q, keeping herdr's native prefix+g" \
+        "grep -q '^goto = \\[\"prefix+q\", \"prefix+g\"\\]' <<<\"\$hc\""
+    # Structural guard independent of which action wins prefix+q: exactly one
+    # may claim it. Two actions on one key is how a rebind quietly half-lands.
+    assert "exactly one action claims prefix+q" \
+        "[[ \$(grep -c '^[^#]*prefix+q' <<<\"\$hc\") -eq 1 ]]"
     assert "cycle_pane_next binds tmux's prefix+space, keeping prefix+tab" \
         "grep -q 'cycle_pane_next = \\[\"prefix+space\", \"prefix+tab\"\\]' <<<\"\$hc\""
 

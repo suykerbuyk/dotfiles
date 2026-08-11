@@ -84,8 +84,30 @@ rename_tab    = ["prefix+,", "prefix+shift+t"]  # tmux: prefix , (rename-window)
 close_tab     = ["prefix+&", "prefix+shift+x"]  # tmux: prefix & (kill-window)
 
 # --- session -----------------------------------------------------------------
-# tmux detaches on prefix d. herdr's default is prefix+q, kept as fallback.
-detach = ["prefix+d", "prefix+q"]
+# tmux detaches on prefix d. This is the ONE rebind that deliberately does NOT
+# keep herdr's native key as a fallback, and the omission is the whole point.
+#
+#   1. While prefix+q stayed bound here, ctrl+b q DETACHED the client — whereas
+#      in tmux that same chord is `display-panes`, a harmless pane picker. The
+#      two multiplexers disagreed hardest on a key reached for by reflex, which
+#      is the exact opposite of what the shared prefix is for.
+#   2. The additive-array rationale does not apply. Arrays exist so an action
+#      survives a terminal that fails to deliver punctuation-with-modifiers;
+#      prefix+d is a plain unmodified letter with no delivery risk to hedge.
+#
+# ctrl+b d now detaches BOTH multiplexers, and prefix+q is freed for goto below.
+detach = "prefix+d"
+
+# --- navigation: the nearest thing to tmux's display-panes --------------------
+# tmux's prefix q overlays a number on each visible pane and focuses whichever
+# you type. herdr 0.8.0 has NO equivalent, and that is verified rather than
+# assumed: its own validator rejects `display_panes` and `select_pane_by_number`
+# as `unknown config key`, while accepting every real action in this file.
+#
+# `goto` — herdr's modal NAVIGATE mode — is the closest analogue, and is what
+# prefix+q is aliased to. Additive as usual: herdr's native prefix+g is kept, so
+# the two are interchangeable.
+goto = ["prefix+q", "prefix+g"]
 
 # tmux enters copy-mode with prefix [ ; herdr's nearest equivalent opens the
 # scrollback in $EDITOR. Not the same model (see the "no equivalent" section of

@@ -40,6 +40,24 @@ Two reasons, and the second is the load-bearing one:
    detect a key the *terminal* fails to deliver. With an array, such an action
    degrades to herdr's native key instead of becoming unreachable.
 
+### The one exception: `detach`
+
+`detach = "prefix+d"` is the single rebind that **drops** herdr's native key
+rather than keeping it. Both reasons above fail to apply here:
+
+1. Keeping `prefix+q` meant `ctrl+b q` **detached the client**, while the same
+   chord in tmux is `display-panes` — a harmless pane picker. Muscle memory was
+   not being preserved by the fallback; it was being punished by it, on a key
+   reached for by reflex. That is the exact failure the shared prefix exists to
+   prevent.
+2. The delivery hedge is irrelevant: `prefix+d` is a plain unmodified letter,
+   not punctuation-with-modifiers. There is nothing for the array to hedge.
+
+So `ctrl+b d` detaches **both** multiplexers, and `prefix+q` is freed for
+`goto` (see below). Do not "restore" the herdr fallback here — a test asserts
+its absence specifically, because re-adding it silently reinstates the old
+behaviour.
+
 ## Binding table
 
 Actions where herdr's default already matched tmux are pinned explicitly in
@@ -60,8 +78,9 @@ rather than a quiet desync.
 | select 1..9 | `prefix 1..9` | `prefix+1..9` | already matched |
 | rename tab/window | `prefix ,` | `prefix+shift+t` | **rebound** |
 | close tab/window | `prefix &` | `prefix+shift+x` | **rebound** |
-| detach | `prefix d` | `prefix+q` | **rebound** |
-| copy-mode / scrollback | `prefix [` | `prefix+e` | **rebound** (different model, see below) |
+| detach | `prefix d` | `prefix+q` | **rebound**, and the sole *non-additive* one — see above |
+| display-panes | `prefix q` | *(none)* | **approximated** → `goto` = `["prefix+q", "prefix+g"]`, see below |
+| copy-mode / scrollback | `prefix [` | `prefix+e` | **rebound** to `edit_scrollback`; a real `copy_mode` exists and is unruled — see below |
 | help / list-keys | `prefix ?` | `prefix+?` | already matched |
 | picker | `prefix w` | `prefix+w` | already matched |
 
@@ -103,6 +122,60 @@ why. herdr's own API is unambiguous where the config is not —
 Once the convention is settled, record it here and in `config.toml`, and — if
 tmux's side needs rebinding too — in `dot_tmux.conf`, which currently leaves
 splits at tmux's defaults (`%` and `"`).
+
+## tmux's `prefix q` (display-panes) is approximated by `goto`
+
+In tmux, `prefix q` overlays a number on every visible pane and focuses the one
+you type. **herdr 0.8.0 has no equivalent action.** That is verified, not
+inferred — herdr's own validator rejects both plausible spellings while
+accepting every real action in the same file:
+
+```
+$ herdr config check
+unknown config key keys.display_panes; ignoring key
+unknown config key keys.select_pane_by_number; ignoring key
+```
+
+`goto` — herdr's modal **NAVIGATE** mode — is the nearest analogue, so
+`prefix+q` is aliased to it and herdr's native `prefix+g` is kept alongside.
+NAVIGATE reserves `1..9` for selection (the default config forbids binding those
+digits as navigate-mode movement keys), which is what makes it the right
+approximation rather than an arbitrary landing spot.
+
+### Why a *true* numbered overlay was not built
+
+It is possible but disproportionate, and half of it is blocked:
+
+- The socket API **does** support focus-by-id — `pane.focus` takes
+  `{"pane_id": string}`, and `pane.layout` returns per-pane rects.
+- The **CLI does not expose it**. `herdr pane focus` requires
+  `--direction <left|right|up|down>`; its `--pane` flag names the *source* pane.
+  So a `[[keys.command]]` would have to speak raw JSON to `$HERDR_SOCKET_PATH`.
+- A `type = "popup"` command is **session-modal** and cannot paint digits over
+  the other panes. The result would be a numbered *list*, not tmux's overlay.
+
+A faithful overlay needs a herdr **plugin** (`herdr plugin`, which exposes
+`plugin.pane.focus`). If that is ever wanted, that is the route — not a custom
+command.
+
+## Undecided: `copy_mode` turns out to exist
+
+The binding table's copy-mode row reflects the original reading that herdr had
+no copy-mode and only an "open the scrollback in `$EDITOR`" action. **That is
+wrong for 0.8.0.** `copy_mode` is a real, bindable action — it passes
+`herdr config check` — and the binary carries a full vi-style mode:
+
+```
+COPY   h/j/k/l w/b/e { } move   / ? search   n/N   v/space select   y/enter copy   q/esc exit
+```
+
+which is close to tmux's copy-mode. `swap_pane_left/down/up/right`,
+`last_pane` and `cycle_pane_previous` are likewise real but absent from
+`herdr --default-config`.
+
+**No ruling has been made**, so `config.toml` still binds `prefix+[` to
+`edit_scrollback` and nothing here is asserted by the suite. Recorded so the
+gap is not rediscovered from scratch.
 
 ## Three tmux actions have no herdr equivalent
 
