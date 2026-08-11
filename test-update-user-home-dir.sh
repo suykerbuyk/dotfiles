@@ -425,6 +425,84 @@ if [[ -n "$CHEZMOI" ]]; then
         skip "real broot --print-shell-function contract (broot not installed)"
     fi
 
+    # --- herdr adopted at parity with tmux -----------------------------------
+    sec "herdr: config managed, at parity with tmux"
+
+    HCFG="$SRC/dot_config/herdr/config.toml"
+    assert_file "herdr config.toml is a managed source file" "$HCFG"
+    hc="$(cat "$HCFG" 2>/dev/null)"
+
+    # ~/.config/herdr/ also holds herdr.sock, session.json and the logs. The
+    # exact_ attribute would make chezmoi DELETE those unmanaged entries — live
+    # sockets and session state, out from under a running server.
+    assert "herdr source dir is NOT exact_ (would delete live sockets/state)" \
+        "[[ ! -e '$SRC/dot_config/exact_herdr' ]]"
+    assert "no herdr runtime state committed as source" \
+        "! ls $SRC/dot_config/herdr/ 2>/dev/null | grep -Eq 'sock|session\.json|\.log$|plugins\.lock'"
+
+    # The shared ctrl+b prefix is the ruling this whole adoption rests on, and it
+    # must agree with dot_tmux.conf on both sides.
+    assert "herdr prefix is ctrl+b" "grep -q '^prefix = \"ctrl+b\"' <<<\"\$hc\""
+    assert "tmux prefix is still C-b (the other half of the parity)" \
+        "grep -q '^set-option -g prefix C-b' $SRC/dot_tmux.conf"
+
+    # Parity is ADDITIVE: tmux key first, herdr's native default retained, so a
+    # chord the terminal fails to deliver degrades instead of vanishing.
+    assert "detach binds tmux's prefix+d, keeping herdr's prefix+q" \
+        "grep -q 'detach = \\[\"prefix+d\", \"prefix+q\"\\]' <<<\"\$hc\""
+    assert "cycle_pane_next binds tmux's prefix+space, keeping prefix+tab" \
+        "grep -q 'cycle_pane_next = \\[\"prefix+space\", \"prefix+tab\"\\]' <<<\"\$hc\""
+
+    # The split convention is DELIBERATELY NOT PINNED. The human has not decided
+    # which horizontal/vertical convention they want across tmux AND herdr, and
+    # intends to run with it before choosing — so asserting a specific key-to-
+    # action mapping here would fail the suite on every experiment. That is
+    # friction pointed at exactly the thing being evaluated.
+    #
+    # What IS asserted is convention-agnostic and still catches real breakage:
+    # both actions exist, each keeps herdr's native key as its fallback, and the
+    # two never collide on one key. Any convention satisfies these; a half-edited
+    # swap does not.
+    svk="$(sed -n 's/^split_vertical *= *\[\([^,]*\),.*/\1/p' <<<"$hc")"
+    shk="$(sed -n 's/^split_horizontal *= *\[\([^,]*\),.*/\1/p' <<<"$hc")"
+    assert "split_vertical binds a primary key"   "[[ -n \"\$svk\" ]]"
+    assert "split_horizontal binds a primary key" "[[ -n \"\$shk\" ]]"
+    assert "the two split actions never collide on one key" "[[ \"\$svk\" != \"\$shk\" ]]"
+    assert "split_vertical keeps herdr's native prefix+v fallback" \
+        "grep -q '^split_vertical.*prefix+v' <<<\"\$hc\""
+    assert "split_horizontal keeps herdr's native prefix+minus fallback" \
+        "grep -q '^split_horizontal.*prefix+minus' <<<\"\$hc\""
+    assert "natives are not swapped between the two split actions" \
+        "! grep -q '^split_vertical.*prefix+minus' <<<\"\$hc\" && ! grep -q '^split_horizontal.*prefix+v' <<<\"\$hc\""
+    # The mapping stays flagged as under evaluation until the human rules.
+    assert "split convention is marked PROVISIONAL" \
+        "grep -q 'PROVISIONAL' <<<\"\$hc\""
+
+    # The live machine dismissed onboarding; a managed config that lost this
+    # would re-prompt on every other machine.
+    assert "onboarding stays dismissed" "grep -q '^onboarding = false' <<<\"\$hc\""
+    # Terminal layer pins Catppuccin Mocha in kitty AND ghostty.
+    assert "theme matches the terminal layer (catppuccin)" \
+        "grep -q '^name = \"catppuccin\"' <<<\"\$hc\""
+
+    # Real validator: catches an unknown action or an undeliverable key name,
+    # including inside the arrays. Both failures are silent at runtime.
+    #
+    # `herdr config check` reports "config: ok" for a MISSING config file too, so
+    # the check alone is a false green — it would keep passing if the file
+    # stopped being applied. Assert the applied file exists first; that is what
+    # makes the validation below mean anything.
+    assert_file "config.toml is applied to ~/.config/herdr/" "$SB/.config/herdr/config.toml"
+    if command -v herdr >/dev/null 2>&1; then
+        hchk="$(env HOME="$SB" XDG_CONFIG_HOME="$SB/.config" herdr config check 2>&1)"
+        assert "herdr config check passes on the applied config" \
+            "[[ \"\$hchk\" == *'config: ok'* ]]"
+    else
+        skip "herdr config check (herdr not installed)"
+    fi
+
+    assert_file "multiplexer parity is documented" "$SRC/doc/multiplexers.md"
+
     # dotfiles-doctor greets ONCE per login session era: the first interactive
     # shell prints it, later shells (tmux panes) stay quiet. The one-shot is a
     # stamp in $XDG_RUNTIME_DIR, created atomically under `set -C`. The harness

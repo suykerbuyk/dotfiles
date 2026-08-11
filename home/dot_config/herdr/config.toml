@@ -1,0 +1,96 @@
+# ~/.config/herdr/config.toml — managed by chezmoi
+# (source: home/dot_config/herdr/config.toml)
+#
+# herdr is ADOPTED at parity with tmux. See home/doc/multiplexers.md for the
+# full binding table, the three actions that have no herdr equivalent, and why
+# only this ONE file in ~/.config/herdr/ is managed.
+#
+# Parity here is ADDITIVE: every rebound action lists the tmux key FIRST and
+# keeps herdr's own default as a second binding. That is deliberate on two
+# counts. It means no herdr muscle memory is destroyed by adopting tmux's keys,
+# and — more practically — herdr's own docs warn that
+# punctuation-with-modifiers ("%" is shift+5, '"' is shift+') "may depend on
+# your terminal/tmux setup". If a terminal fails to deliver one of those, the
+# action degrades to herdr's native key instead of becoming unreachable.
+#
+# Validate any edit with:  herdr config check
+# It reports `invalid keybinding: …; disabling binding` for an unknown key and
+# `unknown config key …; ignoring key` for a misspelled action — including
+# inside these arrays. A silently-wrong binding is otherwise very hard to spot.
+
+# Onboarding was dismissed on this machine; keep it dismissed everywhere.
+onboarding = false
+
+[theme]
+# Matches the terminal layer: kitty and ghostty both pin Catppuccin Mocha, so
+# the multiplexer inside them should not fight the palette. See
+# home/doc/fetch-bins.md ("Terminals").
+name = "catppuccin"
+
+[keys]
+# --- prefix ------------------------------------------------------------------
+# Identical to `set-option -g prefix C-b` in dot_tmux.conf, and already herdr's
+# default. Pinned explicitly rather than left implicit: this is THE key the
+# whole parity argument rests on, and a silent upstream default change would
+# desynchronise the two multiplexers with no diff to point at.
+#
+# The collision with tmux's prefix is intentional and ruled on: these two are
+# never nested, and shared meta-keys are the entire point of the adoption.
+prefix = "ctrl+b"
+
+# --- panes -------------------------------------------------------------------
+# dot_tmux.conf binds h/j/k/l to select-pane -L/-D/-U/-R. herdr's defaults
+# already agree; pinned for the same reason as the prefix.
+focus_pane_left  = "prefix+h"
+focus_pane_down  = "prefix+j"
+focus_pane_up    = "prefix+k"
+focus_pane_right = "prefix+l"
+
+# dot_tmux.conf rebinds space to `select-pane -t :.+` (unbind-key space, then
+# bind-key space). herdr's default is prefix+tab, kept as the fallback.
+cycle_pane_next = ["prefix+space", "prefix+tab"]
+
+# --- splits: PROVISIONAL, under evaluation -----------------------------------
+# The horizontal/vertical convention across tmux AND herdr is NOT yet decided.
+# These two lines are a starting point to run with, not a ruling. Swap them
+# freely while deciding — the test suite deliberately does NOT pin the mapping
+# (it only checks the two actions never collide and each keeps its herdr
+# fallback), so experimenting here will not turn the suite red.
+#
+# THE FACT THAT WILL NOT CHANGE, whichever convention wins: the two tools name
+# splits OPPOSITELY. herdr names the DIVIDER — split_vertical draws a vertical
+# divider, so panes end up side by side (left/right). tmux names the AXIS —
+# `split-window -h`, bound to `%`, ALSO produces side-by-side panes. So matching
+# tmux's `%` means binding herdr's split_VERTICAL, and tmux's `"` (stacked)
+# means split_HORIZONTAL. If a split ever goes the wrong way, this inversion is
+# why. herdr's API is unambiguous where the config is not:
+# `herdr pane split --direction <right|down>`.
+#
+# Iterating is cheap — no restart needed:
+#   herdr:  prefix+shift+r   (or `herdr server reload-config`)
+#   tmux:   prefix : source-file ~/.tmux.conf
+split_vertical   = ["prefix+%", "prefix+v"]      # side by side  (tmux %)
+split_horizontal = ["prefix+\"", "prefix+minus"] # stacked       (tmux ")
+
+close_pane = "prefix+x"   # tmux: prefix x (kill-pane). Already herdr's default.
+zoom       = "prefix+z"   # tmux: prefix z (resize-pane -Z). Already the default.
+
+# --- tabs (tmux calls these windows) -----------------------------------------
+new_tab       = "prefix+c"   # tmux: prefix c (new-window)
+next_tab      = "prefix+n"   # tmux: prefix n (next-window)
+previous_tab  = "prefix+p"   # tmux: prefix p (previous-window)
+switch_tab    = "prefix+1..9" # tmux: prefix 0-9 (select-window)
+rename_tab    = ["prefix+,", "prefix+shift+t"]  # tmux: prefix , (rename-window)
+close_tab     = ["prefix+&", "prefix+shift+x"]  # tmux: prefix & (kill-window)
+
+# --- session -----------------------------------------------------------------
+# tmux detaches on prefix d. herdr's default is prefix+q, kept as fallback.
+detach = ["prefix+d", "prefix+q"]
+
+# tmux enters copy-mode with prefix [ ; herdr's nearest equivalent opens the
+# scrollback in $EDITOR. Not the same model (see the "no equivalent" section of
+# home/doc/multiplexers.md), but it is the action reached for from the same key.
+edit_scrollback = ["prefix+[", "prefix+e"]
+
+help             = "prefix+?"  # tmux: prefix ? (list-keys). Already the default.
+workspace_picker = "prefix+w"  # tmux: prefix w (choose-tree). Already the default.

@@ -149,10 +149,16 @@ Key `_lib.sh` helpers:
   - The selector is an **exact** name match, not `contains`: the release also
     carries `herdr-macos-x86_64`, which a `contains("x86_64")` filter would
     happily select on a linux box.
-  - It **overlaps tmux**, which this repo configures heavily (`dot_tmux.conf`,
-    the `tm` helper, `tmux-pane-log`). It is fetched, not adopted: nothing in the
-    shell or tmux layer references it. Its network test is gated behind `--herdr`
-    (`RUN_HERDR_FETCH=1`), since the fetch is ~21 MB.
+  - It is **adopted, at parity with tmux** — a ruling that reversed the original
+    "fetched, not adopted" position. Its config is chezmoi-managed
+    (`home/dot_config/herdr/config.toml`), its completions are wired into the rc
+    layer, and its keybindings deliberately mirror `dot_tmux.conf` — **including
+    the `ctrl+b` prefix**, which is shared on purpose rather than tolerated. The
+    two are never nested, and maximising shared meta-keys is what makes switching
+    between them free. Full binding table, the three tmux actions with no herdr
+    equivalent, and the "manage one file, not the directory" rule:
+    [multiplexers.md](multiplexers.md). Its network test is gated behind
+    `--herdr` (`RUN_HERDR_FETCH=1`), since the fetch is ~21 MB.
 - **podman** (`12_fetch.podman.sh`) is **not** a single-binary `install_bin`
   fetcher — it mirrors the go whole-tree pattern. The `mgoltzsche/podman-static`
   release tarball is a complete static userland (podman + crun/runc/pasta/
