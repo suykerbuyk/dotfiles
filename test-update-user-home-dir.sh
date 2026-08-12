@@ -554,8 +554,41 @@ if [[ -n "$CHEZMOI" ]]; then
 
     # herdr's --session both creates and attaches, so there is no has-session
     # probe to keep in sync (unlike tm). Pin the call that does the work.
-    assert "hrdr creates/attaches via 'herdr --session'" \
-        "grep -q 'herdr --session' <<<\"\$hs\""
+    assert "hrdr creates/attaches via '--session'" \
+        "grep -q 'run_herdr --session' <<<\"\$hs\""
+
+    # --- verbose tracing ------------------------------------------------------
+    # STRUCTURAL: every herdr call must route through the two helpers, or `-v`
+    # silently stops covering whichever call site bypassed them. Exactly two
+    # bare `herdr <args>` invocations may exist — the ones inside run_herdr and
+    # run_herdr_quiet themselves.
+    assert "hrdr routes ALL herdr calls through the run_herdr helpers" \
+        "[[ \$(grep -cE '^[[:space:]]*herdr ' <<<\"\$hs\") -eq 2 ]]"
+    # The trace and the exec must come from the SAME \"\$@\", or the trace prints
+    # one command while another runs — the one bug that makes a verbose mode
+    # worse than none, because it actively misinforms.
+    #
+    # COUNTED, not merely present: each helper must trace its own \"\$@\", so the
+    # count is exactly 2. An earlier version of this assertion only checked the
+    # string existed SOMEWHERE, and a mutation making run_herdr trace
+    # `session list` while running `--session scratch` PASSED it — the other
+    # helper still carried the string. Verified by mutation: breaking either
+    # helper's trace takes the count to 1 and turns this red.
+    assert "both run_herdr helpers trace their own \"\$@\" (no drift)" \
+        "[[ \$(grep -c 'trace_herdr \"\\\$@\"' <<<\"\$hs\") -eq 2 ]]"
+    assert "both helpers exec herdr with that same \"\$@\"" \
+        "[[ \$(grep -cE '^[[:space:]]*herdr \"\\\$@\"' <<<\"\$hs\") -eq 2 ]]"
+    assert "hrdr honours HRDR_VERBOSE" "grep -q 'HRDR_VERBOSE' <<<\"\$hs\""
+    assert "hrdr accepts a -v/--verbose flag" "grep -q '\\-v | --verbose' <<<\"\$hs\""
+    # Traces go to stderr so `hrdr ls | …` keeps a clean stdout.
+    assert "hrdr traces to stderr, not stdout" \
+        "grep -q \"printf '+ herdr %s\\\\\\\\n' \\\"\\\$\\*\\\" >&2\" <<<\"\$hs\""
+    # LOAD-BEARING: the list path silences herdr's own stderr. Redirecting the
+    # whole call (run_herdr ... 2>/dev/null) would swallow the trace too —
+    # exactly where a user asking "what is it running?" would look. The quiet
+    # helper redirects only the command, so no call site may add its own.
+    assert "hrdr's list path does not swallow its own trace" \
+        "! grep -qE 'run_herdr(_quiet)? [^|]*2>/dev/null' <<<\"\$hs\""
     # jq is a hard dependency (fetcher slot 1 / installer phase 1); the plain
     # table is space-aligned and would mis-parse silently.
     assert "hrdr requires jq explicitly" \

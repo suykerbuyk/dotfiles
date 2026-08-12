@@ -285,6 +285,7 @@ sandbox launch harmless.
     hrdr stop <name>     stop a running session
     hrdr rm <name>       delete a stopped session
     hrdr -r <target>     attach through SSH to a remote herdr server
+    hrdr -v ...          trace the real herdr command before running it
 
 ### Where herdr made it simpler than `tm`
 
@@ -327,6 +328,50 @@ session selector on the pane commands.
   `hrdr` detects `HERDR_PANE_ID` and says so, instead of leaving the user with
   herdr's raw nesting error, which never mentions detaching.
 - **Remote attach** via `herdr --remote`, which tmux has no native analogue for.
+
+### `-v` traces the real herdr command
+
+`hrdr -v <anything>` (or `HRDR_VERBOSE=1` in the environment) prints the actual
+herdr command before running it, so the wrapper never hides what it does:
+
+    $ hrdr -v ls
+    + herdr session list --json
+    NAME                     STATUS
+    default                  stopped
+    qa-deb13-01-qng          running
+
+    $ hrdr -v scratch
+    + herdr --session scratch
+
+The traced line is copy-pasteable — it is the real command. The flag must come
+first (`hrdr -v stop foo`, not `hrdr stop -v foo`).
+
+Two implementation rules the suite pins, both of which exist because a verbose
+mode that misinforms is worse than none:
+
+- **Every herdr call routes through `run_herdr`/`run_herdr_quiet`.** Exactly two
+  bare `herdr <args>` invocations may exist in the script — the ones inside
+  those two helpers. A call site that bypassed them would silently stop being
+  traced.
+- **The trace and the exec come from the same `"$@"`, in the same function.**
+  Asserted as a *count* of 2 (one per helper), not as "the string appears
+  somewhere". The weaker form was tried first and a mutation that traced
+  `session list` while running `--session scratch` passed it, because the other
+  helper still carried the string.
+
+Traces go to **stderr**, so `hrdr ls | column -t` keeps a clean stdout. That is
+also why the list path uses `run_herdr_quiet`, which silences only the
+*command's* stderr: writing `run_herdr … 2>/dev/null` at the call site would
+swallow the trace too, exactly where someone asking "what is it running?" would
+look. The suite asserts no call site does that.
+
+### herdr stops `default` but will not delete it
+
+`herdr session stop default` succeeds; `herdr session delete default` refuses.
+`hrdr` deliberately does **not** special-case this — herdr owns the rule, and
+hardcoding it here would rot the day a future version changes it. `hrdr -v rm
+default` shows the exact command issued, and herdr's own refusal explains
+itself. `hrdr --help` mentions the asymmetry so it is not a surprise.
 
 ### `jq` is a hard dependency, deliberately
 

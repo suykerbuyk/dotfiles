@@ -12,6 +12,8 @@
 #   hrdr stop <name>  Stop a running session
 #   hrdr rm <name>    Delete a stopped session
 #   hrdr -r <target>  Attach through SSH to a remote herdr server
+#   hrdr -v ...       Trace the real herdr command before running it
+#                     (also via HRDR_VERBOSE=1; the flag must come first)
 #
 # The tmux counterpart is `tm`. Two deliberate differences from it:
 #
@@ -31,6 +33,33 @@
 
 set_title() {
 	printf '\033]0;%s\007' "$1"
+}
+
+# --- herdr invocation, with an optional trace -------------------------------
+#
+# EVERY herdr call in this script goes through run_herdr/run_herdr_quiet, so
+# `hrdr -v` (or HRDR_VERBOSE=1) shows the real command for create, attach, stop,
+# delete and list. The trace is printed by the same function that runs the
+# command, from the same "$@", so it cannot drift from what is actually
+# executed — a trace assembled separately would eventually lie.
+#
+# Traces go to STDERR, so `hrdr ls | …` keeps a clean stdout.
+trace_herdr() {
+	[ -n "${HRDR_VERBOSE-}" ] && printf '+ herdr %s\n' "$*" >&2
+	return 0
+}
+
+run_herdr() {
+	trace_herdr "$@"
+	herdr "$@"
+}
+
+# Same, but silences the COMMAND's stderr — never the trace. Redirecting the
+# whole call as `run_herdr … 2>/dev/null` would swallow the trace too, which is
+# precisely where a user asking "what is it running?" would look.
+run_herdr_quiet() {
+	trace_herdr "$@"
+	herdr "$@" 2>/dev/null
 }
 
 resolve_hname() {
@@ -90,7 +119,7 @@ validate_name() {
 # guaranteed binary. Hand-parsing herdr's space-aligned plain table would be
 # fragile in exactly the silent way that produces a wrong attach target.
 list_sessions() {
-	herdr session list --json 2>/dev/null |
+	run_herdr_quiet session list --json |
 		jq -r '.sessions[]? | "\(.name)\t\(if .running then "running" else "stopped" end)"' 2>/dev/null ||
 		true
 }
@@ -109,7 +138,7 @@ connect() {
 	refuse_when_nested || return 1
 
 	set_title "${HNAME}-${_name}"
-	herdr --session "${_name}"
+	run_herdr --session "${_name}"
 }
 
 print_sessions() {
@@ -217,6 +246,16 @@ fi
 
 resolve_hname
 
+# -v/--verbose must come FIRST (hrdr -v stop foo). HRDR_VERBOSE=1 in the
+# environment does the same thing without the flag.
+case ${1-} in
+-v | --verbose)
+	HRDR_VERBOSE=1
+	export HRDR_VERBOSE
+	shift
+	;;
+esac
+
 case ${1-} in
 ls | list)
 	print_sessions
@@ -225,13 +264,17 @@ ls | list)
 stop)
 	shift
 	validate_name "${1-}" || exit 1
-	herdr session stop "$1"
+	run_herdr session stop "$1"
 	exit $?
 	;;
 rm | delete)
 	shift
 	validate_name "${1-}" || exit 1
-	herdr session delete "$1"
+	# NOTE: herdr will stop the "default" session but refuses to delete it.
+	# Deliberately not special-cased here — herdr owns that rule, and
+	# hardcoding it would rot if a future version changes it. Run with -v to
+	# see the exact command, then read herdr's own refusal.
+	run_herdr session delete "$1"
 	exit $?
 	;;
 -r | --remote)
@@ -246,22 +289,26 @@ rm | delete)
 	if [ -n "${1-}" ]; then
 		validate_name "$1" || exit 1
 		set_title "${_target}-$1"
-		herdr --remote "${_target}" --session "$1"
+		run_herdr --remote "${_target}" --session "$1"
 	else
 		set_title "${_target}"
-		herdr --remote "${_target}"
+		run_herdr --remote "${_target}"
 	fi
 	exit $?
 	;;
 -h | --help | help)
-	printf 'Usage: hrdr [ls|stop <name>|rm <name>|-r <target> [name]|<session-name>]\n'
+	printf 'Usage: hrdr [-v] [ls|stop <name>|rm <name>|-r <target> [name]|<session-name>]\n'
 	printf '  hrdr              interactive session picker\n'
 	printf '  hrdr ls           list sessions with status and exit\n'
 	printf '  hrdr <name>       attach to <name>, creating it if absent\n'
 	printf '  hrdr stop <name>  stop a running session\n'
 	printf '  hrdr rm <name>    delete a stopped session\n'
+	printf '                    (herdr stops "default" but refuses to delete it)\n'
 	printf '  hrdr -r <target> [name]\n'
 	printf '                    attach through SSH to a remote herdr server\n'
+	printf '\n'
+	printf '  -v, --verbose     print each real herdr command before running it\n'
+	printf '                    (must come first; or set HRDR_VERBOSE=1)\n'
 	exit 0
 	;;
 '')
