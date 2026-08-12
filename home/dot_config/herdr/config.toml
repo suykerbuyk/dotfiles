@@ -50,6 +50,33 @@ focus_pane_right = "prefix+l"
 # bind-key space). herdr's default is prefix+tab, kept as the fallback.
 cycle_pane_next = ["prefix+space", "prefix+tab"]
 
+# tmux's prefix ; is `last-pane`: jump straight back to the previously active
+# pane, with no direction key and no cycling. herdr has the same action and
+# leaves it UNSET — `herdr --default-config` carries it commented out as
+# `last_pane = ""  # optional, unset by default`. So this is not a rebind of a
+# native key; it is filling in a binding herdr ships empty.
+#
+# Scalar, not an array, and that is not a second exception to additive parity:
+# additive parity preserves herdr's OWN default alongside the tmux key, and here
+# there is no default to preserve. Compare `detach`, which is scalar because a
+# native was deliberately surrendered — a different reason for the same shape.
+#
+# herdr's own comment suggests binding this to `prefix+tab`. Deliberately NOT
+# taken: prefix+tab is already cycle_pane_next's fallback above, and two actions
+# on one key is how a rebind quietly half-lands.
+#
+# Note the tmux side is a stock DEFAULT — dot_tmux.conf never binds `;` — so
+# this row is the only place the pairing is written down.
+#
+# SCOPE, RULED (2026-08-11): herdr describes last_pane as "global back-and-forth",
+# whereas tmux's last-pane is scoped to the current window. Whether herdr's
+# actually crosses tabs/workspaces is still unconfirmed — it needs a keypress in
+# a live session — but the human has ruled that it does not matter: a global
+# jump beats having no shortcut at all. So this is settled, not pending. Do not
+# re-raise it as an open question; if the scope turns out to be global, that is
+# the accepted outcome and not a defect.
+last_pane = "prefix+;"
+
 # --- splits: PROVISIONAL, under evaluation -----------------------------------
 # The horizontal/vertical convention across tmux AND herdr is NOT yet decided.
 # These two lines are a starting point to run with, not a ruling. Swap them

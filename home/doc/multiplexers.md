@@ -69,6 +69,7 @@ rather than a quiet desync.
 | prefix | `C-b` | `ctrl+b` | already matched, pinned |
 | focus pane L/D/U/R | `prefix h/j/k/l` | `prefix+h/j/k/l` | already matched, pinned |
 | cycle pane | `prefix space` | `prefix+tab` | **rebound** → `["prefix+space", "prefix+tab"]` |
+| last pane | `prefix ;` | *(shipped unset)* | **filled in** → `last_pane = "prefix+;"`, see below |
 | split side-by-side | `prefix %` | `prefix+v` | **rebound** → `split_vertical` |
 | split stacked | `prefix "` | `prefix+minus` | **rebound** → `split_horizontal` |
 | close pane | `prefix x` | `prefix+x` | already matched |
@@ -169,9 +170,42 @@ wrong for 0.8.0.** `copy_mode` is a real, bindable action — it passes
 COPY   h/j/k/l w/b/e { } move   / ? search   n/N   v/space select   y/enter copy   q/esc exit
 ```
 
-which is close to tmux's copy-mode. `swap_pane_left/down/up/right`,
-`last_pane` and `cycle_pane_previous` are likewise real but absent from
-`herdr --default-config`.
+which is close to tmux's copy-mode. `swap_pane_left/down/up/right` are likewise
+real but absent from `herdr --default-config`.
+
+`last_pane` and `cycle_pane_previous` were originally recorded here as absent
+too. **That was wrong** — both appear in `herdr --default-config`, commented
+out, `last_pane` explicitly as `""  # optional, unset by default`. They are not
+hidden actions; they are documented ones herdr declines to bind. `last_pane` has
+since been bound (see below); `cycle_pane_previous` remains unbound, and its
+native `prefix+shift+tab` is available if a tmux counterpart is ever wanted.
+
+## `last_pane` fills tmux's `prefix ;`
+
+tmux's `prefix ;` jumps back to the previously active pane with no direction key
+and no cycling. herdr has the identical action and ships it **unset**, so the
+binding fills a gap rather than overriding a native default — which is why it is
+a scalar with no fallback, unlike every additive rebind in the table.
+
+herdr's own comment suggests `prefix+tab` for it. That is deliberately declined:
+`prefix+tab` is already `cycle_pane_next`'s fallback, and the suite asserts the
+two never collide.
+
+Two facts worth keeping:
+
+- **The tmux side is a stock default.** `dot_tmux.conf` never binds `;`, so the
+  pairing exists only in `config.toml` and this table.
+- **`herdr config check` validates chords, not just key names.** A bogus
+  `prefix+NOT_A_REAL_KEY_ZZZ` is rejected with `invalid keybinding: … disabling
+  binding` — so a passing check confirms the chord is recognised. Note the
+  failure mode: an invalid binding is silently **disabled**, not fatal, so a
+  typo costs the key rather than announcing itself.
+- **Scope differs, and that is RULED acceptable (2026-08-11).** herdr calls
+  `last_pane` "global back-and-forth"; tmux's `last-pane` is window-scoped.
+  Whether herdr's actually crosses tabs/workspaces is still unconfirmed — it
+  needs a keypress in a live session. The human has ruled it does not matter:
+  a global jump beats having no shortcut. This is a closed question. If the
+  scope proves global, that is the accepted outcome, not a defect to fix.
 
 **No ruling has been made**, so `config.toml` still binds `prefix+[` to
 `edit_scrollback` and nothing here is asserted by the suite. Recorded so the

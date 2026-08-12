@@ -469,6 +469,22 @@ if [[ -n "$CHEZMOI" ]]; then
     assert "cycle_pane_next binds tmux's prefix+space, keeping prefix+tab" \
         "grep -q 'cycle_pane_next = \\[\"prefix+space\", \"prefix+tab\"\\]' <<<\"\$hc\""
 
+    # tmux's prefix ; is last-pane. herdr ships last_pane bound to "" (present in
+    # --default-config, just empty), so this fills a gap rather than rebinding a
+    # native — hence a scalar, with no fallback to preserve.
+    assert "last_pane binds tmux's prefix+; (tmux last-pane parity)" \
+        "grep -q '^last_pane = \"prefix+;\"\$' <<<\"\$hc\""
+    # LOAD-BEARING NEGATIVE: herdr's own default-config comment recommends
+    # binding last_pane to prefix+tab, which is already cycle_pane_next's
+    # fallback here. Taking that suggestion would put two actions on one key,
+    # and the positive assertion above would still pass while it happened.
+    assert "last_pane does not take herdr's suggested prefix+tab (collides)" \
+        "! grep -q '^last_pane.*prefix+tab' <<<\"\$hc\""
+    # Structural guard, mirroring the prefix+q one: exactly one action may claim
+    # prefix+; no matter which action that turns out to be.
+    assert "exactly one action claims prefix+;" \
+        "[[ \$(grep -c '^[^#]*prefix+;' <<<\"\$hc\") -eq 1 ]]"
+
     # The split convention is DELIBERATELY NOT PINNED. The human has not decided
     # which horizontal/vertical convention they want across tmux AND herdr, and
     # intends to run with it before choosing — so asserting a specific key-to-
