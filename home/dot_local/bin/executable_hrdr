@@ -1,0 +1,273 @@
+#!/usr/bin/env sh
+
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+# hrdr — attach to or create a named herdr session.
+#
+# Usage:
+#   hrdr              Interactive picker: choose a session or create one
+#   hrdr ls           List sessions (name + status) and exit
+#   hrdr <name>       Attach to session <name>, creating it if absent
+#   hrdr stop <name>  Stop a running session
+#   hrdr rm <name>    Delete a stopped session
+#   hrdr -r <target>  Attach through SSH to a remote herdr server
+#
+# The tmux counterpart is `tm`. Two deliberate differences from it:
+#
+#   1. NO $USER- PREFIX. tmux needs one because a single tmux server is shared
+#      across users on a box; herdr's sessions already live under this user's
+#      own ~/.config/herdr, so a prefix would be redundant — and would shadow
+#      existing unprefixed sessions with a second, prefixed one.
+#
+#   2. NO PANE LAYOUTS. `tm` builds host-specific layouts on create. herdr's
+#      `pane split` takes no --session/--socket selector, and the herdr CLI
+#      reaches the RUNNING server regardless of $HOME, so a layout routine has
+#      no way to guarantee its splits land in the session just created rather
+#      than in one already running. Layout belongs to ~/.config/herdr/config.toml
+#      and herdr workspaces instead.
+#
+# Chezmoi installs this as ~/.local/bin/hrdr (source: executable_hrdr).
+
+set_title() {
+	printf '\033]0;%s\007' "$1"
+}
+
+resolve_hname() {
+	if command -v hostnamectl >/dev/null 2>&1; then
+		HNAME=$(hostnamectl deployment 2>/dev/null || true)
+		if [ -z "${HNAME}" ]; then
+			HNAME=$(hostnamectl hostname 2>/dev/null || true)
+		fi
+	fi
+	if [ -z "${HNAME}" ]; then
+		HNAME=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown)
+	fi
+}
+
+# herdr refuses to nest, and — unlike tmux — offers no way to switch between
+# named sessions from inside one: each named session is its OWN server process
+# with its own socket, so there is no `switch-client` equivalent (the socket API
+# exposes session.snapshot but no session attach/switch method).
+#
+# Without this guard the user would just get herdr's own nesting error, which
+# does not explain that detaching first is the only route.
+refuse_when_nested() {
+	if [ -n "${HERDR_PANE_ID-}" ]; then
+		printf 'hrdr: already inside a herdr session (pane %s)\n' "${HERDR_PANE_ID}" >&2
+		printf 'hrdr: herdr cannot nest, and named sessions are separate servers,\n' >&2
+		printf '      so there is no switch-client equivalent. Detach first (prefix+d).\n' >&2
+		return 1
+	fi
+	return 0
+}
+
+# Reject names that cannot round-trip through the picker or the CLI.
+validate_name() {
+	_name=$1
+	if [ -z "${_name}" ]; then
+		printf 'hrdr: session name required\n' >&2
+		return 1
+	fi
+	# A leading dash would be parsed as an option by herdr itself.
+	case ${_name} in
+	-*)
+		printf 'hrdr: session name must not start with "-"\n' >&2
+		return 1
+		;;
+	*[/[:space:]]*)
+		printf 'hrdr: session name must not contain "/" or whitespace\n' >&2
+		return 1
+		;;
+	esac
+	return 0
+}
+
+# Emit "<name>\t<status>" per session, one per line.
+#
+# jq is a hard dependency and that is deliberate: it is fetcher slot 1 and
+# Phase 1 of update-user-home-dir.sh, making it this repo's most strongly
+# guaranteed binary. Hand-parsing herdr's space-aligned plain table would be
+# fragile in exactly the silent way that produces a wrong attach target.
+list_sessions() {
+	herdr session list --json 2>/dev/null |
+		jq -r '.sessions[]? | "\(.name)\t\(if .running then "running" else "stopped" end)"' 2>/dev/null ||
+		true
+}
+
+# Names only, for the picker.
+list_session_names() {
+	list_sessions | cut -f1
+}
+
+# Attach to, or create, a named session. herdr's --session does BOTH ("Use or
+# create a named persistent session"), so unlike tm there is no has-session
+# probe and no separate create path to keep in sync.
+connect() {
+	_name=$1
+	validate_name "${_name}" || return 1
+	refuse_when_nested || return 1
+
+	set_title "${HNAME}-${_name}"
+	herdr --session "${_name}"
+}
+
+print_sessions() {
+	_rows=$(list_sessions)
+	if [ -z "${_rows}" ]; then
+		printf 'No herdr sessions.\n'
+		return 0
+	fi
+	printf '%-24s %s\n' 'NAME' 'STATUS'
+	printf '%s\n' "${_rows}" | while IFS="$(printf '\t')" read -r _n _s; do
+		[ -n "${_n}" ] || continue
+		printf '%-24s %s\n' "${_n}" "${_s}"
+	done
+}
+
+# Interactive: pick an existing session or create a new one.
+#
+# The picker ATTACHES ONLY. stop/rm are explicit subcommands and are absent
+# here on purpose, so no single keystroke in a menu can kill or delete a
+# session the user merely meant to select.
+interactive() {
+	_rows=$(list_sessions)
+	_choice=
+
+	if command -v fzf >/dev/null 2>&1; then
+		# Show status in the picker, then take field 1 back as the name.
+		_menu=$(printf '%s\n' "${_rows}" | sed '/^$/d' | awk -F'\t' '{printf "%-24s %s\n", $1, $2}')
+		_menu=$(printf '%s\n%s\n%s\n' "${_menu}" '[create new session]' '[quit]' | sed '/^$/d')
+		_choice=$(printf '%s\n' "${_menu}" | fzf --prompt='herdr session> ' --height=40% --reverse) || true
+		case ${_choice} in
+		'' | '[quit]')
+			return 0
+			;;
+		'[create new session]')
+			_choice=__new__
+			;;
+		*)
+			# Strip the status column back off.
+			_choice=$(printf '%s' "${_choice}" | awk '{print $1}')
+			;;
+		esac
+	else
+		printf 'Active herdr sessions:\n'
+		_i=0
+		_tmp=$(mktemp) || return 1
+		list_session_names | sed '/^$/d' >"${_tmp}"
+		while IFS= read -r _line; do
+			_i=$((_i + 1))
+			printf '  %2d) %s\n' "${_i}" "${_line}"
+		done <"${_tmp}"
+		printf '   n) Create new session\n'
+		printf '   q) Quit\n'
+		printf 'Choice: '
+		read -r _reply || {
+			rm -f "${_tmp}"
+			return 1
+		}
+		case ${_reply} in
+		q | Q | '')
+			rm -f "${_tmp}"
+			return 0
+			;;
+		n | N)
+			_choice=__new__
+			;;
+		*)
+			if printf '%s' "${_reply}" | grep -Eq '^[0-9]+$'; then
+				_choice=$(sed -n "${_reply}p" "${_tmp}")
+				if [ -z "${_choice}" ]; then
+					printf 'hrdr: invalid choice\n' >&2
+					rm -f "${_tmp}"
+					return 1
+				fi
+			else
+				printf 'hrdr: invalid choice\n' >&2
+				rm -f "${_tmp}"
+				return 1
+			fi
+			;;
+		esac
+		rm -f "${_tmp}"
+	fi
+
+	if [ "${_choice}" = "__new__" ]; then
+		printf 'New session name: '
+		read -r _name || return 1
+		connect "${_name}"
+		return
+	fi
+
+	connect "${_choice}"
+}
+
+# --- main -------------------------------------------------------------------
+
+if ! command -v herdr >/dev/null 2>&1; then
+	printf 'hrdr: herdr not found in PATH\n' >&2
+	exit 1
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+	printf 'hrdr: jq not found in PATH (installed by fetch.bins slot 1)\n' >&2
+	exit 1
+fi
+
+resolve_hname
+
+case ${1-} in
+ls | list)
+	print_sessions
+	exit $?
+	;;
+stop)
+	shift
+	validate_name "${1-}" || exit 1
+	herdr session stop "$1"
+	exit $?
+	;;
+rm | delete)
+	shift
+	validate_name "${1-}" || exit 1
+	herdr session delete "$1"
+	exit $?
+	;;
+-r | --remote)
+	shift
+	if [ -z "${1-}" ]; then
+		printf 'hrdr: --remote requires an ssh target\n' >&2
+		exit 1
+	fi
+	refuse_when_nested || exit 1
+	_target=$1
+	shift
+	if [ -n "${1-}" ]; then
+		validate_name "$1" || exit 1
+		set_title "${_target}-$1"
+		herdr --remote "${_target}" --session "$1"
+	else
+		set_title "${_target}"
+		herdr --remote "${_target}"
+	fi
+	exit $?
+	;;
+-h | --help | help)
+	printf 'Usage: hrdr [ls|stop <name>|rm <name>|-r <target> [name]|<session-name>]\n'
+	printf '  hrdr              interactive session picker\n'
+	printf '  hrdr ls           list sessions with status and exit\n'
+	printf '  hrdr <name>       attach to <name>, creating it if absent\n'
+	printf '  hrdr stop <name>  stop a running session\n'
+	printf '  hrdr rm <name>    delete a stopped session\n'
+	printf '  hrdr -r <target> [name]\n'
+	printf '                    attach through SSH to a remote herdr server\n'
+	exit 0
+	;;
+'')
+	interactive
+	;;
+*)
+	connect "$1"
+	;;
+esac

@@ -535,6 +535,59 @@ if [[ -n "$CHEZMOI" ]]; then
 
     assert_file "multiplexer parity is documented" "$SRC/doc/multiplexers.md"
 
+    # --- hrdr: the herdr session picker (tm's counterpart) --------------------
+    sec "hrdr: herdr session picker"
+
+    HRDR="$SRC/dot_local/bin/executable_hrdr"
+    assert_file "hrdr source present" "$HRDR"
+    assert "hrdr is valid POSIX sh"  "sh -n $HRDR"
+    # executable_ attribute must survive apply, or the picker is not runnable.
+    assert "hrdr applied to ~/.local/bin and executable" "[[ -x '$SB/.local/bin/hrdr' ]]"
+    assert "hrdr carries the SPDX banner" \
+        "grep -q 'SPDX-License-Identifier: MIT OR Apache-2.0' $HRDR"
+
+    # Read COMMENT-STRIPPED source for every claim below. The script's header
+    # documents at length WHY it has no layouts and no \$USER- prefix, so a raw
+    # grep for those forms matches the rationale that explains their absence and
+    # fails permanently — the iter-38 negative-assertion trap.
+    hs="$(sed 's/#.*//' "$HRDR")"
+
+    # herdr's --session both creates and attaches, so there is no has-session
+    # probe to keep in sync (unlike tm). Pin the call that does the work.
+    assert "hrdr creates/attaches via 'herdr --session'" \
+        "grep -q 'herdr --session' <<<\"\$hs\""
+    # jq is a hard dependency (fetcher slot 1 / installer phase 1); the plain
+    # table is space-aligned and would mis-parse silently.
+    assert "hrdr requires jq explicitly" \
+        "grep -q 'command -v jq' <<<\"\$hs\""
+    assert "hrdr parses the --json session list" \
+        "grep -q 'session list --json' <<<\"\$hs\""
+
+    # LOAD-BEARING NEGATIVE 1 — the safety ruling. herdr's pane commands take no
+    # --session/--socket selector and the CLI reaches the RUNNING server
+    # regardless of \$HOME, so a layout routine could split panes in a session
+    # the user did not create. hrdr must never call one.
+    assert "hrdr issues NO pane-split/layout calls" \
+        "! grep -Eq 'pane (split|swap|move|resize)' <<<\"\$hs\""
+    # LOAD-BEARING NEGATIVE 2 — the naming ruling. A \$USER- prefix would shadow
+    # existing unprefixed sessions (default, qa-deb13-01-qng) with new ones.
+    assert "hrdr does NOT prefix session names with \$USER" \
+        "! grep -Eq 'whoami|UNAME=|\\\$USER-' <<<\"\$hs\""
+
+    # herdr refuses to nest and has no switch-client equivalent (each named
+    # session is its own server). Without the guard the user gets herdr's raw
+    # nesting error, which never mentions detaching.
+    assert "hrdr guards against running inside a herdr pane" \
+        "grep -q 'HERDR_PANE_ID' <<<\"\$hs\""
+
+    # The picker ATTACHES ONLY. Each destructive verb may appear exactly once —
+    # in the explicit subcommand dispatch — so wiring either into the menu (or
+    # adding a second call site) turns this red.
+    assert "hrdr: 'session stop' has exactly one call site" \
+        "[[ \$(grep -c 'session stop' <<<\"\$hs\") -eq 1 ]]"
+    assert "hrdr: 'session delete' has exactly one call site" \
+        "[[ \$(grep -c 'session delete' <<<\"\$hs\") -eq 1 ]]"
+
     # dotfiles-doctor greets ONCE per login session era: the first interactive
     # shell prints it, later shells (tmux panes) stay quiet. The one-shot is a
     # stamp in $XDG_RUNTIME_DIR, created atomically under `set -C`. The harness

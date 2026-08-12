@@ -273,3 +273,73 @@ Only `herdr config check` and `herdr --default-config` are safely sandboxable,
 because they read files rather than the socket. Nesting is refused outright
 (`nested herdr is disabled by default`), which is what makes an accidental
 sandbox launch harmless.
+
+## `hrdr` — the session picker, `tm`'s counterpart
+
+`home/dot_local/bin/executable_hrdr` → `~/.local/bin/hrdr`. It is to herdr what
+`tm` is to tmux: pick an existing session or create one, fast.
+
+    hrdr                 interactive picker (fzf, else a numbered menu)
+    hrdr ls              list sessions with status
+    hrdr <name>          attach to <name>, creating it if absent
+    hrdr stop <name>     stop a running session
+    hrdr rm <name>       delete a stopped session
+    hrdr -r <target>     attach through SSH to a remote herdr server
+
+### Where herdr made it simpler than `tm`
+
+**There is no `herdr session new`.** `herdr --session <name>` is documented as
+"Use or create a named persistent session", so one call covers both branches.
+`tm` needs a `has-session` probe and a separate create path; `hrdr` has neither,
+so the two can never drift apart.
+
+### Two deliberate differences from `tm`
+
+**No `$USER-` prefix.** tmux needs one because a single tmux server is shared
+across users on a host. herdr's sessions already live under this user's own
+`~/.config/herdr`, so a prefix is redundant — and it would actively hurt: the
+sessions on this box (`default`, `qa-deb13-01-qng`) are unprefixed, so
+`hrdr qa-deb13-01-qng` under a prefixing scheme would create a *second*,
+prefixed session shadowing the real one.
+
+**No pane layouts.** `tm` builds host-specific layouts on create. `hrdr`
+deliberately does not, and this is a safety ruling, not a missing feature:
+`herdr pane split` accepts only `PANE_ID` / `--pane` / `--current` — there is
+**no `--session` or `--socket` selector**, and no global one either. Combined
+with the section above (the CLI finds the running server regardless of `$HOME`),
+a layout routine has no way to guarantee its splits land in the session just
+created rather than in one already running. Layout stays owned by
+`config.toml` and herdr workspaces. Revisit only if a future herdr puts a
+session selector on the pane commands.
+
+### What it adds over `tm`
+
+- **A status column.** herdr has *stopped* sessions; tmux has no such state.
+  `hrdr ls` and the picker both show `running`/`stopped`.
+- **`stop` / `rm`** for that lifecycle (`session delete` only works on a stopped
+  session). Both are explicit subcommands and are **absent from the picker** on
+  purpose, so no single keystroke in a menu can destroy a session the user only
+  meant to select. The suite asserts each has exactly **one** call site.
+- **A nesting guard.** herdr refuses to nest *and* has no `switch-client`
+  equivalent — each named session is its own server process with its own socket,
+  and the socket API exposes `session.snapshot` but no session attach/switch
+  method. So from inside a pane there is no way to reach another session;
+  `hrdr` detects `HERDR_PANE_ID` and says so, instead of leaving the user with
+  herdr's raw nesting error, which never mentions detaching.
+- **Remote attach** via `herdr --remote`, which tmux has no native analogue for.
+
+### `jq` is a hard dependency, deliberately
+
+`hrdr` reads `herdr session list --json`. jq is fetcher **slot 1** and Phase 1 of
+`update-user-home-dir.sh` — the repo's most strongly guaranteed binary — so
+requiring it is safe, and it beats hand-parsing the space-aligned plain table,
+which would mis-parse silently and could attach to the wrong session.
+
+### Testing note
+
+The suite's `hrdr` assertions read **comment-stripped** source
+(`sed 's/#.*//'`). The script's header documents at length why it has no
+layouts and no `$USER-` prefix, so a raw grep for those forms matches the
+rationale explaining their absence and fails permanently — the same trap
+recorded under *Validate every config edit*. Verified: raw source matches
+`pane split` and `$USER-` once each; stripped, zero.
