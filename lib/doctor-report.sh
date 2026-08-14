@@ -48,14 +48,25 @@ df_doctor_report() {
 
 	_fb_hint=${HOME}/.local/bin/fetch.bins
 	df_doctor_registry | while IFS='|' read -r _cmd _stem _note; do
+		# Row literals write the note with a leading space for legibility;
+		# strip it so every branch below aligns identically.
+		_note=${_note# }
+		# "Not provisioned by this repo" is an EMPTY STEM — the registry's own
+		# stated contract — and NEVER a non-empty note. The two predicates
+		# agreed only while notes appeared exclusively on stemless rows, which
+		# stopped being true the moment a provisioned tool wanted an
+		# explanatory one. Keying on the note told the user this repo does not
+		# ship tree-sitter/herdr/ghostty/delta, and swallowed the only
+		# actionable thing on the line — the fetcher to run — at precisely the
+		# moment it is worth reading, i.e. when that fetcher has failed.
 		if df_have "${_cmd}"; then
 			printf '  %-9s %-5s %s\n' "${_cmd}" 'ok' "$(command -v "${_cmd}")"
-		elif [ -n "${_note}" ]; then
+		elif [ -z "${_stem}" ]; then
 			printf '  %-9s %-5s %s\n' "${_cmd}" 'n/a' "${_note}"
 		elif _inst=$(df_doctor_installer_for "${_stem}"); then
-			printf '  %-9s %-5s → run %s\n' "${_cmd}" 'MISS' "${_inst}"
+			printf '  %-9s %-5s → run %s%s\n' "${_cmd}" 'MISS' "${_inst}" "${_note:+  (${_note})}"
 		else
-			printf '  %-9s %-5s (no installer in %s)\n' "${_cmd}" 'MISS' "${_fb_hint}"
+			printf '  %-9s %-5s (no installer in %s)%s\n' "${_cmd}" 'MISS' "${_fb_hint}" "${_note:+  (${_note})}"
 		fi
 	done
 

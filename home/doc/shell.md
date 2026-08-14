@@ -266,6 +266,27 @@ resolved by **globbing** `fetch.bins/*_fetch.<stem>.sh` rather than hardcoding t
 usually the command, but not always — `rg` ships from `ripgrep.sh` and `cargo` from
 `rust.sh`, which is why the registry maps command → stem explicitly.
 
+```
+  ghostty   MISS  → run ~/.local/bin/fetch.bins/16_fetch.ghostty.sh  (community AppImage; upstream ships Linux via distros)
+```
+
+**Provisioning is decided by the STEM alone** — an empty stem means this repo
+does not ship the tool, and the row reports `n/a`. The note is free-form context
+and carries no meaning about provisioning: a provisioned row may have one, and
+it is appended in parentheses to the `MISS` line.
+
+That distinction was a real bug until iteration 43. `doctor-report.sh` keyed
+`n/a` on a **non-empty note**, which is indistinguishable from the stem test only
+while notes appear exclusively on stemless rows — true when the code was written,
+false the moment a provisioned tool wanted an explanation. `tree-sitter`, `herdr`,
+`ghostty` and `delta` were all reported as "not provisioned by this repo" when
+absent, and the `→ run <fetcher>` hint was suppressed. The failure is
+self-concealing twice over: it fires only when a provisioned tool is **missing**,
+so a maintainer adding a note sees no change on their own machine (the row says
+`ok` there), and it lands at exactly the moment the installer path is the one
+useful thing on the screen. `delta` shipped with its note deliberately stripped
+as a workaround until the reporter was fixed.
+
 ### The once-per-session greeting
 
 The report also runs **automatically, once per login session era**: the first

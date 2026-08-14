@@ -5,7 +5,12 @@
 #
 # Each row:  <command>|<fetch.bins stem>|<note>
 # Stem is the name inside fetch.bins/NN_fetch.<stem>.sh (or executable_NN_…).
-# Empty stem + note = not provisioned by this repo.
+#
+# The STEM alone decides provisioning: empty stem = not provisioned by this
+# repo. The note is free-form context and says nothing about provisioning —
+# a provisioned row may carry one, and the reporter shows it on the MISS line.
+# (lib/doctor-report.sh used to key "not provisioned" on a non-empty note,
+# which silently disowned every provisioned row that wanted an explanation.)
 #
 # Sourced by ./doctor and (indirectly) by the interactive greet path.
 
@@ -25,7 +30,7 @@ df_doctor_registry() {
 		'herdr|herdr| agent-oriented multiplexer; adopted at parity with tmux' \
 		'fd|fd|' \
 		'bat|bat|' \
-		'delta|delta|' \
+		'delta|delta| git pager; also wires five global git config keys' \
 		'xh|xh|' \
 		'zed|zed|' \
 		'ghostty|ghostty| community AppImage; upstream ships Linux via distros' \

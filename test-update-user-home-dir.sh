@@ -742,6 +742,63 @@ assert "dotfiles-doctor trampoline is valid sh"     "sh -n home/dot_local/bin/ex
 assert "dotfiles-doctor trampoline stays thin"      "[[ \$(wc -l < home/dot_local/bin/executable_dotfiles-doctor) -le 50 ]]"
 assert "dotfiles-doctor trampoline execs ./doctor"  "grep -q root/doctor home/dot_local/bin/executable_dotfiles-doctor"
 
+# ---------------------------------------------------------------------------
+# "Not provisioned by this repo" is an EMPTY STEM, never a non-empty note.
+# lib/doctor-report.sh keyed the n/a branch on the note, so every provisioned
+# row that carried an explanation (tree-sitter, herdr, ghostty, delta) was
+# disowned when its tool was absent — and the fetcher path, the one actionable
+# thing on the line, was suppressed at exactly the moment it mattered.
+#
+# Driven against a STUB registry, never the live one. Asserting on real rows
+# would couple the result to whichever tools this machine happens to have
+# installed, which is how a test starts passing for the wrong reason: on a
+# healthy box every real row says `ok` and none of these branches is reached.
+sec "doctor: provisioning keys on the stem, not the note"
+
+# One fetcher on disk, so df_doctor_installer_for has a deterministic hit
+# (zzstub) and a deterministic miss (zzmissing). The four command names are
+# absent from any PATH, so df_have is false for all of them and each row lands
+# on a non-'ok' branch.
+DRT="$SB/doctor-report-test"
+mkdir -p "$DRT/.local/bin/fetch.bins"
+: > "$DRT/.local/bin/fetch.bins/99_fetch.zzstub.sh"
+DR_OUT="$(HOME="$DRT" DF_ROOT="" sh -c '
+    . "$1"
+    df_doctor_registry() {
+        printf "%s\n" \
+            "zzprov|zzstub| provisioned with a note" \
+            "zzbare|zzstub|" \
+            "zznone|| not provisioned by fetch.bins" \
+            "zznoinst|zzmissing| provisioned, no fetcher on disk"
+    }
+    df_doctor_report' sh "$REPO/lib/doctor-report.sh" 2>/dev/null)"
+
+# THE regression assert: against the old `[ -n "${_note}" ]` this row printed
+# `n/a  provisioned with a note` and the fetcher path never appeared at all.
+assert "stem AND note, tool absent => MISS + fetcher path" \
+    "grep -q 'zzprov .*MISS .*99_fetch.zzstub.sh' <<<\"\$DR_OUT\""
+assert "stem, no note, tool absent => MISS + fetcher path" \
+    "grep -q 'zzbare .*MISS .*99_fetch.zzstub.sh' <<<\"\$DR_OUT\""
+# The tv / keychain behaviour, which must not regress: an empty stem is the
+# ONLY thing that yields n/a.
+assert "EMPTY stem, tool absent => n/a + note" \
+    "grep -q 'zznone .*n/a .*not provisioned by fetch.bins' <<<\"\$DR_OUT\""
+assert "empty-stem row never claims MISS" \
+    "! grep -q 'zznone .*MISS' <<<\"\$DR_OUT\""
+# The note must survive onto the MISS line: without this a note on a
+# provisioned row is write-only, and delta's restored note is unobservable.
+assert "note reaches the MISS line, parenthesised" \
+    "grep -q 'zzprov .*MISS .*(provisioned with a note)' <<<\"\$DR_OUT\""
+assert "note reaches the no-installer MISS line too" \
+    "grep -q 'zznoinst .*MISS .*no installer in.*(provisioned, no fetcher on disk)' <<<\"\$DR_OUT\""
+# delta's note was dropped in iter 42 purely to dodge the bug above. Read it
+# out of the registry FUNCTION, not the source text, so the assert cannot pass
+# on a commented-out row. Whitespace-only counts as empty.
+DELTA_NOTE="$(sh -c '. "$1"; df_doctor_registry' sh "$REPO/lib/doctor-registry.sh" \
+    | awk -F'|' '$1=="delta"{print $3}')"
+assert "delta carries a non-empty registry note again" \
+    "[[ -n \"\${DELTA_NOTE//[[:space:]]/}\" ]]"
+
 # ===========================================================================
 # Structural checks for the podman fetcher — source-only (grep/bash -n), so they
 # run in every group. The real fetch is 32 MB and network-gated behind --podman
