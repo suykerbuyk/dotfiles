@@ -26,3 +26,14 @@ case ${1-} in
 esac
 
 df_doctor_report
+
+# Self-heal delta's git wiring. This is the ONE case where doctor mutates state
+# instead of only reporting it: when delta cannot run, the five git keys the
+# delta fetcher owns are removed, because core.pager naming a non-runnable binary
+# does not degrade — `git diff` dies outright (exit 128). Silent unless something
+# was actually removed. Implementation and rationale: lib/df-common.sh.
+#
+# Deliberately narrow, and NOT a licence for other checks to start self-healing:
+# the blast radius is five keys we set ourselves, only when their target is
+# broken.
+df_delta_gitconfig_reconcile

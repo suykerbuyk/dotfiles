@@ -23,6 +23,10 @@ df_doctor_registry() {
 		'podman|podman|' \
 		'tree-sitter|tree-sitter| parser CLI for nvim-treesitter' \
 		'herdr|herdr| agent-oriented multiplexer; adopted at parity with tmux' \
+		'fd|fd|' \
+		'bat|bat|' \
+		'delta|delta|' \
+		'xh|xh|' \
 		'zed|zed|' \
 		'ghostty|ghostty| community AppImage; upstream ships Linux via distros' \
 		'chezmoi|chezmoi|' \

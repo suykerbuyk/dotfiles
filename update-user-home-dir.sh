@@ -51,6 +51,12 @@ SRC="$PWD/home"
 
 # shellcheck source=/dev/null
 . "$LIB"        # provides fb_init, fb_*, gh_*, install_bin, fetch_chezmoi, remove_bin
+# df_delta_gitconfig_reconcile — shared with ./doctor so the two teardown paths
+# cannot disagree about whether delta is usable. lib/ is repo-root only (never
+# applied into ~), which is fine: the fetcher only ever SETS delta's git keys and
+# never needs this.
+# shellcheck source=lib/df-common.sh
+. "lib/df-common.sh"
 fb_init
 
 CHEZMOI="${BIN_DIR}/chezmoi"
@@ -85,9 +91,44 @@ if $UNINSTALL; then
     # gone, so the tool is no longer on PATH. Keep this list in lockstep with the
     # fetch.bins/ scripts (every 0N_fetch.<tool>.sh must map to an entry here, a
     # special case below, or the rust block).
-    for b in jq rg go gofmt broot fzf nvim ninja starship chezmoi age age-keygen tree-sitter herdr; do
+    for b in jq rg go gofmt broot fzf nvim ninja starship chezmoi age age-keygen tree-sitter herdr fd bat xh; do
         if $FORCE; then remove_bin "$b"; else echo "  would remove_bin $b"; fi
     done
+    # Slots 18-21 (fd, bat, delta, xh) also install SHELL COMPLETIONS into the
+    # XDG user dirs. remove_bin knows nothing about those, so a bare loop entry
+    # would strand them — the same class of bug as tree-sitter's, pointed at a
+    # different artifact. fb_remove_completions is surgical (deletes only our
+    # exact files, then rmdirs upward), because those dirs are shared and may
+    # hold completions from a distro package.
+    if $FORCE; then
+        fb_remove_completions fd bat delta xh
+    else
+        echo "  would remove completions for fd bat delta xh"
+    fi
+    # delta needs a special case rather than a loop entry: besides the binary it
+    # owns five GLOBAL GIT KEYS, set imperatively by 20_fetch.delta.sh, and
+    # remove_bin knows nothing about git config. Leaving core.pager pointing at a
+    # delta we just deleted would break `git diff` outright (fatal: unable to
+    # execute pager 'delta', exit 128), so the reconcile matters more here than
+    # the binary removal does.
+    #
+    # The keys are NOT unset unconditionally: the user may prefer a SYSTEM
+    # -packaged delta over the fetched one, and if one still runs the wiring is
+    # still valid. df_delta_gitconfig_reconcile owns that decision — the same
+    # function ./doctor calls, so the two paths cannot drift apart. Surgical
+    # removal and the |exit 5|/|exit 128| guards live there too.
+    #
+    # ORDER IS LOAD-BEARING: the reconcile runs AFTER remove_bin. Checking first
+    # would find OUR OWN binary still on PATH, always conclude "delta exists,
+    # keep the keys", and the wiring would never be cleaned up — a bug that looks
+    # exactly like the feature working.
+    if $FORCE; then
+        remove_bin delta
+        df_delta_gitconfig_reconcile
+        echo "  removed delta (binary; git keys reconciled — kept if another delta still runs)"
+    else
+        echo "  would remove delta (binary + git core.pager/interactive.diffFilter + [delta] section, unless another delta still runs)"
+    fi
     # nvm does not fit remove_bin: its PATH artifact is ~/.local/bin/nvm.sh (not
     # "nvm"), and NVM_DIR is ~/.local/apps/nvm. Remove both explicitly.
     if $FORCE; then

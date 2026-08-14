@@ -14,11 +14,13 @@
 #   ./test-update-user-home-dir.sh --podman   # also exercise the 32 MB podman static fetch
 #   ./test-update-user-home-dir.sh --ghostty  # also exercise the 48 MB ghostty AppImage fetch
 #   ./test-update-user-home-dir.sh --herdr    # also exercise the 21 MB herdr binary fetch
+#   ./test-update-user-home-dir.sh --bins     # also exercise slots 18-21 (fd/bat/delta/xh, ~13 MB)
 #   RUN_GO_FETCH=1 ./test-update-user-home-dir.sh
 #   RUN_RUST_FETCH=1 ./test-update-user-home-dir.sh
 #   RUN_PODMAN_FETCH=1 ./test-update-user-home-dir.sh
 #   RUN_GHOSTTY_FETCH=1 ./test-update-user-home-dir.sh
 #   RUN_HERDR_FETCH=1 ./test-update-user-home-dir.sh
+#   RUN_BINS_FETCH=1 ./test-update-user-home-dir.sh
 #   ./test-update-user-home-dir.sh --no-net   # structural only (needs a chezmoi on PATH)
 #
 # ninja is a small, fast release-zip fetcher, so it runs in the default
@@ -38,6 +40,7 @@ RUN_RUST="${RUN_RUST_FETCH:-0}"
 RUN_PODMAN="${RUN_PODMAN_FETCH:-0}"
 RUN_GHOSTTY="${RUN_GHOSTTY_FETCH:-0}"
 RUN_HERDR="${RUN_HERDR_FETCH:-0}"
+RUN_BINS="${RUN_BINS_FETCH:-0}"
 NET=1
 for a in "$@"; do
     case "$a" in
@@ -46,6 +49,7 @@ for a in "$@"; do
         --podman) RUN_PODMAN=1 ;;
         --ghostty) RUN_GHOSTTY=1 ;;
         --herdr) RUN_HERDR=1 ;;
+        --bins) RUN_BINS=1 ;;
         --no-net) NET=0 ;;
         # Print the header block, skipping the SPDX banner above it.
         --help|-h) awk '/^# SPDX-License-Identifier:/{s=1;next}
@@ -66,17 +70,33 @@ sec()  { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
 assert()      { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 assert_file() { [[ -e "$2" ]] && ok "$1" || bad "$1 (missing: $2)"; }
 
+# Comment-stripped view of a source file, for NEGATIVE and COUNTING asserts.
+# Those must never read raw source: this repo documents at length WHY a rejected
+# form was rejected, so a raw grep matches the file's own rationale and the
+# assert either passes forever or fails forever. (Three asserts in this very
+# section were written raw first and all three failed on their own comments.)
+# Strips whole-line comments and trailing ones alike. `${VAR#prefix}` expansions
+# get mangled as collateral, which is harmless for counting tokens but is why
+# this is not used for positive exact-match asserts.
+nocomment() { sed 's/#.*//' "$1"; }
+
 # ---- isolated sandbox ------------------------------------------------------
 CHEZMOI_ON_PATH="$(command -v chezmoi 2>/dev/null || true)"   # capture before HOME moves
 SB="$(mktemp -d)"
 trap 'rm -rf "$SB"' EXIT
 export HOME="$SB"
 export XDG_CONFIG_HOME="$SB/.config" XDG_CACHE_HOME="$SB/.cache" XDG_DATA_HOME="$SB/.local/share"
+# The delta fetcher (slot 20) wires itself into git with `git config --global`.
+# Overriding HOME is NOT enough on its own: GIT_CONFIG_GLOBAL takes precedence
+# over $HOME/.gitconfig, so a developer who has it exported would have the REAL
+# file rewritten by a test run. Pin it into the sandbox — the same class of
+# hazard as a CLI reaching a running server regardless of $HOME.
+export GIT_CONFIG_GLOBAL="$SB/.gitconfig"
 unset XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS   # simulate headless -> Phase 4 must skip
 BIN_DIR="$SB/.local/bin"; APP_DIR="$SB/.local/apps"
 
 echo "sandbox HOME=$SB"
-echo "repo=$REPO   go-fetch=$([[ $RUN_GO == 1 ]] && echo on || echo off)   rust-fetch=$([[ $RUN_RUST == 1 ]] && echo on || echo off)   podman-fetch=$([[ $RUN_PODMAN == 1 ]] && echo on || echo off)   ghostty-fetch=$([[ $RUN_GHOSTTY == 1 ]] && echo on || echo off)   herdr-fetch=$([[ $RUN_HERDR == 1 ]] && echo on || echo off)   network=$([[ $NET == 1 ]] && echo on || echo off)"
+echo "repo=$REPO   go-fetch=$([[ $RUN_GO == 1 ]] && echo on || echo off)   rust-fetch=$([[ $RUN_RUST == 1 ]] && echo on || echo off)   podman-fetch=$([[ $RUN_PODMAN == 1 ]] && echo on || echo off)   ghostty-fetch=$([[ $RUN_GHOSTTY == 1 ]] && echo on || echo off)   herdr-fetch=$([[ $RUN_HERDR == 1 ]] && echo on || echo off)   bins-fetch=$([[ $RUN_BINS == 1 ]] && echo on || echo off)   network=$([[ $NET == 1 ]] && echo on || echo off)"
 
 # ---- locate a chezmoi binary (fetch into sandbox if needed) ----------------
 sec "setup: chezmoi binary"
@@ -818,6 +838,20 @@ assert "no alacritty refs in source or README"      "! grep -rin --exclude=.chez
 assert ".chezmoiremove retires applied alacritty"   "grep -q '^.config/alacritty\$' home/.chezmoiremove"
 assert "rofi terminal is an installed emulator"     "grep -qE '^[[:space:]]*terminal: \"(kitty|ghostty)\";' home/dot_config/rofi/config.rasi"
 
+# The FTH Teleport login helper was retired — that site is no longer operational,
+# so the script authenticated against a cluster that does not exist. Same orphan
+# rule as alacritty above, and it bites harder: the applied copy is an EXECUTABLE
+# on PATH, so leaving it behind keeps a tab-completable command that shells out to
+# `op item get "FTH Teleport"` against a dead proxy.
+assert "fth login source removed"                   "[[ ! -f home/dot_local/bin/executable_tsh-login-fth.sh ]]"
+# Same exclusion rule as alacritty's: .chezmoiremove must name the path to retire
+# it, and this harness names it in these very asserts.
+assert "no fth refs in source or README"            "! grep -rin --exclude=.chezmoiremove -e future-tech-holdings -e tsh-login-fth home README.md"
+assert ".chezmoiremove retires applied fth script"  "grep -q '^.local/bin/tsh-login-fth.sh\$' home/.chezmoiremove"
+# The syketech sibling is LIVE and must survive this retirement. Without this the
+# two asserts above would still pass if someone deleted both scripts.
+assert "syketech login helper still present"        "[[ -f home/dot_local/bin/executable_tsh-login-syketech.sh ]]"
+
 # kitty takes the LAST occurrence of a setting, so a second active font_family
 # silently overrides the first. kitty.conf carried a trailing
 # `font_family monospace` that beat the line above it, so the terminal rendered
@@ -894,6 +928,415 @@ assert "doctor registry lists herdr"                "grep -q 'herdr|herdr|' lib/
 # Same lockstep regression tree-sitter shipped with in iter 30: a fetcher that is
 # absent from the removal loop is stranded by --uninstall --force.
 assert "installer uninstall covers herdr"           "grep -qE '^[[:space:]]*for b in .*\\bherdr\\b' update-user-home-dir.sh"
+
+# ===========================================================================
+# Structural checks for slots 18-21 (fd, bat, delta, xh) — source only, run in
+# every group. These four are the ripgrep shape, so the invariants worth pinning
+# are the four places they DIVERGE from it, every one of which fails invisibly
+# from an x86_64 machine or fails silently at runtime:
+#   1. fb_arch can never emit `aarch64` (its sed hardcodes s/aarch64/arm64/), and
+#      all four use raw uname tokens. Calling it 404s on arm64 only.
+#   2. delta has NO aarch64 musl build, so a blanket musl filter resolves to
+#      nothing on arm64 only. It must prefer musl and FALL BACK to gnu.
+#   3. fd and bat publish .deb assets whose names contain "musl", so the filter
+#      must be anchored on the extension, not just the libc token.
+#   4. bat's zsh completion ships as bat.zsh, not _bat. Installed under its
+#      shipped name it is never autoloaded — no error, just no completions.
+sec "structural: fd/bat/delta/xh fetchers (slots 18-21, no network)"
+FD_FETCHER="home/dot_local/bin/fetch.bins/executable_18_fetch.fd.sh"
+BAT_FETCHER="home/dot_local/bin/fetch.bins/executable_19_fetch.bat.sh"
+DELTA_FETCHER="home/dot_local/bin/fetch.bins/executable_20_fetch.delta.sh"
+XH_FETCHER="home/dot_local/bin/fetch.bins/executable_21_fetch.xh.sh"
+for f in "$FD_FETCHER" "$BAT_FETCHER" "$DELTA_FETCHER" "$XH_FETCHER"; do
+    b="$(basename "$f")"
+    assert "$b present"            "[[ -f $f ]]"
+    assert "$b is executable (0755)" "[[ -x $f ]]"
+    assert "$b is valid bash"      "bash -n $f"
+    assert "$b sources _lib.sh"    "grep -q '_lib.sh' $f"
+    assert "$b carries the SPDX banner" \
+        "grep -q 'SPDX-License-Identifier: MIT OR Apache-2.0' $f"
+    assert "$b goes through install_bin" "grep -qE '^[[:space:]]*install_bin[[:space:]]' $f"
+    # Trap 1 — NEGATIVE, so read comment-stripped source: every one of these
+    # files DOCUMENTS in its header why fb_arch is unusable, and a raw grep would
+    # match its own rationale and fail permanently. awk, not `grep -v | grep -q`:
+    # under this harness's pipefail a short-circuiting grep -q SIGPIPEs the
+    # producer and the assert fails even on a match.
+    assert "$b never CALLS fb_arch" "awk '/^[[:space:]]*#/{next} /fb_arch/{f=1} END{exit f?1:0}' $f"
+    assert "$b uses raw uname -m"   "grep -qE 'ARCH=\"\\\$\\(uname -m\\)\"' $f"
+    # Trap 3 — the extension anchor is what actually keeps a .deb out of
+    # install_bin. Count: EVERY gh_asset_url filter in the file must carry it,
+    # not merely one of them (delta has two).
+    # Counted on comment-stripped source; every selector carries exactly one
+    # contains($arch), so this compares selectors against anchors 1:1 (delta has
+    # two selectors, and BOTH must be anchored).
+    nsel=$(nocomment "$f" | grep -c 'contains($arch)')
+    nanch=$(nocomment "$f" | grep -c 'endswith(".tar.gz")')
+    assert "$b anchors every asset filter on .tar.gz ($nsel sel/$nanch anchored)" \
+        "[[ $nsel -ge 1 && $nsel -eq $nanch ]]"
+    assert "$b prefers linux-musl over bare musl" "grep -q 'contains(\"linux-musl\")' $f"
+    # Completions must be installed under the zsh AUTOLOAD name. The helper owns
+    # the rename, so every fetcher must route through it rather than cp'ing.
+    assert "$b installs completions via the helper" \
+        "grep -qE '^[[:space:]]*fb_install_completions[[:space:]]' $f"
+done
+
+# Trap 2 — delta's gnu fallback. Assert the FALLBACK (the branch that reacts to
+# an empty musl result), not merely the string "gnu", which would also match the
+# header comment explaining the trap.
+assert "delta fetcher probes musl, then falls back" \
+    "awk '/^[[:space:]]*#/{next} /LIBC=\"gnu\"/{f=1} END{exit f?0:1}' $DELTA_FETCHER"
+assert "delta fallback is guarded on an empty musl result" \
+    "grep -qF 'if [[ -z \"\$ASSET_URL\" ]]; then' $DELTA_FETCHER"
+# The recovery MUST be outside the command substitution. gh_asset_url `exit 1`s,
+# and `exit` terminates the subshell, so an inner `$(… || true)` never runs its
+# fallback: the substitution still yields status 1 and `set -e` kills the script
+# at the assignment. That wrong form greps clean and fails only on an arch with
+# no musl build — i.e. never on this machine. Pin the OUTSIDE form specifically.
+assert "delta musl probe recovers OUTSIDE the substitution" \
+    "grep -qF '|| ASSET_URL=\"\"' $DELTA_FETCHER"
+# Scoped to the SELECTOR line (the one carrying contains($arch)). A blanket
+# search for `2>/dev/null || true)` is wrong: the _prev_pager probe uses exactly
+# that form legitimately, because `git config --get` RETURNS 1 rather than
+# calling exit, so its inner `|| true` does run. The distinction is the whole
+# point — it is gh_asset_url's `exit` that makes the inner form unsafe.
+assert "delta musl probe has no inner '|| true'" \
+    "awk '/^[[:space:]]*#/{next} /contains\\(\\\$arch\\)/ && /\\|\\| true\\)/{f=1} END{exit f?1:0}' $DELTA_FETCHER"
+assert "delta fetcher selects a linux-gnu asset"  "grep -q 'contains(\"linux-gnu\")' $DELTA_FETCHER"
+# delta's tag has no leading "v", so its inner dir uses ${VERSION}; fd/bat/xh
+# tags DO carry one, so theirs use ${TAG_NAME}. Getting this backwards makes the
+# extracted path wrong and the install fails on the very first run.
+assert "delta inner dir uses \${VERSION} (tag has no v)" \
+    "grep -qF 'SRC_DIR=\"\${FB_TMP}/\${BIN_NAME}-\${VERSION}-' $DELTA_FETCHER"
+for f in "$FD_FETCHER" "$BAT_FETCHER" "$XH_FETCHER"; do
+    assert "$(basename "$f") inner dir uses \${TAG_NAME} (tag has a v)" \
+        "grep -qF 'SRC_DIR=\"\${FB_TMP}/\${BIN_NAME}-\${TAG_NAME}-' $f"
+done
+# Trap 4 — bat is the only one of the four whose zsh completion is NOT shipped
+# under its autoload name, which is exactly why the helper renames rather than
+# copying. Pin both halves: bat hands over the .zsh file, and the helper is what
+# writes the _<tool> name.
+assert "bat fetcher hands the helper its bat.zsh file" \
+    "grep -qF 'autocomplete/bat.zsh' $BAT_FETCHER"
+assert "helper installs zsh completions under _<tool>" \
+    "grep -qF 'cp \"\$zsrc\" \"\${zdir}/_\${tool}\"' $LIB"
+assert "helper removes zsh completions by _<tool>" \
+    "grep -qF '\"\${zdir}/_\${tool}\"' $LIB"
+# delta ships no completion files at all — it generates them from the binary.
+assert "delta generates its own completions"        "grep -q -- '--generate-completion' $DELTA_FETCHER"
+assert "delta generates BOTH zsh and bash" \
+    "[[ \$(nocomment $DELTA_FETCHER | grep -c -- '--generate-completion') -eq 2 ]]"
+
+assert "doctor registry lists fd"                   "grep -q 'fd|fd|' lib/doctor-registry.sh"
+assert "doctor registry lists bat"                  "grep -q 'bat|bat|' lib/doctor-registry.sh"
+assert "doctor registry lists delta"                "grep -q 'delta|delta|' lib/doctor-registry.sh"
+assert "doctor registry lists xh"                   "grep -q 'xh|xh|' lib/doctor-registry.sh"
+
+# Teardown lockstep (the tree-sitter regression, three more times). fd/bat/xh are
+# plain remove_bin tools and belong in the loop; delta does NOT, because it also
+# owns global git keys remove_bin knows nothing about. Match the loop LINE
+# specifically — "fd" and "bat" are short substrings that occur elsewhere in this
+# installer — and confirm delta is handled outside it.
+assert "installer uninstall covers fd"              "grep -qE '^[[:space:]]*for b in .*\\bfd\\b' update-user-home-dir.sh"
+assert "installer uninstall covers bat"             "grep -qE '^[[:space:]]*for b in .*\\bbat\\b' update-user-home-dir.sh"
+assert "installer uninstall covers xh"              "grep -qE '^[[:space:]]*for b in .*\\bxh\\b' update-user-home-dir.sh"
+assert "installer uninstall removes delta binary"   "grep -qE '^[[:space:]]*remove_bin delta\$' update-user-home-dir.sh"
+assert "installer uninstall removes completions"    "grep -qE '^[[:space:]]*fb_remove_completions fd bat delta xh\$' update-user-home-dir.sh"
+
+# ---- Part C: delta's git wiring is imperative, not a managed gitconfig ------
+# The five keys are set by the fetcher after a successful install. A COUNT, not a
+# presence check: "some git config --global call exists" passes a mutation that
+# drops four of the five, which is precisely the failure this guards.
+assert "delta fetcher sets exactly five git keys" \
+    "[[ \$(grep -cE '^[[:space:]]*git config --global ' $DELTA_FETCHER) -eq 5 ]]"
+for k in core.pager interactive.diffFilter delta.navigate delta.side-by-side delta.line-numbers; do
+    assert "delta fetcher sets $k" "grep -qE '^[[:space:]]*git config --global $k( |\$)' $DELTA_FETCHER"
+done
+# Ordering is a safety property: core.pager naming an absent delta makes git diff
+# die outright (fatal: unable to execute pager, exit 128), so the wiring must come
+# AFTER install_bin, which exits non-zero on a failed verification.
+# Guarded on git existing: the prime directive is that a minimal no-root box
+# still ends up operational, and such a box may have no git. Unguarded, the
+# first `git config` call would kill the fetcher under set -e AFTER delta was
+# already installed successfully — a spurious failure for a working tool.
+assert "delta git wiring is guarded on git existing" \
+    "grep -qF 'if command -v git >/dev/null 2>&1; then' $DELTA_FETCHER"
+assert "delta wires git only AFTER install_bin" \
+    "[[ \$(nocomment $DELTA_FETCHER | grep -n 'install_bin' | tail -1 | cut -d: -f1) -lt \$(nocomment $DELTA_FETCHER | grep -n 'git config --global' | head -1 | cut -d: -f1) ]]"
+# Teardown lives in df_delta_gitconfig_reconcile (lib/df-common.sh), NOT inline
+# here — see the dedicated reconcile section below for the full rule. What the
+# installer must get right is (a) sourcing it, (b) calling it, and (c) the
+# ordering relative to remove_bin.
+assert "installer sources lib/df-common.sh"   "grep -qE '^\\. \"lib/df-common.sh\"' update-user-home-dir.sh"
+assert "uninstall calls the shared reconcile" \
+    "grep -qE '^[[:space:]]*df_delta_gitconfig_reconcile\$' update-user-home-dir.sh"
+# THE sequencing trap: checking before remove_bin finds OUR OWN binary still on
+# PATH, always concludes "keep", and the wiring is never cleaned — a bug that
+# looks exactly like the feature working. Comment-stripped, since the comments
+# above the call explain the ordering and name both symbols.
+assert "uninstall reconciles AFTER remove_bin delta" \
+    "[[ \$(nocomment update-user-home-dir.sh | grep -n 'remove_bin delta' | head -1 | cut -d: -f1) -lt \$(nocomment update-user-home-dir.sh | grep -n 'df_delta_gitconfig_reconcile' | head -1 | cut -d: -f1) ]]"
+# The installer must NOT carry its own copy of the teardown: a second
+# implementation is exactly how the two call sites drift apart.
+assert "installer has no inline git teardown of its own" \
+    "[[ \$(nocomment update-user-home-dir.sh | grep -cE 'git config --global (--unset|--remove-section)') -eq 0 ]]"
+# Ruling (this iter): git config is owned IMPERATIVELY, by the fetcher — there is
+# deliberately no chezmoi-managed gitconfig. A managed file would fight the three
+# other writers of that file (gh, vp, git itself) and, worse, a hardcoded
+# [user] email would silently re-attribute commits on every machine, since this
+# user's git identity is per-host by design.
+assert "no managed gitconfig source exists" \
+    "[[ ! -e home/dot_gitconfig && ! -e home/dot_config/git/config && ! -e home/private_dot_config/git/config ]]"
+
+# ===========================================================================
+# df_delta_gitconfig_reconcile — "if delta cannot run, drop the five git keys."
+#
+# Two call sites (./doctor's once-per-login health check, and uninstall after
+# remove_bin) share ONE implementation so they cannot disagree about what
+# "available" means. The whole design rests on one distinction, and it is the one
+# thing here that is invisible to a casual reading:
+#
+#   THE PREDICATE IS OPERABILITY, NOT PRESENCE.
+#
+# delta is the one fetcher with a gnu fallback on arches with no musl build, so
+# present-but-not-runnable is a real state for it — wrong glibc, dangling
+# symlink, cross-arch ELF. `command -v` succeeds for every one of those and would
+# leave core.pager aimed at a binary that cannot execute. The behavioural test
+# below with a stub that EXISTS but exits non-zero is what pins this: it fails
+# the moment someone "simplifies" the predicate to command -v or df_have.
+sec "structural + behavioural: delta git-key reconcile (no network)"
+DFC="lib/df-common.sh"
+assert "df-common.sh defines df_delta_gitconfig_reconcile" \
+    "grep -qE '^df_delta_gitconfig_reconcile\\(\\)' $DFC"
+assert "reconcile predicate is 'delta --version'" \
+    "grep -qF 'if delta --version >/dev/null 2>&1; then' $DFC"
+# NEGATIVE + comment-stripped: the function documents at length WHY command -v
+# and df_have are wrong, so a raw grep matches its own rationale and would fail
+# permanently. (df_have's own definition is a comment-free line naming neither.)
+assert "reconcile never uses 'command -v delta'" \
+    "awk '/^[[:space:]]*#/{next} /command -v delta/{f=1} END{exit f?1:0}' $DFC"
+assert "reconcile never uses 'df_have delta'" \
+    "awk '/^[[:space:]]*#/{next} /df_have delta/{f=1} END{exit f?1:0}' $DFC"
+# Exactly ONE implementation, repo-wide. A copied second copy in the installer or
+# doctor is the failure this guards. The harness is excluded because these very
+# asserts name the predicate too — the alacritty asserts use the same carve-out.
+assert "exactly one delta operability predicate in the repo" \
+    "[[ \$(grep -rlF 'delta --version >/dev/null' lib doctor update-user-home-dir.sh home | wc -l) -eq 1 ]]"
+assert "doctor calls the reconcile" "grep -qE '^df_delta_gitconfig_reconcile\$' doctor"
+assert "doctor still sources df-common.sh" "grep -q 'lib/df-common.sh' doctor"
+# Surgical: only [delta] is ours end to end. The user keeps unrelated settings in
+# [core] and [interactive] (excludesfile, singleKey, …).
+assert "reconcile never drops the whole [core] section" \
+    "awk '/^[[:space:]]*#/{next} /--remove-section core/{f=1} END{exit f?1:0}' $DFC"
+assert "reconcile never drops the whole [interactive] section" \
+    "awk '/^[[:space:]]*#/{next} /--remove-section interactive/{f=1} END{exit f?1:0}' $DFC"
+# All three teardown calls guarded: --unset on an absent key exits 5 and
+# --remove-section on an absent section exits 128, and both call sites run under
+# set -e. A count, because one unguarded call is enough to break it.
+assert "every reconcile git call is guarded with || true" \
+    "[[ \$(grep -cE '^[[:space:]]*git config --global (--unset|--remove-section).*\\|\\| true\$' $DFC) -eq 3 ]]"
+
+# ---- behavioural: stub delta on PATH, sandboxed GIT_CONFIG_GLOBAL -----------
+# Every case runs in a subshell with a PATH containing ONLY our stub dir, so the
+# result cannot depend on whether the developer's machine happens to have a real
+# delta. git is symlinked into each stub dir because the function needs it.
+RECON_DIR="$SB/recon"; mkdir -p "$RECON_DIR"/{ok,broken,none}
+for d in ok broken none; do ln -sf "$(command -v git)" "$RECON_DIR/$d/git"; done
+printf '#!/bin/sh\n[ "$1" = "--version" ] && { echo "delta 9.9.9"; exit 0; }\nexit 0\n' > "$RECON_DIR/ok/delta"
+printf '#!/bin/sh\nexit 1\n' > "$RECON_DIR/broken/delta"   # EXISTS, is executable, cannot run
+chmod +x "$RECON_DIR/ok/delta" "$RECON_DIR/broken/delta"
+# shellcheck source=lib/df-common.sh
+. "$REPO/lib/df-common.sh"
+
+# seed_keys <file> — the five keys plus two SIBLING settings that must survive.
+seed_keys() {
+    GIT_CONFIG_GLOBAL="$1" git config --global core.pager delta
+    GIT_CONFIG_GLOBAL="$1" git config --global interactive.diffFilter 'delta --color-only'
+    GIT_CONFIG_GLOBAL="$1" git config --global delta.navigate true
+    GIT_CONFIG_GLOBAL="$1" git config --global delta.side-by-side true
+    GIT_CONFIG_GLOBAL="$1" git config --global delta.line-numbers true
+    GIT_CONFIG_GLOBAL="$1" git config --global core.excludesfile '~/.config/git/ignore'
+    GIT_CONFIG_GLOBAL="$1" git config --global interactive.singleKey true
+}
+nkeys() {  # how many of the five remain
+    n=0
+    for k in core.pager interactive.diffFilter delta.navigate delta.side-by-side delta.line-numbers; do
+        GIT_CONFIG_GLOBAL="$1" git config --global --get "$k" >/dev/null 2>&1 && n=$((n+1))
+    done
+    printf '%s' "$n"
+}
+recon() {  # recon <gitconfig> <stub-dir> -> stdout of the reconcile
+    ( PATH="$RECON_DIR/$2"; GIT_CONFIG_GLOBAL="$1"; export PATH GIT_CONFIG_GLOBAL
+      df_delta_gitconfig_reconcile )
+}
+
+# 1. working delta => all five survive
+G1="$SB/recon-ok.gitconfig"; : > "$G1"; seed_keys "$G1"
+out1="$(recon "$G1" ok)"
+assert "working delta: all five keys survive"  "[[ \$(nkeys $G1) -eq 5 ]]"
+assert "working delta: reconcile is silent"    "[[ -z \"\$out1\" ]]"
+
+# 2. no delta at all => all five removed
+G2="$SB/recon-none.gitconfig"; : > "$G2"; seed_keys "$G2"
+out2="$(recon "$G2" none)"
+assert "no delta: all five keys removed"       "[[ \$(nkeys $G2) -eq 0 ]]"
+assert "no delta: exactly one notice line"     "[[ \$(printf '%s' \"\$out2\" | wc -l) -eq 1 || \$(printf '%s\\n' \"\$out2\" | grep -c . ) -eq 1 ]]"
+# Surgical: the user's unrelated settings in the SAME sections must survive.
+assert "no delta: core.excludesfile survives"  "[[ -n \"\$(GIT_CONFIG_GLOBAL=$G2 git config --global --get core.excludesfile)\" ]]"
+assert "no delta: interactive.singleKey survives" "[[ -n \"\$(GIT_CONFIG_GLOBAL=$G2 git config --global --get interactive.singleKey)\" ]]"
+
+# 3. THE ONE THAT PROVES OPERABILITY != PRESENCE. The stub exists, is executable,
+#    and is found by `command -v` — but exits non-zero. A predicate written as
+#    `command -v delta` or `df_have delta` passes it and leaves the keys in place,
+#    so this assert fails the instant someone makes that "simplification".
+G3="$SB/recon-broken.gitconfig"; : > "$G3"; seed_keys "$G3"
+assert "sanity: the broken stub IS found by command -v" \
+    "( PATH=\"$RECON_DIR/broken\"; command -v delta >/dev/null 2>&1 )"
+assert "sanity: the broken stub CANNOT run"    "! ( PATH=\"$RECON_DIR/broken\"; delta --version >/dev/null 2>&1 )"
+out3="$(recon "$G3" broken)"
+assert "broken delta: all five keys removed (presence would have kept them)" \
+    "[[ \$(nkeys $G3) -eq 0 ]]"
+
+# 4. idempotent: a second pass has nothing to do and must say nothing at all.
+out4="$(recon "$G2" none)"
+assert "second reconcile is completely silent" "[[ -z \"\$out4\" ]]"
+assert "second reconcile exits 0"              "( recon $G2 none >/dev/null )"
+# ...and on a config that never had the keys at all.
+G5="$SB/recon-virgin.gitconfig"; printf '[user]\n\temail = x@y\n' > "$G5"
+out5="$(recon "$G5" none)"
+assert "virgin config: reconcile is silent"    "[[ -z \"\$out5\" ]]"
+assert "virgin config: left untouched"         "grep -q 'x@y' $G5"
+
+# ---- end to end: the REAL uninstall path, in a throwaway HOME ---------------
+# Ruling 2 in practice. These run the actual `./update-user-home-dir.sh
+# --uninstall --force` rather than a simulation, because the thing most likely to
+# break is the ORDERING inside it: reconciling before remove_bin would find our
+# own binary still on PATH, always conclude "keep", and never clean the wiring.
+#
+# A delta-free PATH is built by shadowing every real PATH entry except `delta`.
+# Without it, the "no delta anywhere" case would silently depend on whether the
+# developer's machine happens to have a system delta installed — the test would
+# pass here and mean nothing on the next machine.
+NODELTA="$SB/nodelta"; mkdir -p "$NODELTA"
+( IFS=:; for d in $PATH; do [ -d "$d" ] || continue
+    for f in "$d"/*; do b="${f##*/}"; [ "$b" = delta ] && continue
+      [ -e "$NODELTA/$b" ] || ln -s "$f" "$NODELTA/$b" 2>/dev/null; done; done )
+assert "shadow PATH really has no delta" "! ( PATH=\"$NODELTA\"; command -v delta >/dev/null 2>&1 )"
+assert "shadow PATH still provides git"  "( PATH=\"$NODELTA\"; command -v git >/dev/null 2>&1 )"
+
+# uninstall_case <path> — fresh HOME with a fake installed delta + seeded keys.
+# EVERY XDG var is redirected into the throwaway HOME: the installer's uninstall
+# does `rm -rf $XDG_CONFIG_HOME/chezmoi` and fb_remove_completions works off
+# $XDG_DATA_HOME, so inheriting the outer sandbox's values would wipe state the
+# rest of this suite depends on.
+uninstall_case() {
+    UC_HOME="$(mktemp -d)"
+    mkdir -p "$UC_HOME/.local/bin" "$UC_HOME/.local/apps"
+    printf '#!/bin/sh\nexit 0\n' > "$UC_HOME/.local/bin/delta"; chmod +x "$UC_HOME/.local/bin/delta"
+    : > "$UC_HOME/.local/apps/delta"
+    UC_GC="$UC_HOME/.gitconfig"; : > "$UC_GC"; seed_keys "$UC_GC"
+    HOME="$UC_HOME" \
+    XDG_CONFIG_HOME="$UC_HOME/.config" XDG_CACHE_HOME="$UC_HOME/.cache" \
+    XDG_DATA_HOME="$UC_HOME/.local/share" GIT_CONFIG_GLOBAL="$UC_GC" PATH="$1" \
+        ./update-user-home-dir.sh --uninstall --force >/dev/null 2>&1 || true
+}
+
+# A. a SYSTEM delta still runs => our binary goes, the wiring STAYS.
+uninstall_case "$RECON_DIR/ok:$NODELTA"
+assert "uninstall(system delta): our binary removed" "[[ ! -e \"$UC_HOME/.local/bin/delta\" ]]"
+assert "uninstall(system delta): git keys KEPT"      "[[ \$(nkeys \"$UC_GC\") -eq 5 ]]"
+rm -rf "$UC_HOME"
+
+# B. no delta anywhere => binary goes AND the wiring goes.
+uninstall_case "$NODELTA"
+assert "uninstall(no delta): our binary removed"     "[[ ! -e \"$UC_HOME/.local/bin/delta\" ]]"
+assert "uninstall(no delta): git keys removed"       "[[ \$(nkeys \"$UC_GC\") -eq 0 ]]"
+assert "uninstall(no delta): sibling settings survive" \
+    "[[ -n \"\$(GIT_CONFIG_GLOBAL=\"$UC_GC\" git config --global --get core.excludesfile)\" ]]"
+rm -rf "$UC_HOME"
+# The outer sandbox must be untouched by both runs.
+assert "uninstall cases left the sandbox alone" "[[ -d \"$SB/.config/chezmoi\" || ! -e \"$SB/.config\" ]]"
+
+# ---- Part B: the site-functions completion scheme ---------------------------
+# Completion FILES cannot ride the dotfiles_tool_init print-and-eval route, so
+# they get an $fpath directory instead. Two things fail silently here: a $fpath
+# line placed after compinit does nothing at all, and a zsh completion not named
+# _<tool> is never autoloaded.
+# zsh history policy. The dedupe options all operate on the IN-MEMORY list, so
+# HISTSIZE < SAVEHIST names an on-disk target one session can never reach — that
+# inversion shipped for a long time and is what this section guards first.
+sec "structural: zsh history dedupe policy (no network)"
+HIST_SRC="home/dot_config/shell/zsh.sh"
+COMMON_SRC="home/dot_config/shell/common.sh"
+# Numeric, not a literal grep: this must keep holding when the values change, and
+# it must catch a re-inversion rather than a specific pair of numbers.
+assert "HISTSIZE >= SAVEHIST (no inversion)" \
+    "[[ \$(grep -E '^HISTSIZE=' $HIST_SRC | cut -d= -f2) -ge \$(grep -E '^SAVEHIST=' $HIST_SRC | cut -d= -f2) ]]"
+for _o in hist_reduce_blanks hist_ignore_dups hist_save_no_dups \
+          hist_expire_dups_first hist_ignore_space hist_find_no_dups; do
+    assert "zsh.sh sets $_o" "nocomment $HIST_SRC | grep -qE '^setopt .*$_o'"
+done
+# hist_ignore_all_dups removes the OLDER copy of any repeat, destroying the
+# chronology the last-20-into-a-script workflow reads. RULED OUT by the operator.
+# Comment-stripped, per the standing rule: the file explains at length why this
+# option is excluded, so a raw grep matches its own rationale and can never pass.
+assert "hist_ignore_all_dups stays out" \
+    "[[ -z \$(nocomment $HIST_SRC | grep 'hist_ignore_all_dups') ]]"
+# share_history implies inc_append_history AND imports other panes' commands live.
+# Deliberately not adopted; assert the weaker option is the one in force.
+assert "inc_append_history, not share_history" \
+    "nocomment $HIST_SRC | grep -qE '^setopt inc_append_history' && [[ -z \$(nocomment $HIST_SRC | grep 'share_history') ]]"
+# fzf's ^R defaults to FUZZY: `dang` matched 693 entries by scattered characters.
+assert "FZF_CTRL_R_OPTS forces exact matching" \
+    "nocomment $COMMON_SRC | grep -qF \"FZF_CTRL_R_OPTS='--exact'\""
+assert "FZF_CTRL_R_OPTS is guarded on fzf existing" \
+    "nocomment $COMMON_SRC | grep -qE 'df_have fzf && export FZF_CTRL_R_OPTS'"
+# Scoping matters: --exact in FZF_DEFAULT_OPTS would force it on the file and
+# directory pickers too, where fuzzy matching is the entire point.
+assert "--exact is scoped to ^R, not global" \
+    "[[ -z \$(nocomment $COMMON_SRC | grep 'FZF_DEFAULT_OPTS' | grep -- '--exact') ]]"
+
+sec "structural: shell completion site-functions scheme (no network)"
+ZSHRC_SRC="home/dot_config/shell/zsh.sh"
+BASHRC_SRC="home/dot_config/shell/bash.sh"
+RCSH_SRC="home/dot_config/shell/rc.sh"
+assert "zsh.sh adds the site-functions dir to \$fpath" \
+    "grep -qF 'fpath=(\"\$_dotfiles_site_functions\" \$fpath)' $ZSHRC_SRC"
+assert "zsh.sh points at the XDG site-functions path" \
+    "grep -qF 'zsh/site-functions' $ZSHRC_SRC"
+# Guarded, so a machine that has not run the fetchers yet gets no dangling entry.
+assert "the \$fpath entry is guarded on the dir existing" \
+    "grep -qF 'if [ -d \"\$_dotfiles_site_functions\" ]; then' $ZSHRC_SRC"
+# ORDERING, not presence. An assert that merely greps for the line passes a
+# mutation that moves it after compinit — which is the actual failure mode, and
+# it is silent. rc.sh sources zsh.sh (step 3) strictly before it runs compinit
+# (step 7), so prove the ordering in rc.sh itself.
+assert "rc.sh sources <shell>.sh BEFORE compinit" \
+    "[[ \$(grep -n 'DOTFILES_SHELL.sh\"' $RCSH_SRC | head -1 | cut -d: -f1) -lt \$(grep -n 'compinit -C' $RCSH_SRC | cut -d: -f1) ]]"
+# The $fpath line must NOT have been parked in the post-compinit tool-init block.
+assert "the \$fpath entry is not in the post-compinit block" \
+    "awk '/^[[:space:]]*#/{next} /dotfiles_tool_init/{f=1} END{exit f?1:0}' $ZSHRC_SRC"
+# Comment-stripped: the block's own comment names this path while explaining the
+# scheme, so a raw grep matches the prose and survives deleting the actual code.
+# (It did exactly that when first written raw — the mutation went uncaught.)
+assert "bash.sh sources the XDG bash-completion dir" \
+    "nocomment $BASHRC_SRC | grep -qF 'bash-completion/completions'"
+assert "bash.sh guards the completion dir on existence" \
+    "grep -qF 'if [ -d \"\$_dotfiles_bash_completions\" ]; then' $BASHRC_SRC"
+# Both helpers live in _lib.sh so the rename rule exists in exactly one place.
+assert "_lib.sh defines fb_install_completions"     "grep -qE '^fb_install_completions\\(\\)' $LIB"
+assert "_lib.sh defines fb_remove_completions"      "grep -qE '^fb_remove_completions\\(\\)' $LIB"
+assert "_lib.sh defines both completion dir helpers" \
+    "grep -qE '^fb_completion_zsh_dir\\(\\)' $LIB && grep -qE '^fb_completion_bash_dir\\(\\)' $LIB"
+# Surgical teardown: these are shared dirs that may hold a distro package's
+# completions, so removal must rmdir upward rather than rm -rf the directory.
+# Scoped to fb_remove_completions' body: matching on the directory NAMES is
+# useless because the code refers to them through $zdir/$bdir, so a literal
+# `rm -rf "$zdir"` would slip straight past. Assert no rm -rf anywhere in the
+# function instead. (remove_bin legitimately uses rm -rf, hence the range.)
+assert "completion teardown never uses rm -rf" \
+    "awk '/^fb_remove_completions\\(\\)/{i=1;next} i&&/^}/{exit} i&&/^[[:space:]]*#/{next} i&&/rm -rf/{f=1} END{exit f?1:0}' $LIB"
+assert "completion teardown rmdirs upward instead"  "grep -qF 'rmdir \"\$zdir\" \"\$bdir\"' $LIB"
+
 # nvim-treesitter main-branch migration: the old configs-module API must be
 # gone from the config source, and the duplicate custom spec stays deleted
 # (its go/rust parsers are folded into the kickstart spec).
@@ -1133,6 +1576,79 @@ if [[ $RUN_HERDR == 1 ]]; then
     fi
 else
     skip "herdr fetcher (pass --herdr or RUN_HERDR_FETCH=1 to enable)"
+fi
+
+# ===========================================================================
+# Slots 18-21 end to end. The structural group above pins the SOURCE; this one
+# proves the parts that only a real fetch can: that the interpolated inner
+# directory actually matches what upstream ships (the tag-vs-version split is
+# invisible until you extract), that the completion files land under their
+# autoload names, and that delta's git wiring is applied and is idempotent.
+if [[ $RUN_BINS == 1 ]]; then
+    sec "fd/bat/delta/xh fetchers (slots 18-21, ~13 MB) — binaries, completions, git wiring"
+    ZDIR="$SB/.local/share/zsh/site-functions"
+    BDIR="$SB/.local/share/bash-completion/completions"
+    for t in 18:fd 19:bat 20:delta 21:xh; do
+        slot="${t%%:*}"; tool="${t##*:}"
+        f="$SB/.local/bin/fetch.bins/${slot}_fetch.${tool}.sh"
+        if [[ -x "$f" ]]; then
+            "$f" >/dev/null 2>&1
+            assert "$tool installed + --version works" "\"$BIN_DIR/$tool\" --version >/dev/null 2>&1"
+            assert "$tool symlink -> ~/.local/apps"    "[[ \"\$(readlink -f \"$BIN_DIR/$tool\")\" == \"$APP_DIR\"/* ]]"
+            assert "installed $tool is an ELF binary"  "head -c4 \"\$(readlink -f \"$BIN_DIR/$tool\")\" | grep -q ELF"
+            # The autoload name is the whole point: bat ships bat.zsh, and a file
+            # installed under that name is never loaded by zsh — silently.
+            assert "$tool zsh completion installed as _$tool" "[[ -s \"$ZDIR/_$tool\" ]]"
+            assert "$tool bash completion installed as $tool" "[[ -s \"$BDIR/$tool\" ]]"
+        else
+            skip "$tool fetcher not present (apply group did not run)"
+        fi
+    done
+    # bat is the ONE whose upstream zsh filename differs from its autoload name,
+    # so prove the rename actually happened rather than a copy under the old name.
+    assert "bat.zsh was RENAMED, not copied verbatim" "[[ ! -e \"$ZDIR/bat.zsh\" ]]"
+    # zsh must actually autoload them. This is the assertion the rename exists for:
+    # with the file named bat.zsh it resolves to nothing and nothing warns.
+    if command -v zsh >/dev/null 2>&1; then
+        comps="$(zsh -f -c '
+            fpath=("'"$ZDIR"'" ${^${(M)fpath:#*/functions*}})
+            autoload -Uz compinit && compinit -u -D
+            for c in fd bat delta xh; do print -r -- "$c=${_comps[$c]:-NONE}"; done' 2>/dev/null)"
+        for c in fd bat delta xh; do
+            assert "zsh autoloads the $c completion" "[[ \"\$comps\" == *\"$c=_$c\"* ]]"
+        done
+    else
+        skip "zsh completion autoload check (no zsh on PATH)"
+    fi
+    # delta's git wiring. GIT_CONFIG_GLOBAL is pinned into the sandbox at setup,
+    # so these read the sandbox file and never the developer's real ~/.gitconfig.
+    if [[ -x "$BIN_DIR/delta" ]]; then
+        assert "git core.pager set to delta"        "[[ \"\$(git config --global --get core.pager)\" == delta ]]"
+        assert "git interactive.diffFilter set"     "[[ \"\$(git config --global --get interactive.diffFilter)\" == 'delta --color-only' ]]"
+        assert "git delta.navigate set"             "[[ \"\$(git config --global --get delta.navigate)\" == true ]]"
+        assert "git delta.side-by-side set"         "[[ \"\$(git config --global --get delta.side-by-side)\" == true ]]"
+        assert "git delta.line-numbers set"         "[[ \"\$(git config --global --get delta.line-numbers)\" == true ]]"
+        # Re-running must not duplicate keys or sections — `git config --global`
+        # replaces in place, and this proves it for the section header too.
+        "$SB/.local/bin/fetch.bins/20_fetch.delta.sh" >/dev/null 2>&1
+        assert "re-run does not duplicate [delta]"  "[[ \$(grep -c '^\\[delta\\]' \"$GIT_CONFIG_GLOBAL\") -eq 1 ]]"
+        assert "re-run does not duplicate core.pager" "[[ \$(git config --global --get-all core.pager | wc -l) -eq 1 ]]"
+        # Teardown reverses it, and survives a second run (--unset on an absent
+        # key exits 5, --remove-section on an absent section exits 128).
+        git config --global --unset core.pager || true
+        git config --global --unset interactive.diffFilter || true
+        git config --global --remove-section delta || true
+        assert "teardown clears core.pager"         "[[ -z \"\$(git config --global --get core.pager || true)\" ]]"
+        assert "teardown removes the [delta] section" "! grep -q '^\\[delta\\]' \"$GIT_CONFIG_GLOBAL\""
+        # Completion teardown is surgical: our files go, the dirs go only if empty.
+        ( . "$LIB" >/dev/null 2>&1; fb_remove_completions fd bat delta xh ) >/dev/null 2>&1
+        assert "teardown removes zsh completions"   "[[ ! -e \"$ZDIR/_fd\" && ! -e \"$ZDIR/_bat\" && ! -e \"$ZDIR/_delta\" && ! -e \"$ZDIR/_xh\" ]]"
+        assert "teardown removes bash completions"  "[[ ! -e \"$BDIR/fd\" && ! -e \"$BDIR/bat\" && ! -e \"$BDIR/delta\" && ! -e \"$BDIR/xh\" ]]"
+    else
+        skip "delta git wiring (delta not installed)"
+    fi
+else
+    skip "fd/bat/delta/xh fetchers (pass --bins or RUN_BINS_FETCH=1 to enable)"
 fi
 
 # ---- licensing -------------------------------------------------------------

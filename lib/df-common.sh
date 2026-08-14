@@ -36,6 +36,69 @@ df_init() {
 
 df_have() { command -v "$1" >/dev/null 2>&1; }
 
+# df_delta_gitconfig_reconcile — drop delta's five git keys when delta cannot run.
+#
+# THE ONLY implementation of this rule, deliberately. It has two call sites and
+# they must not be able to disagree about what "delta is available" means:
+#   1. ./doctor — the once-per-login health check (rc.sh runs dotfiles-doctor once
+#      per login session era), so a machine whose delta went away self-heals.
+#   2. update-user-home-dir.sh --uninstall --force, AFTER `remove_bin delta`.
+#
+# THE PREDICATE IS OPERABILITY, NOT PRESENCE: `delta --version`, never
+# `command -v delta` and never df_have (which IS command -v, just above). That is
+# not pedantry here. delta is the one fetcher with a gnu fallback on
+# architectures with no musl build, so present-but-not-runnable is a REAL state
+# for it — wrong glibc, dangling symlink, cross-arch ELF (exactly what fetching
+# the aarch64 build onto an x86_64 box produces). `command -v` reports success for
+# every one of those, which would leave core.pager aimed at a binary that cannot
+# execute — precisely the breakage this function exists to prevent, since
+# `git diff` then dies with "unable to execute pager 'delta'" and exit 128.
+#
+# A SYSTEM-packaged delta is a legitimate delta. If any delta still runs after
+# ours has been removed, the wiring is still valid and is left untouched.
+#
+# Silence: nothing to remove => completely silent, exit 0. Keys actually removed
+# => exactly ONE informational line, because silently rewriting a user's global
+# git config is worse than saying so. It is a notice, not an error.
+#
+# Every git call is guarded and its stderr suppressed: `--unset` on an absent key
+# exits 5 and `--remove-section` on an absent section exits 128 (and prints
+# "fatal: no such section"), and both call sites run under `set -e`.
+#
+# No locking, deliberately: rc.sh gates the greet behind a `set -C` stamp in
+# $XDG_RUNTIME_DIR, so exactly one shell per login session reaches this. A lost
+# race degrades to "heals next session", never to an error.
+df_delta_gitconfig_reconcile() {
+	command -v git >/dev/null 2>&1 || return 0
+
+	# Operability, not presence — see above. Do not "simplify" to command -v.
+	if delta --version >/dev/null 2>&1; then
+		return 0
+	fi
+
+	# Stay completely silent when there is nothing of ours to remove.
+	_dg_had=0
+	for _dg_k in core.pager interactive.diffFilter \
+		delta.navigate delta.side-by-side delta.line-numbers; do
+		if git config --global --get "${_dg_k}" >/dev/null 2>&1; then
+			_dg_had=1
+		fi
+	done
+	if [ "${_dg_had}" -eq 0 ]; then
+		return 0
+	fi
+
+	# Surgical, as with podman's config and ghostty's terminfo: unset only the
+	# keys we set. NEVER --remove-section core or --remove-section interactive —
+	# the user keeps unrelated settings in both (excludesfile, singleKey, …).
+	# Only [delta] is ours end to end, so only it goes wholesale.
+	git config --global --unset core.pager >/dev/null 2>&1 || true
+	git config --global --unset interactive.diffFilter >/dev/null 2>&1 || true
+	git config --global --remove-section delta >/dev/null 2>&1 || true
+	printf 'delta is not runnable — removed its git pager settings (core.pager, interactive.diffFilter, [delta]).\n'
+	return 0
+}
+
 df_die() {
 	printf '%s\n' "$*" >&2
 	exit 1

@@ -59,7 +59,7 @@ zsh has no equivalent gap: `~/.zshenv` is read for *every* zsh, `-c` included.
 | `rc.sh` | rc | The interactive entry point. Detects the shell, sources everything below. |
 | `common.sh` | rc | Shared interactive config: aliases, prompt tools, `~/.keys`, `nvm`. |
 | `bash.sh` | rc | bash-only delta: `shopt`, history vars, PS1 fallback, bash-completion. |
-| `zsh.sh` | rc | zsh-only delta: `setopt`, `HISTFILE`/`SAVEHIST`, `bindkey -v`. |
+| `zsh.sh` | rc | zsh-only delta: `setopt`, `HISTFILE`/`SAVEHIST`, `bindkey -v`, the site-functions `$fpath` entry. |
 | `doctor.sh` | rc | `dotfiles-doctor` and its registry (hyphenated name — see below). |
 | `env.d/*.sh` | env | Host-local PATH/exports. **Not managed by chezmoi.** |
 | `local.d/*.sh` | rc | Host-local aliases/completions/`$fpath`. **Not managed by chezmoi.** |
@@ -76,7 +76,9 @@ Three invariants inside that order:
 
 - **`compinit` runs last** *of the completion setup*, because `local.d/` may extend
   `$fpath` (the grok completions do). Initialising completions before that point
-  silently drops them.
+  silently drops them. The same rule governs the site-functions entry added in
+  `zsh.sh` (below): `zsh.sh` is sourced at step 3 of the rc chain, well before
+  `compinit`, which is exactly why the line lives there.
 - **Tool completion inits run *after* `compinit`.** `starship`/`fzf`/`tv`/`herdr`/`broot`
   are eval'd from `dotfiles_tool_init` (defined in `common.sh`), which `rc.sh` calls
   only after the `compinit` step. `tv init` ends with an unguarded `compdef _tv tv`
@@ -134,6 +136,50 @@ split accordingly: its `path_prepend "$HOME/.grok/bin"` lives in `env.d/50-grok.
 its completions/`fpath` line in `local.d/50-grok.sh`. The `fpath=(…)` line in
 particular *cannot* be re-sourced (it stacks duplicates), which is the concrete
 reason the two directories are separate rather than one sourced from both layers.
+
+## Completion *files*: the site-functions scheme
+
+`dotfiles_tool_init` (next section) can only carry tools that **print** a snippet
+to stdout. fetch.bins slots 18–21 (`fd`, `bat`, `delta`, `xh`) ship completion
+**files** instead — three extract them from their release tarball, delta generates
+its own — so they need a different route:
+
+| | zsh | bash |
+|---|---|---|
+| directory | `${XDG_DATA_HOME:-~/.local/share}/zsh/site-functions` | `${XDG_DATA_HOME:-~/.local/share}/bash-completion/completions` |
+| filename | `_<tool>` (autoload name) | `<tool>` |
+| reached by | the `fpath=(…)` line in `zsh.sh` | the sourcing loop in `bash.sh` |
+| written by | `fb_install_completions` in `fetch.bins/_lib.sh` | same |
+
+Four things about this are load-bearing:
+
+- **The directory is not chezmoi-managed, and not `local.d/` either.** The fetchers
+  run on every machine, so the files reproduce themselves; committing them would
+  pin a completion to a version the installed binary may not match. `local.d/` is
+  the wrong home for the opposite reason — it is host-local by definition, and
+  these should reproduce *everywhere*.
+- **zsh files are renamed to `_<tool>` on install.** bat ships its zsh completion as
+  `autocomplete/bat.zsh`, **not** `_bat`. zsh's `$fpath` autoloading keys on the
+  leading-underscore convention, so under its shipped name the file is simply never
+  loaded — with no error and nothing to grep for. `fb_install_completions` therefore
+  renames unconditionally (a no-op for `fd`/`xh`, which already ship `_fd`/`_xh`).
+- **`compinit` is cached.** `rc.sh` runs `compinit -C`, which reuses `~/.zcompdump`
+  rather than rescanning `$fpath`. A newly-fetched completion may not appear until
+  the dump is rebuilt — which reads as "the completions don't work":
+
+      rm -f ~/.zcompdump && exec zsh
+
+- **bash sources the directory explicitly.** bash-completion *does* search this exact
+  path on its own, but `bash.sh` already concedes that bash-completion may not be
+  installed at all, and on such a host nothing would load these files. Sourcing them
+  directly works either way; the files are clap-generated and self-contained.
+  (Upstream caveat: bat's bash completion falls back to `_get_comp_words_by_ref`,
+  a bash-completion helper, so on a host with *no* bash-completion bat's Tab
+  completion errors at completion time. The other three are unaffected.)
+
+Teardown is in lockstep: `fb_remove_completions` deletes only these exact files and
+then `rmdir`s upward, so a shared directory holding a distro package's completions
+survives.
 
 ## Tool integration: print and eval, never "install"
 

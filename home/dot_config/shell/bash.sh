@@ -56,4 +56,31 @@ if ! shopt -oq posix; then
     fi
 fi
 
+# fetch.bins/ slots 18-21 (fd, bat, delta, xh) install bash completions here,
+# named after the command. See _lib.sh's fb_install_completions and the zsh
+# twin of this block in zsh.sh.
+#
+# This is sourced EXPLICITLY rather than left to bash-completion's dynamic
+# loader. bash-completion does search this exact path
+# ($BASH_COMPLETION_USER_DIR/completions, defaulting to
+# $XDG_DATA_HOME/bash-completion/completions) — but the guard above concedes
+# that bash-completion may not be installed at all, and on such a host nothing
+# would ever load these files. Sourcing them directly works in both worlds:
+# they are clap-generated and self-contained, and re-defining a completion is
+# idempotent, so the redundancy where bash-completion IS present is harmless.
+# Four small files, so the cost of losing lazy loading is negligible.
+#
+# (Caveat, upstream's not ours: bat's completion falls back to
+# `_get_comp_words_by_ref` — a bash-completion helper — when `_init_completion`
+# is absent. On a host with no bash-completion at all, bat's Tab completion
+# will error at completion time. The other three are fully self-contained.)
+_dotfiles_bash_completions="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions"
+if [ -d "$_dotfiles_bash_completions" ]; then
+    for _c in "$_dotfiles_bash_completions"/*; do
+        [ -r "$_c" ] && . "$_c"
+    done
+    unset _c
+fi
+unset _dotfiles_bash_completions
+
 return 0 2>/dev/null || true

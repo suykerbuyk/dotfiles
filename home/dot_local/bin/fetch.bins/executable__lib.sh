@@ -335,6 +335,83 @@ install_bin() {
 }
 
 # ----------------------------------------------------------------------
+# Shell completions (slots 18-21: fd, bat, delta, xh)
+#
+# Three of those four ship completion files INSIDE their release tarball; delta
+# generates its own from the binary. Either way the files are a per-machine
+# build artifact, not repo content: the fetchers run everywhere, so the files
+# reproduce without being committed (and committing them would pin a version
+# that may not match the binary actually installed).
+#
+#   fb_install_completions <tool> <zsh-src> <bash-src>
+#
+# Destinations are the XDG user dirs the rc layer knows about:
+#   zsh   ${XDG_DATA_HOME:-~/.local/share}/zsh/site-functions      (on $fpath)
+#   bash  ${XDG_DATA_HOME:-~/.local/share}/bash-completion/completions
+# See doc/shell.md for how each is reached, and why $fpath must be extended
+# BEFORE rc.sh's compinit.
+#
+# THE ZSH FILE IS ALWAYS INSTALLED AS `_<tool>`, whatever it is called in the
+# tarball. zsh's $fpath autoloading keys on the leading-underscore convention,
+# so bat's `autocomplete/bat.zsh` MUST land as `_bat` or it is never loaded —
+# and that failure is SILENT: no error, no warning, just no completions. The
+# rename lives here, once, rather than in four call sites that could each get
+# it wrong. (fd/xh already ship `_fd`/`_xh`, so for them it is a no-op copy.)
+#
+# A missing/unreadable source is a warning, never fatal: a completion file that
+# upstream drops from a future tarball must not take the binary install down
+# with it. install_bin has already run by then.
+# ----------------------------------------------------------------------
+fb_completion_zsh_dir()  { printf '%s' "${XDG_DATA_HOME:-$HOME/.local/share}/zsh/site-functions"; }
+fb_completion_bash_dir() { printf '%s' "${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions"; }
+
+fb_install_completions() {
+    local tool="$1" zsrc="${2:-}" bsrc="${3:-}"
+    local zdir bdir
+    zdir="$(fb_completion_zsh_dir)"
+    bdir="$(fb_completion_bash_dir)"
+
+    if [[ -n "$zsrc" && -r "$zsrc" ]]; then
+        mkdir -p "$zdir"
+        # Autoload name, NOT the tarball's name. See the header note.
+        cp "$zsrc" "${zdir}/_${tool}" && chmod 0644 "${zdir}/_${tool}"
+        echo "  completions: zsh  -> ${zdir}/_${tool}"
+    else
+        echo "  warning: no zsh completion source for ${tool} (${zsrc:-unset})" >&2
+    fi
+
+    if [[ -n "$bsrc" && -r "$bsrc" ]]; then
+        mkdir -p "$bdir"
+        cp "$bsrc" "${bdir}/${tool}" && chmod 0644 "${bdir}/${tool}"
+        echo "  completions: bash -> ${bdir}/${tool}"
+    else
+        echo "  warning: no bash completion source for ${tool} (${bsrc:-unset})" >&2
+    fi
+    return 0
+}
+
+# Teardown twin. Same lockstep rule as the binaries: a fetcher that installs a
+# completion and is absent from the removal path strands the file forever (the
+# tree-sitter bug, applied to a different artifact).
+#
+# SURGICAL, like the podman/ghostty config removals: these dirs are shared user
+# directories that may hold completions from a distro package or another tool,
+# so delete only OUR exact files and then rmdir upward. rmdir fails harmlessly
+# on a non-empty dir, which preserves a foreign one.
+fb_remove_completions() {
+    local tool zdir bdir share
+    zdir="$(fb_completion_zsh_dir)"
+    bdir="$(fb_completion_bash_dir)"
+    share="${XDG_DATA_HOME:-$HOME/.local/share}"
+    for tool in "$@"; do
+        rm -f "${zdir}/_${tool}" "${bdir}/${tool}"
+    done
+    rmdir "$zdir" "$bdir" 2>/dev/null || true
+    rmdir "${share}/zsh" "${share}/bash-completion" 2>/dev/null || true
+    echo "  removed completions for: $*"
+}
+
+# ----------------------------------------------------------------------
 # Removal helper — surgical opposite of install_bin (for single binaries)
 # Reuses fb_check_bin, idempotent, safe (no data loss on unrelated files)
 # ----------------------------------------------------------------------

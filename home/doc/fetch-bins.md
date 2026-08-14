@@ -56,14 +56,21 @@ chezmoi-managed files from `~` (via `chezmoi managed`), removes fetched tools (v
 `NN_fetch.<tool>.sh` must map to an entry in the `remove_bin` loop, to a special
 case, or to the rust block — a tool that installs anything `remove_bin` does not
 know about (a versioned path, a desktop entry, generated config) needs the
-special case. zed, podman and ghostty have one; `tree-sitter` was missed when it
-was added as slot 15 and was stranded by `--uninstall --force` until it was
-added to the loop.
+special case. zed, podman, ghostty and delta have one; `tree-sitter` was missed
+when it was added as slot 15 and was stranded by `--uninstall --force` until it
+was added to the loop.
+
+The rule covers **artifacts, not just binaries**. Slots 18–21 install shell
+completion files, so the uninstall path calls `fb_remove_completions` alongside
+the `remove_bin` loop; delta additionally owns five global git keys, so it gets a
+special case that unsets them. A fetcher whose *side effects* are absent from
+teardown strands them exactly the way tree-sitter's binary was stranded.
 
 ## `fetch.bins/` + `_lib.sh`
 
 Each `NN_fetch.<tool>.sh` sources `_lib.sh` and installs one tool as a **versioned
-static binary** under `~/.local/apps/`, symlinked into `~/.local/bin/`.
+static binary** under `~/.local/apps/`, symlinked into `~/.local/bin/`. There are
+currently **21 slots** (01–21).
 
 Key `_lib.sh` helpers:
 - `fb_init` — dirs, temp dir with cleanup trap, and a guard against running inside
@@ -97,6 +104,10 @@ Key `_lib.sh` helpers:
   symlink or a target that is missing / not executable (no hardcoded versions).
 - `fetch_chezmoi` — fetch the chezmoi static release binary (same `gh_*` pattern).
 - `remove_bin name` — remove a tool's symlink and `~/.local/apps` runtime.
+- `fb_install_completions tool zsh-src bash-src` / `fb_remove_completions tool…` —
+  install (or tear down) shell completion **files** for slots 18–21. The zsh file
+  is always installed as `_<tool>`, whatever it is called upstream. Full scheme,
+  and why the rename is load-bearing: [shell.md](shell.md).
 
 ### Notes on specific tools
 - **Go** (`04_fetch.go.sh`) is symlinked **in place** at `~/.local/apps/<version>/bin/go`
@@ -159,6 +170,108 @@ Key `_lib.sh` helpers:
     equivalent, and the "manage one file, not the directory" rule:
     [multiplexers.md](multiplexers.md). Its network test is gated behind
     `--herdr` (`RUN_HERDR_FETCH=1`), since the fetch is ~21 MB.
+- **fd / bat / delta / xh** (slots **18–21**) are four Rust CLI tools that all
+  follow the ripgrep (slot 03) shape — a single binary in a release `.tar.gz` —
+  and all four also install **shell completions** (see
+  [shell.md](shell.md#completion-files-the-site-functions-scheme)). What is worth
+  knowing is where they differ from ripgrep and from each other:
+  - **All four use raw `uname -m`**, never `fb_arch`. Their asset names carry
+    `x86_64`/`aarch64`, and `fb_arch`'s sed hardcodes `s/aarch64/arm64/`, so it can
+    never emit `aarch64` — a fetcher routed through it 404s on every arm64 box
+    while passing forever on x86_64. Same trap as starship, herdr and ghostty.
+  - **The asset filter is anchored with `endswith(".tar.gz")`.** fd and bat both
+    publish `.deb` files whose names contain `musl` (`fd-musl_10.4.2_amd64.deb`,
+    `bat-musl_0.26.1_musl-linux-amd64.deb`). Their Debian-style arch tokens
+    (`amd64`/`arm64`) exclude them from a raw-`uname -m` match today, but that is
+    luck, not a guard. The filter also says `linux-musl` rather than bare `musl`,
+    which would additionally match the armv7 `musleabihf` builds.
+  - **delta has NO aarch64 musl build** — the one genuinely new hazard here.
+    Upstream publishes musl for `x86_64` only; every other linux asset is `gnu`.
+    The blanket musl filter its three siblings use therefore resolves to nothing on
+    arm64 and the fetcher dies at `gh_asset_url`'s "no matching asset" exit —
+    invisibly from an x86_64 machine. `20_fetch.delta.sh` accordingly **prefers
+    musl and falls back to gnu** in an explicit, commented branch (the probe works
+    because `gh_asset_url`'s `exit 1` happens in a command-substitution subshell,
+    so `|| true` turns "no match" into an empty string instead of killing the
+    script). The other three are musl for both arches and stay musl-only.
+  - **The tag-vs-version split is per-project and is not a bug.** The directory
+    inside each tarball carries the tag *verbatim*. fd/bat/xh tag with a leading
+    `v` (`fd-v10.4.2-…`) so they interpolate `${TAG_NAME}`; delta tags **without**
+    one (`delta-0.19.2-…`) so it uses `${VERSION}`. Applying ripgrep's
+    `VERSION="${TAG_NAME#v}"` idiom uniformly is correct for delta and wrong for
+    the other three.
+  - **delta is inert as a bare binary**, so `20_fetch.delta.sh` also wires it into
+    git — see the next bullet.
+- **delta's git wiring is imperative, by design.** After a successful install,
+  `20_fetch.delta.sh` runs `git config --global` for exactly five keys:
+  `core.pager`, `interactive.diffFilter`, and `delta.{navigate,side-by-side,line-numbers}`.
+  This is the podman/ghostty precedent — a fetcher owning host-local config the
+  committed tree does not carry — rather than a chezmoi-managed `~/.gitconfig`.
+  - **Why not managed:** three other writers already own parts of that file (`gh`
+    writes the credential helpers, `vp` writes its merge driver, and `git config
+    --global` writes on any manual change), so a declarative copy would fight all
+    three forever. It would also be dangerous: this user's git identity is
+    deliberately **per-host** (nine distinct author emails across the public
+    history), and a managed file carrying a hardcoded `[user] email` would silently
+    re-attribute commits on every machine at the next apply. Owning only five keys
+    removes that hazard entirely — the rest of the file is never read or restated.
+  - **Idempotent:** `git config --global <key> <value>` replaces in place, so
+    re-running never duplicates a line or a section.
+  - **Ordering is a safety property.** The keys are set only *after* `install_bin`
+    succeeds. `core.pager = delta` with no delta on PATH does not degrade — `git
+    diff` dies with `fatal: unable to execute pager 'delta'` and exit 128, printing
+    no diff at all; an unset-less `interactive.diffFilter` likewise breaks
+    `git add -p` with "mismatched output from interactive.diffFilter". A
+    pre-existing non-delta `core.pager` is overwritten (that is the point) but is
+    reported on stderr rather than silently swallowed.
+  - **Teardown is a special case, not a `for b in …` loop entry**, since
+    `remove_bin` knows nothing about git config — and it is *conditional*. See
+    the reconcile below.
+- **`df_delta_gitconfig_reconcile` (`lib/df-common.sh`) owns removing those keys.**
+  One rule — *"if delta cannot run, drop the five keys; otherwise leave them"* —
+  with **one implementation and two call sites**, so the two paths cannot drift
+  apart about what "delta is available" means:
+  1. **`./doctor`**, the once-per-login health check (`rc.sh` runs
+     `dotfiles-doctor` once per login session era), so a machine whose delta went
+     away self-heals.
+  2. **`update-user-home-dir.sh --uninstall --force`**, immediately *after*
+     `remove_bin delta`.
+  - **The predicate is OPERABILITY, not presence**: `delta --version`, never
+    `command -v delta` and never `df_have`. delta is the one fetcher with a gnu
+    fallback on architectures with no musl build, so *present-but-not-runnable* is
+    a real state for it — wrong glibc, dangling symlink, cross-arch ELF.
+    `command -v` reports success for all of those and would leave `core.pager`
+    aimed at a binary that cannot execute, which is exactly the breakage the
+    reconcile exists to prevent. The harness pins this with a stub that **exists
+    and is executable but exits non-zero**; that assert fails the moment anyone
+    "simplifies" the predicate.
+  - **A system-packaged delta is a legitimate delta.** If one still runs after
+    ours is gone, the wiring is still valid and is left alone. This is why
+    uninstall does not unset unconditionally.
+  - **Ordering is load-bearing in uninstall:** the reconcile runs *after*
+    `remove_bin delta`. Checking first would find our own binary still on PATH,
+    always conclude "keep", and never clean the wiring — a bug that looks exactly
+    like the feature working.
+  - **Surgical:** `--unset core.pager`, `--unset interactive.diffFilter`,
+    `--remove-section delta`, each guarded with `|| true` and its stderr
+    suppressed (`--unset` on an absent key exits 5, `--remove-section` on an
+    absent section exits 128, and both callers run under `set -e`). It **never**
+    does `--remove-section core` or `--remove-section interactive`: the user keeps
+    unrelated settings in both (`excludesfile`, `singleKey`, …). Only `[delta]` is
+    ours end to end.
+  - **Silence:** nothing to remove ⇒ completely silent. Keys actually removed ⇒
+    exactly one informational line, because silently rewriting a user's global git
+    config is worse than saying so.
+  - **No locking needed:** `rc.sh` gates the greet behind a `set -C` stamp in
+    `$XDG_RUNTIME_DIR`, so exactly one shell per login session reaches it. A lost
+    race degrades to "heals next session", never to an error.
+  - **Note the character change:** `./doctor` was a read-only health *report*.
+    This makes it mutate state in one narrow case (five keys we set ourselves,
+    only when their target is broken). That is deliberate and is **not** licence
+    for other checks to start self-healing.
+  - **Not covered:** nothing re-adds the keys if a *system* delta later appears on
+    a machine where the fetcher never ran. The fetcher owns setting them. A
+    considered omission, not an oversight.
 - **podman** (`12_fetch.podman.sh`) is **not** a single-binary `install_bin`
   fetcher — it mirrors the go whole-tree pattern. The `mgoltzsche/podman-static`
   release tarball is a complete static userland (podman + crun/runc/pasta/

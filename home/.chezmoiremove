@@ -21,3 +21,13 @@
 # source alone would leave them applied in ~ forever.
 .config/kitty/kitty.typecraft.conf
 .config/kitty/kitty.um690.conf
+
+# The Future Tech Holdings Teleport login helper. That site is no longer
+# operational, so the script logs into a cluster that does not exist. Same orphan
+# rule as alacritty above — and it matters more here, because the applied copy is
+# an EXECUTABLE on PATH: left behind, `tsh-login-fth.sh` stays tab-completable and
+# still shells out to `op item get "FTH Teleport"` against a dead proxy.
+#
+# Its sibling home/dot_local/bin/executable_tsh-login-syketech.sh is NOT retired —
+# that cluster is live. See the tsh-login-op-hardening task.
+.local/bin/tsh-login-fth.sh

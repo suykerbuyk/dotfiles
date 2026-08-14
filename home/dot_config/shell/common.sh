@@ -80,6 +80,16 @@ dotfiles_tool_init() {
 
 df_have fzf && df_have tmux && export FZF_DEFAULT_OPTS='--tmux center'
 
+# fzf's ^R widget defaults to FUZZY matching, so a query is treated as scattered
+# characters rather than a substring: searching `dang` matched 693 entries here,
+# most of them because d-a-n-g appears in that order somewhere in the line. Exact
+# matching is what people actually mean when searching shell history, and it cuts
+# the candidate set far harder than any zsh dedupe option.
+#
+# Scoped to ^R on purpose. FZF_DEFAULT_OPTS above would force --exact on file and
+# directory pickers too, where fuzzy matching is the point.
+df_have fzf && export FZF_CTRL_R_OPTS='--exact'
+
 # --- nvm ----------------------------------------------------------------------
 # $NVM_DIR is exported by env.sh (it is environment). Sourcing nvm.sh is not: it
 # defines the `nvm` shell function and costs ~150 ms, which would be a tax on
