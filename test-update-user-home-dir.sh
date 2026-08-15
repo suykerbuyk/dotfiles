@@ -1051,6 +1051,122 @@ assert ".chezmoiremove retires applied fth script"  "grep -q '^.local/bin/tsh-lo
 # two asserts above would still pass if someone deleted both scripts.
 assert "syketech login helper still present"        "[[ -f home/dot_local/bin/executable_tsh-login-syketech.sh ]]"
 
+# --- tsh-login-syketech hardening (iter 46) ---------------------------------
+# The helper obtains a PERSISTENT Teleport certificate, and that path keeps a
+# password + OTP prompt indefinitely: the enrolled WebAuthn credential is a
+# 1Password passkey, reachable only through a browser, while `tsh` is a separate
+# WebAuthn client speaking CTAP over libfido2 (measured: `tsh login
+# --auth=passwordless` -> "no security keys found"). There is no headless login
+# to fall back on either -- `--headless` is a per-command flag on `tsh ls`/`ssh`/
+# `scp` only. Only a USB security key would retire these asserts.
+#
+# The helper answers those prompts by driving `tsh` under a pty, which is why
+# there is no multiplexer branch to assert: tmux, herdr and a bare terminal all
+# take one identical path. herdr exposes no buffer or clipboard command at all,
+# so the old `tmux set-buffer` approach had nothing to port to.
+TSHL="home/dot_local/bin/executable_tsh-login-syketech.sh"
+# The embedded driver, extracted the same way the script writes it out. The
+# `cat` line is TAB-INDENTED, so anchoring this on ^cat matched nothing and the
+# extraction came back empty -- and ast.parse("") succeeds, so the parse assert
+# passed vacuously. Mutation testing caught it; the non-empty check below is what
+# stops it regressing to a vacuous pass again.
+tshl_pydriver() { sed -n '/cat >"$driver"/,/^PYDRIVER$/p' "$TSHL" | sed '1d;$d'; }
+
+assert "tsh-login: bash parses"                     "bash -n $TSHL"
+if command -v python3 >/dev/null 2>&1; then
+    assert "tsh-login: embedded driver was actually extracted" \
+        "[[ \$(tshl_pydriver | wc -l) -gt 20 ]]"
+    assert "tsh-login: embedded python parses" \
+        "tshl_pydriver | python3 -c 'import ast,sys; src=sys.stdin.read(); assert src.strip(); ast.parse(src)'"
+else
+    skip "tsh-login: embedded python parses (no python3)"
+fi
+assert "tsh-login: keeps its SPDX banner"           "grep -q '^# SPDX-License-Identifier: MIT OR Apache-2.0$' $TSHL"
+
+# The applied name is chezmoi's to decide, not this script's to assert. A
+# hardwired name goes stale silently: the messages keep naming a file that no
+# longer exists. NEGATIVE half is comment-stripped -- the rationale comment names
+# the script, and a raw grep would match its own explanation.
+assert "tsh-login: derives its name from arg0"      "grep -q 'me=\"\${0##\*/}\"' $TSHL"
+assert "tsh-login: no hardwired script name"        "[[ -z \$(nocomment $TSHL | grep -F 'tsh-login-syketech:') ]]"
+
+# Scoped to the proxy: a bare `tsh status` exits 0 while logged in to ANY
+# cluster, so an unscoped guard would skip the login we actually need.
+assert "tsh-login: cert check is proxy-scoped"      "nocomment $TSHL | grep -q 'tsh status --proxy='"
+# ORDERING, on comment-stripped source: the point of the cert check is to avoid
+# waking `op` (a biometric prompt) when the session is still valid.
+assert "tsh-login: cert check precedes any op call" \
+    "[[ \$(nocomment $TSHL | grep -n 'tsh status' | head -1 | cut -d: -f1) -lt \$(nocomment $TSHL | grep -n 'op item get' | head -1 | cut -d: -f1) ]]"
+assert "tsh-login: op guard precedes any op call" \
+    "[[ \$(nocomment $TSHL | grep -n 'command -v op' | head -1 | cut -d: -f1) -lt \$(nocomment $TSHL | grep -n 'op item get' | head -1 | cut -d: -f1) ]]"
+assert "tsh-login: guards tsh as well as op"        "nocomment $TSHL | grep -q 'command -v tsh'"
+# NEGATIVE: df_have is a SOURCED rc-layer function and this file sources nothing,
+# so requiring it would fail a correct script.
+assert "tsh-login: does not reach for df_have"      "[[ -z \$(nocomment $TSHL | grep 'df_have') ]]"
+
+# COUNT, not presence: an earlier version fetched the password twice -- once into
+# a variable it never read, once inline for a paste buffer -- which a
+# "string exists somewhere" assert cannot see.
+assert "tsh-login: exactly one op call per secret"  "[[ \$(nocomment $TSHL | grep -c 'op item get') -eq 2 ]]"
+
+# THE herdr FIX, asserted as an absence. Any multiplexer- or clipboard-specific
+# call is a regression: it would mean one multiplexer got a convenience the other
+# could not, and a live secret parked in a shared surface. Comment-stripped,
+# because the script explains at length why each of these was removed.
+assert "tsh-login: no multiplexer or clipboard branch" \
+    "[[ -z \$(nocomment $TSHL | grep -nEi 'tmux|herdr|wl-copy|xclip|xsel|set-buffer|clipboard|HERDR_|\\\$TMUX') ]]"
+
+# python3 is a SOFT dependency, matching how the rest of the repo treats it (one
+# of four fb_unzip backends, never required).
+assert "tsh-login: python3 is a soft dependency"    "nocomment $TSHL | grep -q 'command -v python3'"
+assert "tsh-login: has a no-python3 fallback"       "nocomment $TSHL | grep -q 'python3 not found'"
+
+# Secrets reach the driver on STDIN. Never argv (/proc/PID/cmdline is
+# WORLD-readable) and never the environment. The second assert is the one that
+# matters: it reads the actual driver invocation and requires no secret on it.
+# Written without $pass/$otp in the pattern on purpose: the harness eval()s the
+# assert string, so a bare $pass in it expands to nothing under `set -u` and
+# takes the assert down with it. Match the printf FORM instead, pinned to the
+# driver invocation with -B1.
+assert "tsh-login: driver is fed from a pipe, not argv" \
+    "nocomment $TSHL | grep -B1 'python3 \"\$driver\"' | grep -q \"printf '%s.n%s.n'\""
+# -A2, not a single line: the invocation is line-continued, and an earlier
+# version of this assert read only the first line -- a secret appended to the
+# continuation sailed straight past it. Mutation testing caught that.
+assert "tsh-login: no secret on the driver command line" \
+    "[[ -z \$(nocomment $TSHL | grep -A2 'python3 \"\$driver\"' | grep -E '\\\$pass|\\\$otp') ]]"
+assert "tsh-login: driver temp file is trapped for removal" \
+    "nocomment $TSHL | grep -qE 'trap .rm -f .\\\$driver.* EXIT INT TERM'"
+
+# POSITIVE, and deliberately so. Human ruling 2026-08-15: the OTP is printed on
+# stdout. A known exposure -- tmux-pane-log can persist it, and it sits in
+# scrollback -- weighed and accepted for convenience. Asserted so that "fixing"
+# it trips the suite and reopens the ruling instead of silently changing
+# behaviour. It applies to the manual fallback; the pty path types the code and
+# never displays it, which is why this assert must NOT require it on both paths.
+assert "tsh-login: OTP on stdout is a RULING"       "nocomment $TSHL | grep -q 'One time password'"
+# --ttl is MINUTES: 1800 is 30 HOURS, already at Teleport's typical hard cap.
+assert "tsh-login: --ttl stays 1800 (30 HOURS)"     "[[ \$(nocomment $TSHL | grep -c -- '--ttl 1800') -eq 2 ]]"
+
+# Enrolling a WebAuthn passkey CHANGED tsh's MFA prompt, mid-task and without
+# warning: with one factor it read "Enter an OTP code from a device:", with two
+# it reads "Tap any security key or enter a code from a OTP device" -- which does
+# not contain "OTP code". A single-literal matcher missed it and the live login
+# hung with the code in hand and never sent. Two defences, both asserted.
+#
+# 1. Make the prompt DETERMINISTIC rather than something to pattern-match.
+assert "tsh-login: pins --mfa-mode on both paths" \
+    "[[ \$(nocomment $TSHL | grep -c -- '--mfa-mode=\"\$mfa_mode\"') -eq 2 ]]"
+assert "tsh-login: --mfa-mode is overridable"       "nocomment $TSHL | grep -q 'TSH_LOGIN_MFA_MODE'"
+# 2. Match a SET of cues anyway -- a silent hang is the expensive failure. This
+#    is a COUNT: a lone literal is exactly the bug, so presence proves nothing.
+assert "tsh-login: OTP cue is a set, not one literal" \
+    "[[ \$(tshl_pydriver | grep -c 'OTP_CUES = ') -eq 1 ]]"
+assert "tsh-login: OTP cue set covers both prompt forms" \
+    "[[ \$(tshl_pydriver | grep 'OTP_CUES = ' | grep -o 'b\"' | wc -l) -ge 3 ]]"
+assert "tsh-login: warns when the OTP prompt is unrecognised" \
+    "tshl_pydriver | grep -q 'no OTP prompt recognised'"
+
 # kitty takes the LAST occurrence of a setting, so a second active font_family
 # silently overrides the first. kitty.conf carried a trailing
 # `font_family monospace` that beat the line above it, so the terminal rendered
