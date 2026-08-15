@@ -215,6 +215,64 @@ Two invocation details that are easy to get wrong:
   points `~/.zshrc` at the bash launcher. Any code that reads a *per-shell*
   launcher path silently does nothing under zsh.
 
+### `^R` belongs to fzf, `^T` to tv — a ruling, not a default
+
+Two of the five bind the same keys. `fzf --<shell>` binds `^R`, `^T` and `Alt-C`;
+`tv init <shell>` binds `^R` and `^T`. tv is eval'd **after** fzf in the table
+above, so by plain line order tv won both — for two months, with nothing
+anywhere recording that a choice had been made.
+
+That is not cosmetic, because the two `^R` widgets differ in exactly the
+property people care about:
+
+| | dedupes candidates | reads `$FZF_CTRL_R_OPTS` |
+|---|---|---|
+| `fzf-history-widget` | **yes** — `if (!seen[cmd]++)` | **yes** |
+| `_tv_shell_history` | **no** — `history -n -1 0 \| tv …`, raw | no |
+
+So `^R` had no dedupe at all, and the `FZF_CTRL_R_OPTS='--exact'` set in
+`common.sh` was **inert** — it is read only inside the widget that nothing was
+invoking. A fuzzy-matching complaint that `--exact` was written to fix stayed
+broken and was believed fixed, which is worse than either being broken or being
+fixed.
+
+`dotfiles_tool_init` therefore ends by rebinding `^R` to fzf's widget, leaving
+`^T` with tv. Two properties of that fix are load-bearing:
+
+- it is **inside** `dotfiles_tool_init`, after the tv eval. Outside the function
+  it would run once at startup and be silently undone by the first
+  `dotfiles-reinit`, which re-runs tv's init.
+- it **degrades to a no-op**, not to a broken key. If fzf ever renames the
+  widget, `^R` keeps tv's binding rather than binding nothing. The harness
+  asserts the binding behaviourally against stubs that reproduce the contest, so
+  a rename surfaces as a red test instead of a dead keystroke.
+
+### Staleness: `dotfiles-reinit` and the `tool-init` row
+
+`dotfiles_tool_init` evals each integration exactly **once**, at shell start.
+Phase 5 of the installer then replaces those same binaries underneath shells that
+are already running, and nothing reconciles the two — so a long-lived shell
+(herdr and tmux sessions here live for weeks) keeps the old integration
+indefinitely, with nothing to grep and no version mismatch anywhere a user would
+look. Stale integration is indistinguishable from a bug in the tool.
+
+Two halves close it:
+
+- **`dotfiles-reinit`** re-runs the integrations in place. It is a thin wrapper
+  over `dotfiles_tool_init` — one implementation, so the manual and startup paths
+  cannot drift. Re-running is safe: measured idempotent, with hook arrays,
+  keybindings and the widget list byte-identical across runs. (starship adds one
+  wrapper function on the second call and then converges; runs 3–5 add nothing.)
+- **`dotfiles_tool_init` exports `DOTFILES_TOOL_INIT_EPOCH`**, and `./doctor`
+  compares it against the mtime of each of the five binaries. `export` is
+  required — doctor is a child process and reads it from the environment.
+
+The comparison **must** dereference (`stat -Lc %Y`). These are
+`~/.local/bin/<tool>` symlinks whose mtime tracks neither the tool nor the
+upgrade: measured here, fzf's link was four months *older* than its binary while
+starship's was *newer* than its own. A check without `-L` reports `ok` forever
+and greps perfectly clean.
+
 ### `installed-v4` is tracked on purpose
 
 `home/dot_config/broot/launcher/installed-v4` is a chezmoi-managed file whose
@@ -258,7 +316,21 @@ $ dotfiles-doctor
   herdr     ok    /home/johns/.local/bin/herdr
   tv        n/a   not provisioned by fetch.bins
   keychain  n/a   superseded by ~/.config/bashrc.d/10-ssh-agent.sh
+  tool-init ok    integrations current
 ```
+
+The `tool-init` row is the staleness check described above. It has three states,
+and only the first is a call to action:
+
+```
+  tool-init STALE fzf, starship newer than this shell's integrations — run: dotfiles-reinit
+  tool-init ok    integrations current
+  tool-init n/a   no stamp (non-interactive shell)
+```
+
+`n/a` is not a failure. A non-interactive shell never runs the rc layer, so it
+has no integrations and nothing to be stale; only an *interactive* shell missing
+the stamp would be interesting, and doctor cannot tell the two apart.
 
 A missing tool names the exact installer that fixes it. The installer path is
 resolved by **globbing** `fetch.bins/*_fetch.<stem>.sh` rather than hardcoding the

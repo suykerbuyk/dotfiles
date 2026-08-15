@@ -92,6 +92,38 @@ df_doctor_report() {
 		printf '  %-9s %-5s system package, not provisioned by this repo (/opt/rocm)\n' 'rocm' 'n/a'
 	fi
 
+	# Tool-integration staleness. dotfiles_tool_init evals each tool's shell
+	# integration ONCE, at shell start, and exports DOTFILES_TOOL_INIT_EPOCH when
+	# it does. Phase 5 of the installer then replaces those same binaries
+	# underneath shells that are already running, and nothing reconciles the two,
+	# so a long-lived shell keeps the old integration indefinitely — silently,
+	# with nothing to grep and no version mismatch anywhere a user would look.
+	#
+	# stat MUST dereference (-L). These are ~/.local/bin/<tool> symlinks into
+	# ~/.local/apps/, and the link mtime tracks neither the tool nor the upgrade:
+	# measured here, fzf's link was 4 months OLDER than its binary while
+	# starship's was NEWER than its own. Only the resolved binary answers the
+	# question, so a check without -L would sit there reporting `ok` forever.
+	_stale=
+	if [ -n "${DOTFILES_TOOL_INIT_EPOCH:-}" ]; then
+		for _t in starship fzf tv herdr broot; do
+			_p=$(command -v "${_t}" 2>/dev/null) || continue
+			_m=$(stat -Lc %Y "${_p}" 2>/dev/null) || continue
+			[ "${_m}" -gt "${DOTFILES_TOOL_INIT_EPOCH}" ] && _stale="${_stale}${_stale:+, }${_t}"
+		done
+		if [ -n "${_stale}" ]; then
+			printf '  %-9s %-5s %s\n' 'tool-init' 'STALE' \
+				"${_stale} newer than this shell's integrations — run: dotfiles-reinit"
+		else
+			printf '  %-9s %-5s %s\n' 'tool-init' 'ok' 'integrations current'
+		fi
+	else
+		# Not a failure: a non-interactive shell never runs the rc layer, so
+		# there is nothing to be stale. Only an INTERACTIVE shell missing the
+		# stamp would be interesting, and doctor cannot tell the difference.
+		printf '  %-9s %-5s %s\n' 'tool-init' 'n/a' 'no stamp (non-interactive shell)'
+	fi
+
 	# Secrets triad (see ./keys or dotfiles-keys).
 	if [ -r "${HOME}/.keys" ]; then
 		printf '  %-9s %-5s %s\n' 'keys' 'ok' \

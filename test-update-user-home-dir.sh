@@ -445,6 +445,148 @@ if [[ -n "$CHEZMOI" ]]; then
         skip "real broot --print-shell-function contract (broot not installed)"
     fi
 
+    # --- ^R ownership + tool-init staleness -----------------------------------
+    # `tv init` binds ^R and ^T and runs AFTER fzf's eval inside
+    # dotfiles_tool_init, so television silently won ^R for two months (iter 44).
+    # That is not cosmetic: fzf's widget dedupes its candidates and is the only
+    # one that reads $FZF_CTRL_R_OPTS, so ^R had no dedupe and the '--exact' set
+    # in common.sh was INERT. Ruling: ^R belongs to fzf, ^T stays tv's.
+    sec "shell: ^R belongs to fzf, ^T to tv"
+
+    ti="$(sed -n '/^dotfiles_tool_init()/,/^}/p' "$SRC/dot_config/shell/common.sh")"
+    # Structural. The rebind must live INSIDE the function: outside it, a
+    # dotfiles-reinit re-runs tv's init and hands ^R straight back — the exact
+    # failure this whole section exists to prevent.
+    assert "the ^R rebind lives inside dotfiles_tool_init" \
+        "grep -q \"bindkey '\\^R' fzf-history-widget\" <<<\"\$ti\""
+    # Ordering is the whole mechanism, so it gets its own assert — but it must
+    # read COMMENT-STRIPPED code. The comment above the rebind explains it in
+    # terms of "tv init", so a raw grep matches the rationale instead of the
+    # eval and the line numbers come back as a multi-line mess. (Written raw
+    # first; it failed exactly that way.)
+    ti_code="$(sed 's/#.*//' <<<"$ti")"
+    assert "the ^R rebind comes AFTER the tv eval" \
+        "[[ \$(grep -n 'tv init' <<<\"\$ti_code\" | head -1 | cut -d: -f1) -lt \$(grep -n bindkey <<<\"\$ti_code\" | head -1 | cut -d: -f1) ]]"
+    assert "the tool-init stamp is set inside dotfiles_tool_init" \
+        "grep -q 'DOTFILES_TOOL_INIT_EPOCH=' <<<\"\$ti\""
+    # Exported on purpose: ./doctor is a child process and reads it from the
+    # environment. A bare assignment would leave doctor permanently reporting n/a.
+    assert "the tool-init stamp is exported" \
+        "grep -q 'export DOTFILES_TOOL_INIT_EPOCH' <<<\"\$ti\""
+
+    # One implementation, not two — a second copy of the evals is how the manual
+    # and startup paths drift apart.
+    reinit="$(sed -n '/^dotfiles-reinit()/,/^}/p' "$SRC/dot_config/shell/common.sh")"
+    assert "dotfiles-reinit is defined" "[[ -n \"\$reinit\" ]]"
+    assert "dotfiles-reinit routes through dotfiles_tool_init" \
+        "grep -q 'dotfiles_tool_init' <<<\"\$reinit\""
+    assert "dotfiles-reinit reimplements none of the evals" \
+        "[[ \$(grep -c 'eval ' <<<\"\$reinit\") -eq 0 ]]"
+
+    # Behavioural, via stubs shaped like the real emitters, so this reproduces
+    # the CONTEST (tv rebinding ^R after fzf) whether or not either tool is
+    # installed on the box running the suite.
+    if command -v zsh >/dev/null 2>&1; then
+        # Shell-aware, because the two shells lose ^R by different mechanisms:
+        # zsh via `bindkey`, bash via `bind -x`. The bash fzf stub only DEFINES
+        # __fzf_history__ — common.sh's bash branch guards on that function
+        # existing and issues the bind itself, which is the behaviour under test.
+        cat > "$SB/.local/bin/fzf" <<'FZFSTUB'
+#!/bin/sh
+case "$1" in
+  --zsh)  printf '%s\n' \
+            'fzf-history-widget() { :; }' \
+            'zle -N fzf-history-widget' \
+            "bindkey '^R' fzf-history-widget" ;;
+  --bash) printf '%s\n' \
+            '__fzf_history__() { :; }' ;;
+esac
+exit 0
+FZFSTUB
+        cat > "$SB/.local/bin/tv" <<'TVSTUB'
+#!/bin/sh
+[ "$1" = init ] || exit 0
+case "$2" in
+  zsh)  printf '%s\n' \
+          'tv-shell-history() { :; }' \
+          'tv-smart-autocomplete() { :; }' \
+          'zle -N tv-shell-history' \
+          'zle -N tv-smart-autocomplete' \
+          "bindkey '^R' tv-shell-history" \
+          "bindkey '^T' tv-smart-autocomplete" ;;
+  bash) printf '%s\n' \
+          'tv_shell_history() { :; }' \
+          'bind -m emacs-standard -x '"'"'"\C-r": tv_shell_history'"'"' 2>/dev/null' ;;
+esac
+exit 0
+TVSTUB
+        chmod +x "$SB/.local/bin/fzf" "$SB/.local/bin/tv"
+
+        r="$(sh_probe zsh 'bindkey "^R"')"
+        assert "zsh: ^R is fzf's widget, not tv's" "[[ '$r' == *fzf-history-widget* ]]"
+        t="$(sh_probe zsh 'bindkey "^T"')"
+        assert "zsh: ^T is left to tv" "[[ '$t' == *tv-smart-autocomplete* ]]"
+        # THE assertion for the inside-the-function rule. If the rebind ever
+        # moves out of dotfiles_tool_init this goes red while everything above
+        # stays green.
+        r2="$(sh_probe zsh 'dotfiles-reinit >/dev/null 2>&1; bindkey "^R"')"
+        assert "zsh: ^R survives a dotfiles-reinit" "[[ '$r2' == *fzf-history-widget* ]]"
+
+        e="$(sh_probe zsh 'printf "%s" "${DOTFILES_TOOL_INIT_EPOCH:-UNSET}"')"
+        assert "zsh: tool-init stamp is set and numeric" "[[ '$e' =~ ^[0-9]+$ ]]"
+
+        # Idempotency, behaviourally — this is what makes dotfiles-reinit safe to
+        # recommend at all. Compares the WHOLE keymap plus the hook arrays, not a
+        # sampled key: a double-registered precmd would be a worse bug than the
+        # staleness this fixes.
+        idem="$(sh_probe zsh 'a="$(bindkey; print -l $precmd_functions $preexec_functions)"; dotfiles_tool_init >/dev/null 2>&1; b="$(bindkey; print -l $precmd_functions $preexec_functions)"; [ "$a" = "$b" ] && printf SAME || printf DIFF')"
+        assert "zsh: re-running the init changes no binding and no hook" "[[ '$idem' == SAME ]]"
+
+        # bash loses ^R by a different mechanism (bind -x, not bindkey), so it
+        # needs its own coverage or that branch of common.sh rots unasserted.
+        if command -v bash >/dev/null 2>&1; then
+            rb="$(sh_probe bash 'bind -X 2>/dev/null | grep -i "C-r"')"
+            assert "bash: ^R is fzf's __fzf_history__, not tv's" \
+                "[[ '$rb' == *__fzf_history__* ]]"
+            rb2="$(sh_probe bash 'dotfiles-reinit >/dev/null 2>&1; bind -X 2>/dev/null | grep -i "C-r"')"
+            assert "bash: ^R survives a dotfiles-reinit" \
+                "[[ '$rb2' == *__fzf_history__* ]]"
+            eb="$(sh_probe bash 'printf "%s" "${DOTFILES_TOOL_INIT_EPOCH:-UNSET}"')"
+            assert "bash: tool-init stamp is set and numeric" "[[ '$eb' =~ ^[0-9]+$ ]]"
+        fi
+
+        rm -f "$SB/.local/bin/fzf" "$SB/.local/bin/tv"
+    else
+        skip "^R ownership stub probes (zsh not installed)"
+    fi
+
+    # doctor's staleness row, functionally, in all three states. A dedicated PATH
+    # dir gives a binary whose mtime is definitely 'now'; /usr/bin stays on PATH
+    # because the check itself shells out to stat.
+    sec "doctor: tool-init staleness"
+    TID="$SB/tool-init-probe"; mkdir -p "$TID"; : > "$TID/fzf"; chmod +x "$TID/fzf"
+    ti_row() {
+        env -i HOME="$SB" PATH="$TID:/usr/bin:/bin" \
+            ${1:+DOTFILES_TOOL_INIT_EPOCH="$1"} \
+            sh -c '. "$1"; df_doctor_registry() { :; }; df_doctor_report' sh \
+            "$REPO/lib/doctor-report.sh" 2>/dev/null | grep '^  tool-init'
+    }
+    assert "no stamp => n/a (a non-interactive shell has nothing to be stale)" \
+        "[[ \"\$(ti_row)\" == *'n/a'* ]]"
+    assert "future stamp => ok" \
+        "[[ \"\$(ti_row 9999999999)\" == *' ok '* ]]"
+    assert "ancient stamp => STALE and names the tool" \
+        "[[ \"\$(ti_row 1)\" == *STALE*fzf* ]]"
+    assert "the STALE row names the fix" \
+        "[[ \"\$(ti_row 1)\" == *dotfiles-reinit* ]]"
+    # stat MUST dereference. ~/.local/bin/<tool> are symlinks whose mtime tracks
+    # neither the tool nor the upgrade — measured on this box, fzf's link was four
+    # months OLDER than its binary while starship's was NEWER than its own. A
+    # check without -L reports ok forever and greps perfectly clean.
+    assert "the staleness check dereferences symlinks (stat -L)" \
+        "grep -q 'stat -Lc' lib/doctor-report.sh"
+    rm -rf "$TID"
+
     # --- herdr adopted at parity with tmux -----------------------------------
     sec "herdr: config managed, at parity with tmux"
 
