@@ -80,6 +80,33 @@ assert_file() { [[ -e "$2" ]] && ok "$1" || bad "$1 (missing: $2)"; }
 # this is not used for positive exact-match asserts.
 nocomment() { sed 's/#.*//' "$1"; }
 
+# ---- discover a real POSIX shell -------------------------------------------
+# `sh -n` is NOT a POSIX syntax check. Wherever /bin/sh is a symlink to bash
+# (Arch, Fedora, most rpm distros) `sh` is just bash wearing a thin hat: it
+# still accepts `a=(1 2 3)` and still accepts `foo-bar() { :; }`, a hyphenated
+# function name that dash rejects outright with "Bad function name". This repo
+# shipped that exact defect once while four asserts labelled "valid POSIX sh"
+# stayed green through the whole thing. A checker that cannot fail is not a
+# checker, so find a shell that can.
+#
+# Probe candidates in order and accept the first that PROVES it is not bash or
+# zsh under an assumed name: run it and print $BASH_VERSION$ZSH_VERSION. A
+# genuine POSIX shell has neither variable set and prints an EMPTY line; bash
+# and zsh both leak their version even when invoked as `sh`.
+#
+# `sh` stays on the list (last) rather than being banned outright, because the
+# answer is per-MACHINE, not per-distro: on Debian /bin/sh IS dash and must be
+# accepted, on Arch it is bash and must be rejected. The probe decides; nothing
+# here hardcodes a guess about which box the suite is running on.
+POSIX_SH=""
+for _cand in dash ash mksh posh yash sh; do
+    command -v "$_cand" >/dev/null 2>&1 || continue
+    [[ -z "$("$_cand" -c 'echo "${BASH_VERSION:-}${ZSH_VERSION:-}"' 2>/dev/null)" ]] || continue
+    POSIX_SH="$(command -v "$_cand")"
+    break
+done
+unset _cand
+
 # ---- isolated sandbox ------------------------------------------------------
 CHEZMOI_ON_PATH="$(command -v chezmoi 2>/dev/null || true)"   # capture before HOME moves
 SB="$(mktemp -d)"
@@ -110,6 +137,367 @@ else
     skip "no chezmoi on PATH and --no-net: structural tests will be skipped"
 fi
 chz() { "$CHEZMOI" --source "$SRC" --destination "$SB" --no-tty "$@"; }
+
+# ===========================================================================
+# The POSIX `-n` checks read repo source and need no sandbox and no chezmoi, so
+# this section sits at TOP LEVEL — deliberately outside the `if [[ -n
+# "$CHEZMOI" ]]` block below. It also carries no opt-in flag: every gated group
+# in this harness gates a network fetch (150 MB Go, 48 MB ghostty), and a
+# handful of `-n` parses costs milliseconds, so the gating criterion does not
+# apply. These run in the default structural group, i.e. under --no-net.
+sec "POSIX shell contract"
+if [[ -n "$POSIX_SH" ]]; then
+    ok "POSIX shell found for -n checks: $POSIX_SH"
+
+    # POSITIVE CONTROL — a file that must FAIL the checker.
+    #
+    # home/dot_config/shell/doctor.sh:16 defines `dotfiles-doctor()`. A
+    # hyphenated function name is a hard syntax error in dash ("Bad function
+    # name"), and that name is permanent and intentional: the interactive
+    # command is spelled with a hyphen, so the function must be too.
+    #
+    # That makes it a planted mutation nobody had to plant and nobody can
+    # accidentally revert. No scratch file, no temp fixture, no maintenance. If
+    # this assert ever goes GREEN, the checker lost its teeth — POSIX_SH fell
+    # back to something that is really bash — and every other `-n` assert in
+    # this suite is a false green again. Pair it with the presence check: a
+    # deleted doctor.sh also fails to parse, which would pass for the wrong
+    # reason.
+    #
+    # It pins the layer boundary too. doctor.sh is rc-layer-only (sourced by
+    # rc.sh) precisely BECAUSE dash cannot parse it; the env layer must stay
+    # POSIX-parseable, so a file that fails here may never migrate into it.
+    # This assert is what makes that rule enforced rather than merely written.
+    assert_file "positive control source present" "home/dot_config/shell/doctor.sh"
+    assert "positive control: doctor.sh FAILS the POSIX parse (hyphenated fn)" \
+        "! \"\$POSIX_SH\" -n home/dot_config/shell/doctor.sh 2>/dev/null"
+
+    # ---- SET A: the declared surface, discovered mechanically ---------------
+    # A hardcoded list of filenames is a list that goes stale the day someone
+    # adds a script, and nothing tells them — the same class of silent-drift
+    # failure this whole section exists to kill. So do not keep one: a
+    # `#!/bin/sh` line IS the file's declaration that it is POSIX, so let the
+    # shebang be the enrolment criterion and let the scan find them.
+    #
+    # `git ls-files` rather than `find`: only TRACKED files are the repo's
+    # contract. A scratch copy, an editor backup or a half-written script in
+    # the working tree is nobody's promise and must not turn the suite red.
+    #
+    # Consequence, and the point: a new `#!/bin/sh` script added to this repo
+    # is covered from its first commit, with no edit to this file.
+    POSIX_SHEBANG_RE='^#![[:space:]]*(/bin/sh|/usr/bin/env[[:space:]]+sh)([[:space:]]|$)'
+    POSIX_FILES=()
+    while IFS= read -r _f; do
+        [[ -f "$_f" ]] || continue
+        # `|| [[ -n "$_line" ]]` because read returns NON-ZERO at EOF even when it
+        # populated $_line — a file whose last (here, only) line has no trailing
+        # newline. A bare `|| continue` drops such a file from the scan silently,
+        # which is this section's own vacuous-coverage failure arriving one file
+        # at a time, below the floor's resolution. No such file exists today.
+        IFS= read -r _line < "$_f" || [[ -n "$_line" ]] || continue
+        [[ "$_line" =~ $POSIX_SHEBANG_RE ]] || continue
+        POSIX_FILES+=("$_f")
+    done < <(git ls-files)
+    POSIX_SCANNED=${#POSIX_FILES[@]}
+
+    # FLOOR on the scan, because a discovery loop that matches NOTHING prints no
+    # failures and reads as a clean green — a vacuous pass, which is the exact
+    # shape of bug this section was written to eliminate. A broken regex, a
+    # missing git, a `cd` that landed elsewhere: all of them look identical to
+    # "everything is fine" without this.
+    #
+    # `-ge`, deliberately not `-eq`: the floor asserts the scan still WORKS, not
+    # that the repo is frozen at 14 files. Adding a POSIX script must not turn
+    # the suite red for no reason — it must simply get checked.
+    assert "POSIX shebang scan is not vacuous (>= 14 files, found $POSIX_SCANNED)" \
+        "[[ \$POSIX_SCANNED -ge 14 ]]"
+
+    # ---- SET B: sourced files, which have no shebang to declare with --------
+    # A sourced file never gets a shebang, so set A cannot see it — yet it is
+    # reached by a POSIX shell all the same and is bound by the same contract.
+    # These are enumerated by hand because there is nothing mechanical to read;
+    # each entry says WHO reaches it, which is what makes it a contract.
+    POSIX_FILES+=(
+        home/dot_profile                    # ~/.profile itself: the POSIX entry
+                                            # point. Read by login sh/dash and by
+                                            # display managers; dash on Debian.
+        home/dot_config/shell/env.sh        # sourced by ~/.profile (and .zshenv,
+                                            # .bashrc, rc.sh) — the env layer, so
+                                            # it runs under that dash .profile.
+        home/dot_config/shell/lib.sh        # sourced by env.sh before it touches
+                                            # PATH, i.e. the bottom of the env
+                                            # layer: whatever reaches env.sh
+                                            # reaches this first.
+        lib/df-common.sh                    # sourced by the repo-root CLIs via
+                                            # `. "$(dirname "$0")/lib/df-common.sh"`;
+                                            # doctor/apply/status are #!/usr/bin/env sh.
+        lib/doctor-registry.sh              # sourced by ./doctor (POSIX sh) and,
+                                            # indirectly, by the interactive greet.
+        lib/doctor-report.sh                # sourced by ./doctor (POSIX sh).
+    )
+
+    # DELIBERATELY ABSENT from set B: home/dot_config/shell/doctor.sh.
+    # It is sourced too, but only by rc.sh — the rc layer, which is bash/zsh
+    # only — and it is NOT POSIX on purpose: it defines the hyphenated
+    # `dotfiles-doctor()` that dash rejects outright. It is the positive control
+    # asserted above to FAIL this very parse. Adding it here would break the
+    # suite AND destroy the only thing proving the checker has teeth, so if you
+    # came here to "fix the omission": this is the fix, it is already applied.
+
+    # One assert per file, named by path, so a failure says WHICH file and the
+    # shell's own parse error lands on stderr right beside it.
+    for _f in "${POSIX_FILES[@]}"; do
+        assert "valid POSIX sh: $_f" "\"\$POSIX_SH\" -n '$_f'"
+    done
+    unset _f _line
+
+    # ---- SOURCE + EXECUTE: the classes `-n` structurally cannot see ---------
+    # `-n` is a PARSE check, and that is very nearly all it is. Measured with
+    # this machine's dash against the bashisms most likely to be typed into the
+    # env layer by someone who only ever tested in bash:
+    #
+    #   local x=1                    PARSE-OK    run: non-zero exit
+    #   if [[ -n "$HOME" ]]; …; fi   PARSE-OK    run: exit 0, "[[: not found" on STDERR
+    #   ${HOME/johns/bob}            PARSE-OK    run: non-zero exit
+    #   $((RANDOM))                  PARSE-OK    run: exit 0, silently yields 0
+    #   echo -e "a\tb"               PARSE-OK    run: exit 0, prints "-e a<TAB>b"
+    #   a=(1 2 3)                    PARSE-FAIL  run: non-zero exit
+    #
+    # ONE of six is caught by parsing. Three of the other five succeed with exit
+    # 0 and changed behaviour — the silent kind, which is the kind that ships and
+    # the kind nobody notices for a year.
+    #
+    # So the check that does the real work is to SOURCE the file under a real
+    # POSIX shell and assert all THREE of: exit 0, empty stdout, empty stderr.
+    # Each catches a different class and every one of them has holes on its own,
+    # which is why these are three separate asserts rather than one `&&` — a
+    # failure has to say WHICH class broke, and a combined assert cannot.
+    #
+    # Empty STDOUT is not tidiness. ~/.zshenv sources env.sh for every zsh,
+    # including the one behind `ssh host cmd`, and a single stray byte on stdout
+    # corrupts the binary stream that scp, sftp and rsync are speaking over it.
+    # Empty STDERR is what catches `[[ ]]` under dash, which is otherwise an
+    # exit-0, clean-stdout, completely invisible failure.
+
+    # A DEDICATED temp tree, NOT the harness's $SB. env.sh:40 runs
+    # `mkdir -p "$GOPATH/bin"`, so merely SOURCING it creates $HOME/code/go/bin.
+    # $SB is the chezmoi-applied sandbox that the parity section below walks
+    # entry by entry, and a directory this section invented is a thing that
+    # exists in ~ with no source-tree entry behind it. Keep the two apart.
+    #
+    # The EXIT trap is EXTENDED, not replaced: $SB still has to be removed.
+    POSIX_TMP="$(mktemp -d)"
+    trap 'rm -rf "$SB" "$POSIX_TMP"' EXIT
+    POSIX_HOME="$POSIX_TMP/home"
+
+    # env.sh:36 sources lib.sh from "$HOME/.config/shell/lib.sh" — the APPLIED
+    # location, not a repo-relative path. With nothing there, env.sh takes the
+    # `[ -r … ] || return 0` at line 35 and everything below asserts that six
+    # lines of variable assignment are quiet: a vacuous pass wearing a green
+    # coat. Copy both files from the repo SOURCE so what gets exercised is the
+    # tree as committed, not whatever chezmoi last applied.
+    mkdir -p "$POSIX_HOME/.config/shell"
+    cp home/dot_config/shell/env.sh home/dot_config/shell/lib.sh "$POSIX_HOME/.config/shell/"
+
+    # posix_run <script> — run <script> under $POSIX_SH with the dedicated HOME,
+    # capturing exit code, stdout and stderr SEPARATELY (line counts too, for the
+    # "exactly one line" assert further down). Separate capture is the whole
+    # point: 2>&1 would merge the three classes back into one and undo the
+    # diagnostic split described above.
+    #
+    # ASSERT EMPTINESS ON THE FILE (`[[ ! -s ]]`), NEVER ON $POSIX_OUT. Command
+    # substitution strips ALL trailing newlines, so `out` holding exactly "\n"
+    # — a bare `echo`, which is a REAL scp/sftp/rsync break and the precise
+    # thing the stdout assert is named for — comes back as the empty string and
+    # the assert passes. Measured: a 1-byte file, `[[ -z "$(cat f)" ]]` true,
+    # `[[ ! -s f ]]` false. The variables below are DIAGNOSTICS ONLY (posix_show
+    # and the wc -l counts); they must not carry an emptiness verdict.
+    POSIX_RC=0; POSIX_OUT=""; POSIX_ERR=""; POSIX_OUT_N=0; POSIX_ERR_N=0
+    posix_run() {
+        HOME="$POSIX_HOME" "$POSIX_SH" -c "$1" >"$POSIX_TMP/out" 2>"$POSIX_TMP/err"
+        POSIX_RC=$?
+        POSIX_OUT="$(cat "$POSIX_TMP/out")"; POSIX_ERR="$(cat "$POSIX_TMP/err")"
+        POSIX_OUT_N="$(wc -l < "$POSIX_TMP/out" | tr -d ' ')"
+        POSIX_ERR_N="$(wc -l < "$POSIX_TMP/err" | tr -d ' ')"
+    }
+    # Print what actually leaked, so a red stdout/stderr assert does not cost a
+    # second run to find out what the byte was.
+    # Keyed on FILE SIZE for the same reason the asserts are: a newline-only leak
+    # now correctly fails the emptiness assert, and keying the diagnostic off
+    # $POSIX_OUT would have stayed silent at exactly that moment — a red assert
+    # with no explanation. Byte counts are printed because the whole class of leak
+    # this catches is invisible between brackets.
+    posix_show() {
+        [[ -s "$POSIX_TMP/out" || -s "$POSIX_TMP/err" ]] || return 0
+        printf '    stdout (%s B): [%s]\n    stderr (%s B): [%s]\n' \
+            "$(wc -c < "$POSIX_TMP/out" | tr -d ' ')" "$POSIX_OUT" \
+            "$(wc -c < "$POSIX_TMP/err" | tr -d ' ')" "$POSIX_ERR"
+        return 0
+    }
+
+    # ---- 4a: env.sh, sourced for real --------------------------------------
+    # `unset DOTFILES_ENV_LOADED` first. env.sh:29 returns immediately when it is
+    # set, so an inherited value turns every assert here into a test of the guard
+    # and nothing else. That is safe TODAY only because env.sh:27-28 deliberately
+    # does NOT export it — one `export` away, this whole block silently measures
+    # air. Unsetting makes the test independent of that decision.
+    posix_run 'unset DOTFILES_ENV_LOADED; . "$HOME/.config/shell/env.sh"'
+    assert "env.sh sourced under $POSIX_SH: exit 0"      "[[ $POSIX_RC -eq 0 ]]"
+    assert "env.sh sourced under $POSIX_SH: empty stdout (scp/sftp/rsync)" "[[ ! -s \"$POSIX_TMP/out\" ]]"
+    assert "env.sh sourced under $POSIX_SH: empty stderr (catches [[ ]])"  "[[ ! -s \"$POSIX_TMP/err\" ]]"
+    posix_show
+
+    # The re-entry guard, asserted POSITIVELY. env.sh is reached from four places
+    # and .bashrc/rc.sh can both fire in one shell, so a second source is a real
+    # code path, not a hypothetical. Asserting it stays silent and exit 0 is also
+    # what keeps the deliberate non-export of DOTFILES_ENV_LOADED load-bearing
+    # rather than an accident nobody would notice losing.
+    posix_run 'unset DOTFILES_ENV_LOADED; . "$HOME/.config/shell/env.sh"; . "$HOME/.config/shell/env.sh"'
+    assert "env.sh sourced TWICE in one shell: exit 0"      "[[ $POSIX_RC -eq 0 ]]"
+    assert "env.sh sourced TWICE in one shell: empty stdout" "[[ ! -s \"$POSIX_TMP/out\" ]]"
+    assert "env.sh sourced TWICE in one shell: empty stderr" "[[ ! -s \"$POSIX_TMP/err\" ]]"
+    posix_show
+
+    # ---- 4b: the other two sourced files, standalone ------------------------
+    # Each on its own, not via env.sh: lib.sh is reached by anything that reaches
+    # env.sh, and df-common.sh is sourced directly by the #!/usr/bin/env sh CLIs
+    # at the repo root. Neither may emit a byte merely by being sourced — they
+    # define functions and nothing else, and this is what pins that.
+    for _pf in home/dot_config/shell/lib.sh lib/df-common.sh; do
+        posix_run ". \"$REPO/$_pf\""
+        assert "sourced standalone under $POSIX_SH, exit 0: $_pf"      "[[ $POSIX_RC -eq 0 ]]"
+        assert "sourced standalone under $POSIX_SH, empty stdout: $_pf" "[[ ! -s \"$POSIX_TMP/out\" ]]"
+        assert "sourced standalone under $POSIX_SH, empty stderr: $_pf" "[[ ! -s \"$POSIX_TMP/err\" ]]"
+        posix_show
+    done
+    unset _pf
+
+    # ---- 4c: df_delta_gitconfig_reconcile, actually executed ----------------
+    # The one function here with real side effects on a user's machine — it
+    # rewrites the GLOBAL git config — so it gets a behavioural test rather than
+    # an inspection. Read its header in lib/df-common.sh: every assert below
+    # corresponds to a sentence in it.
+    #
+    # DELIBERATE TWIN — do not "de-duplicate" this against the bash-side tests in
+    # sec "structural + behavioural: delta git-key reconcile". That section dots
+    # df-common.sh into THIS harness and calls the function in bash; this one
+    # runs it under $POSIX_SH. The overlapping asserts (five keys removed, one
+    # notice line, siblings survive) are the same CLAIM checked in two different
+    # SHELLS, which is the entire point of this section — the function shipped
+    # verified-by-inspection precisely because no POSIX shell was available to
+    # run it. The set -e, second-run and partial-state asserts below exist only
+    # here. Change one twin, check the other.
+
+    # A stub `delta` that EXISTS, is executable, and FAILS when run. That is
+    # "present but not runnable", which is the exact state the function exists
+    # for and the reason its predicate is `delta --version` (operability) and not
+    # `command -v delta` (presence). A real delta on this machine's PATH would
+    # make the function correctly return early, so the stub must come FIRST on
+    # PATH. Exit 127 mimics the realistic cases: wrong glibc, dangling symlink,
+    # cross-arch ELF.
+    POSIX_STUB="$POSIX_TMP/stub"
+    mkdir -p "$POSIX_STUB"
+    printf '#!/bin/sh\nexit 127\n' > "$POSIX_STUB/delta"
+    chmod +x "$POSIX_STUB/delta"
+    # Non-vacuity: if the stub were missing or non-executable, `delta --version`
+    # would fail for the WRONG reason and 4c would pass without testing anything.
+    assert "reconcile fixture: stub delta is present and executable" "[[ -x \"$POSIX_STUB/delta\" ]]"
+    assert "reconcile fixture: stub delta is NOT runnable (exit != 0)" "! \"$POSIX_STUB/delta\" --version >/dev/null 2>&1"
+
+    # A DEDICATED throwaway GIT_CONFIG_GLOBAL. Not $SB/.gitconfig, which the
+    # delta fetcher's own tests read; and emphatically not the developer's real
+    # ~/.gitconfig, which is what this function would rewrite if the override
+    # were forgotten. HOME is already redirected to $POSIX_HOME by posix_run, so
+    # even a git old enough to ignore GIT_CONFIG_GLOBAL lands in the temp tree.
+    POSIX_GITCFG="$POSIX_TMP/gitconfig"
+    # The reconcile call itself, run under `set -e` — both real call sites do
+    # (./doctor and update-user-home-dir.sh --uninstall), and the function's
+    # guarded git calls exist precisely so that `set -e` cannot kill them.
+    POSIX_RECONCILE="set -e
+PATH=\"$POSIX_STUB:\$PATH\"; export PATH
+GIT_CONFIG_GLOBAL=\"$POSIX_GITCFG\"; export GIT_CONFIG_GLOBAL
+. \"$REPO/lib/df-common.sh\"
+df_delta_gitconfig_reconcile"
+
+    # Seed the five keys the function owns, PLUS two unrelated ones in [core]
+    # and [interactive] — the sections it must not remove wholesale.
+    rm -f "$POSIX_GITCFG"
+    git config --file "$POSIX_GITCFG" core.pager            'delta'
+    git config --file "$POSIX_GITCFG" interactive.diffFilter 'delta --color-only'
+    git config --file "$POSIX_GITCFG" delta.navigate         true
+    git config --file "$POSIX_GITCFG" delta.side-by-side     true
+    git config --file "$POSIX_GITCFG" delta.line-numbers     true
+    git config --file "$POSIX_GITCFG" core.excludesfile      '~/.gitignore_global'
+    git config --file "$POSIX_GITCFG" interactive.singleKey  true
+
+    posix_run "$POSIX_RECONCILE"
+    _dgleft=0
+    for _dgk in core.pager interactive.diffFilter delta.navigate delta.side-by-side delta.line-numbers; do
+        if git config --file "$POSIX_GITCFG" --get "$_dgk" >/dev/null 2>&1; then
+            echo "    STILL SET $_dgk"; _dgleft=$((_dgleft+1))
+        fi
+    done
+    assert "reconcile: all five delta keys removed (left $_dgleft)" "[[ $_dgleft -eq 0 ]]"
+    # EXACTLY one line. Silently rewriting a user's global git config is worse
+    # than saying so, so zero is wrong; two would be noise on every login.
+    assert "reconcile: prints exactly one notice line (got $POSIX_OUT_N)" "[[ $POSIX_OUT_N -eq 1 ]]"
+    assert "reconcile: exit 0 under set -e"          "[[ $POSIX_RC -eq 0 ]]"
+    assert "reconcile: nothing on stderr"            "[[ ! -s \"$POSIX_TMP/err\" ]]"
+    # Only [delta] goes wholesale. [core] and [interactive] hold settings that
+    # are the user's, not ours, and a --remove-section there would eat them.
+    assert "reconcile: leaves unrelated core.excludesfile alone" \
+        "[[ \"\$(git config --file '$POSIX_GITCFG' --get core.excludesfile 2>/dev/null)\" == '~/.gitignore_global' ]]"
+    assert "reconcile: leaves unrelated interactive.singleKey alone" \
+        "[[ \"\$(git config --file '$POSIX_GITCFG' --get interactive.singleKey 2>/dev/null)\" == 'true' ]]"
+
+    # Idempotence. rc.sh runs this once per login session era, so the SECOND run
+    # is the common case, on every machine that never had delta. Nothing of ours
+    # left to remove => completely silent, exit 0. A notice printed every login
+    # about work not done is the failure mode being pinned here.
+    posix_run "$POSIX_RECONCILE"
+    assert "reconcile: second run exits 0"        "[[ $POSIX_RC -eq 0 ]]"
+    assert "reconcile: second run is silent (stdout)" "[[ ! -s \"$POSIX_TMP/out\" ]]"
+    assert "reconcile: second run is silent (stderr)" "[[ ! -s \"$POSIX_TMP/err\" ]]"
+    posix_show
+
+    # PARTIAL state, which is where `set -e` actually bites. Seed ONLY core.pager:
+    # the function then finds _dg_had=1 and proceeds, but `git config --unset
+    # interactive.diffFilter` exits 5 on the absent key and `--remove-section
+    # delta` exits 128 on the absent section. Under `set -e` either one kills the
+    # caller mid-login unless the `|| true` guards hold. The full-seed run above
+    # cannot detect their removal; this run is the only thing that can.
+    rm -f "$POSIX_GITCFG"
+    git config --file "$POSIX_GITCFG" core.pager       'delta'
+    git config --file "$POSIX_GITCFG" core.excludesfile '~/.gitignore_global'
+    posix_run "$POSIX_RECONCILE"
+    assert "reconcile: partial state survives set -e (unset=5, remove-section=128)" "[[ $POSIX_RC -eq 0 ]]"
+    assert "reconcile: partial state still prints one line (got $POSIX_OUT_N)"      "[[ $POSIX_OUT_N -eq 1 ]]"
+    assert "reconcile: partial state removes core.pager" \
+        "! git config --file '$POSIX_GITCFG' --get core.pager >/dev/null 2>&1"
+    assert "reconcile: partial state keeps core.excludesfile" \
+        "[[ -n \"\$(git config --file '$POSIX_GITCFG' --get core.excludesfile 2>/dev/null)\" ]]"
+    # No posix_show here: this run is SUPPOSED to print the notice, so dumping it
+    # would be noise on a green run. posix_show is for the runs that must be mute.
+    unset _dgk _dgleft
+else
+    # FAIL, never skip. A machine with no real POSIX shell cannot execute the
+    # POSIX contract at all: every `-n` assert silently degrades to whatever
+    # bash-as-sh happens to tolerate. That is the precise state this section
+    # exists to eliminate, so it must be RED and stay red until someone
+    # installs one (`pacman -S dash`, `apt install dash`).
+    bad "no POSIX shell available (tried dash ash mksh posh yash sh) — install dash"
+    skip "positive control: doctor.sh must FAIL the POSIX parse (no shell to run it)"
+    skip "declared POSIX surface (shebang scan + sourced files) unchecked — no shell to run it"
+    # The source/execute checks are the ones that actually catch a bashism, so
+    # declare their absence explicitly rather than letting the coverage vanish
+    # without a trace. The `bad` above already carries the redness; these say
+    # WHAT is missing. Naming all three classes matters: without a POSIX shell
+    # there is nothing to observe an exit code, a stray stdout byte or a
+    # "[[: not found" on stderr with.
+    skip "env.sh sourced under a POSIX shell (exit 0 / empty stdout / empty stderr) — no shell to run it"
+    skip "lib.sh + lib/df-common.sh sourced standalone — no shell to run it"
+    skip "df_delta_gitconfig_reconcile executed against a throwaway gitconfig — no shell to run it"
+fi
 
 # ---- decode a chezmoi source name back to its target path ------------------
 decode_component() {
@@ -702,7 +1090,7 @@ TVSTUB
 
     HRDR="$SRC/dot_local/bin/executable_hrdr"
     assert_file "hrdr source present" "$HRDR"
-    assert "hrdr is valid POSIX sh"  "sh -n $HRDR"
+    assert "hrdr is valid POSIX sh"  "\"\$POSIX_SH\" -n $HRDR"
     # executable_ attribute must survive apply, or the picker is not runnable.
     assert "hrdr applied to ~/.local/bin and executable" "[[ -x '$SB/.local/bin/hrdr' ]]"
     assert "hrdr carries the SPDX banner" \
@@ -869,18 +1257,18 @@ assert ".chezmoiignore guards .keys on missing key" "grep -q 'key.txt' home/.che
 assert "root keys CLI present"                      "[[ -x keys ]]"
 assert "root keys CLI is valid bash"                "bash -n keys"
 assert "root doctor CLI present"                    "[[ -x doctor ]]"
-assert "root doctor CLI is valid sh"                "sh -n doctor"
+assert "root doctor CLI is valid POSIX sh"          "\"\$POSIX_SH\" -n doctor"
 assert "root apply CLI present"                     "[[ -x apply ]]"
 assert "root status CLI present"                    "[[ -x status ]]"
 assert "root help CLI present"                      "[[ -x help ]]"
 assert "Makefile help facade present"               "[[ -f Makefile ]]"
 assert "doctor registry single-sourced in lib/"     "[[ -f lib/doctor-registry.sh ]]"
 assert "dotfiles-keys trampoline present"           "[[ -f home/dot_local/bin/executable_dotfiles-keys ]]"
-assert "dotfiles-keys trampoline is valid sh"       "sh -n home/dot_local/bin/executable_dotfiles-keys"
+assert "dotfiles-keys trampoline is valid POSIX sh" "\"\$POSIX_SH\" -n home/dot_local/bin/executable_dotfiles-keys"
 assert "dotfiles-keys trampoline stays thin"        "[[ \$(wc -l < home/dot_local/bin/executable_dotfiles-keys) -le 50 ]]"
 assert "dotfiles-keys trampoline execs ./keys"      "grep -q root/keys home/dot_local/bin/executable_dotfiles-keys"
 assert "dotfiles-doctor trampoline present"         "[[ -f home/dot_local/bin/executable_dotfiles-doctor ]]"
-assert "dotfiles-doctor trampoline is valid sh"     "sh -n home/dot_local/bin/executable_dotfiles-doctor"
+assert "dotfiles-doctor trampoline is valid POSIX sh" "\"\$POSIX_SH\" -n home/dot_local/bin/executable_dotfiles-doctor"
 assert "dotfiles-doctor trampoline stays thin"      "[[ \$(wc -l < home/dot_local/bin/executable_dotfiles-doctor) -le 50 ]]"
 assert "dotfiles-doctor trampoline execs ./doctor"  "grep -q root/doctor home/dot_local/bin/executable_dotfiles-doctor"
 
@@ -1454,6 +1842,18 @@ assert "every reconcile git call is guarded with || true" \
 # Every case runs in a subshell with a PATH containing ONLY our stub dir, so the
 # result cannot depend on whether the developer's machine happens to have a real
 # delta. git is symlinked into each stub dir because the function needs it.
+#
+# DELIBERATE TWIN — these run the function in BASH (df-common.sh is dotted into
+# this harness above). sec "POSIX shell contract" runs the same function under
+# $POSIX_SH, and additionally covers set -e, the idempotent second run, and the
+# partial-state path where --unset exits 5 and --remove-section exits 128. The
+# duplication is the point: this file is sourced by ./doctor (#!/usr/bin/env sh)
+# and by ./keys (bash), so both shells are real call sites. Change one twin,
+# check the other.
+#
+# The three-stub table below (ok/broken/none) is richer than the POSIX side,
+# which only stubs "broken" — a working delta returning early is shell-agnostic
+# and needs asserting once, not twice.
 RECON_DIR="$SB/recon"; mkdir -p "$RECON_DIR"/{ok,broken,none}
 for d in ok broken none; do ln -sf "$(command -v git)" "$RECON_DIR/$d/git"; done
 printf '#!/bin/sh\n[ "$1" = "--version" ] && { echo "delta 9.9.9"; exit 0; }\nexit 0\n' > "$RECON_DIR/ok/delta"
@@ -1479,16 +1879,39 @@ nkeys() {  # how many of the five remain
     done
     printf '%s' "$n"
 }
-recon() {  # recon <gitconfig> <stub-dir> -> stdout of the reconcile
+# recon <gitconfig> <stub-dir> -> stdout of the reconcile, AND a byte-exact copy
+# of it in $RECON_OUT.
+#
+# The file is not redundant with the `out*` variables below: the SILENCE asserts
+# must read the file, because `out="$(recon …)"` has already thrown the answer
+# away by the time any test looks at it. Command substitution strips all trailing
+# newlines, so a reconcile that printed exactly "\n" — one stray byte, which is
+# what breaks scp/sftp/rsync — arrives as the empty string and `[[ -z "$out" ]]`
+# passes. Rewriting the TEST cannot fix that; the capture is where it is lost.
+# Keep the variables for the line-COUNTING assert, where the content is what
+# matters and the stripping is harmless. Same rule as posix_run's, and for the
+# same reason — see sec "POSIX shell contract".
+# The `_recon_rc` dance is not ceremony. A function's exit status is its LAST
+# command, so ending on `cat` would return cat's status and throw the
+# reconcile's away — silently converting `assert "second reconcile exits 0"`
+# into a test of whether cat can read a file it just wrote. Measured:
+# `( exit 7 ) > f; cat f` returns 0. Capture the status before the cat, return
+# it after. (Same failure shape as the newline above: the answer is destroyed
+# at capture time, so no rewrite of the ASSERT could have recovered it.)
+RECON_OUT="$SB/recon.out"
+recon() {
     ( PATH="$RECON_DIR/$2"; GIT_CONFIG_GLOBAL="$1"; export PATH GIT_CONFIG_GLOBAL
-      df_delta_gitconfig_reconcile )
+      df_delta_gitconfig_reconcile ) > "$RECON_OUT"
+    _recon_rc=$?
+    cat "$RECON_OUT"
+    return "$_recon_rc"
 }
 
 # 1. working delta => all five survive
 G1="$SB/recon-ok.gitconfig"; : > "$G1"; seed_keys "$G1"
 out1="$(recon "$G1" ok)"
 assert "working delta: all five keys survive"  "[[ \$(nkeys $G1) -eq 5 ]]"
-assert "working delta: reconcile is silent"    "[[ -z \"\$out1\" ]]"
+assert "working delta: reconcile is silent"    "[[ ! -s \"$RECON_OUT\" ]]"
 
 # 2. no delta at all => all five removed
 G2="$SB/recon-none.gitconfig"; : > "$G2"; seed_keys "$G2"
@@ -1513,12 +1936,12 @@ assert "broken delta: all five keys removed (presence would have kept them)" \
 
 # 4. idempotent: a second pass has nothing to do and must say nothing at all.
 out4="$(recon "$G2" none)"
-assert "second reconcile is completely silent" "[[ -z \"\$out4\" ]]"
+assert "second reconcile is completely silent" "[[ ! -s \"$RECON_OUT\" ]]"
 assert "second reconcile exits 0"              "( recon $G2 none >/dev/null )"
 # ...and on a config that never had the keys at all.
 G5="$SB/recon-virgin.gitconfig"; printf '[user]\n\temail = x@y\n' > "$G5"
 out5="$(recon "$G5" none)"
-assert "virgin config: reconcile is silent"    "[[ -z \"\$out5\" ]]"
+assert "virgin config: reconcile is silent"    "[[ ! -s \"$RECON_OUT\" ]]"
 assert "virgin config: left untouched"         "grep -q 'x@y' $G5"
 
 # ---- end to end: the REAL uninstall path, in a throwaway HOME ---------------

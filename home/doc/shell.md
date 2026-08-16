@@ -104,6 +104,56 @@ one `scp`, `sftp`, and `rsync` spawn on the remote side — and those parse the 
 as protocol, so a single stray character breaks file transfer outright. A test
 asserts `zsh -c true` emits nothing.
 
+### The contract is repo-wide, not env-layer-only
+
+`lib/df-common.sh`, `lib/doctor-registry.sh` and `lib/doctor-report.sh` are bound by
+the same rules for a different reason: the repo-root CLIs that source them —
+`./doctor`, `./apply`, `./status` — are `#!/usr/bin/env sh`. (`./keys` sources
+`df-common.sh` too, but it is `#!/usr/bin/env bash`, so the pressure comes from the
+other three.)
+
+Beyond those, **the shebang is the declaration.** Any tracked file opening
+`#!/bin/sh` or `#!/usr/bin/env sh` — the root CLIs, the `dotfiles-doctor` and
+`dotfiles-keys` trampolines, `tm`, `hrdr`, `preferred-login-shell`, and the rest of
+`~/.local/bin` — has declared itself POSIX and is checked as such. The suite finds
+that set by scanning `git ls-files` for the shebang rather than carrying a list of
+filenames, so a new POSIX script is covered from its first commit and a hand-copied
+inventory never goes stale.
+
+### Enforcement: `sh -n` is not a POSIX check
+
+Where `/bin/sh` is bash (Arch, Fedora, most rpm distros), `sh -n` is just bash's
+parser wearing a hat: it accepts `a=(1 2 3)` and it accepts a hyphenated function
+name. Four assertions here claimed "valid sh" through bash for months. So the suite
+**discovers** a genuine POSIX shell instead — it probes `dash ash mksh posh yash sh`
+in order and accepts the first whose `${BASH_VERSION}${ZSH_VERSION}` comes back
+**empty**. That takes Debian's dash-as-`/bin/sh` and rejects Arch's bash-as-`/bin/sh`
+per machine, with no distro guess anywhere in it. If nothing qualifies the suite
+**fails** rather than skipping: a box that cannot execute the contract is the exact
+state this was built to eliminate.
+
+**A parse alone is still not enough.** `dash -n` catches array syntax and little
+else — `local x=1`, `[[ ]]`, `${VAR/a/b}`, `$RANDOM` and `echo -e` all parse clean,
+and three of those then *run* to exit 0 with changed behaviour. So the suite also
+**sources** `env.sh`, `lib.sh` and `df-common.sh` under the real POSIX shell and
+asserts three things separately: exit 0, empty stdout, empty stderr. All three are
+load-bearing, and the cheapest one is not the one you would guess. `[[ ]]` under dash
+exits 0 with clean stdout and shows up **only** as `[[: not found` on stderr; a stray
+`echo` shows up only on stdout, which is the scp/sftp/rsync stream above; and the
+exit code guards the class that prints nothing at all — a file whose last command
+simply returns non-zero, which is why `env.sh` ends in `return 0 2>/dev/null || true`
+rather than trailing off. Most dash errors trip both the exit code and stderr, so
+those two overlap heavily; they are kept separate because when they disagree, the
+disagreement is the diagnosis.
+
+**`doctor.sh` is the positive control.** Its hyphenated `dotfiles-doctor()` must
+**fail** the parse. If that assertion ever goes green the checker has lost its teeth
+and every other POSIX assertion is a false green again — which is also why that file
+may never migrate into the env layer.
+
+`dash` ships in Arch's **core** repo (`pacman -S dash`) and is standard on Debian.
+It is a development dependency only; nothing at runtime needs it.
+
 ## The fetch/PATH rule
 
 ```
