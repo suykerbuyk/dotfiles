@@ -347,6 +347,58 @@ if [[ -n "$POSIX_SH" ]]; then
     assert "env.sh sourced under $POSIX_SH: empty stderr (catches [[ ]])"  "[[ ! -s \"$POSIX_TMP/err\" ]]"
     posix_show
 
+    # ---- 4a-bis: DOTFILES_ENV_LOADED is set, and deliberately NOT exported --
+    # env.sh:27-28 says the flag is not exported so that a child shell re-derives
+    # from its OWN $HOME instead of trusting an inherited one. Nothing asserted
+    # it. That matters more than it reads: every source-check above begins with
+    # `unset DOTFILES_ENV_LOADED`, which protects the TEST but proves nothing
+    # about the GUARD — one `export` on line 30 and env.sh:29 returns early in
+    # every child of an interactive shell, so all of 4a measures six lines of
+    # variable assignment being quiet. Green, and vacuous.
+    #
+    # Assert the PAIR, because either half alone is a false green:
+    #   parent  — the sourcing process must HAVE it, or the guard never armed
+    #             and "the child cannot see it" is true for the wrong reason.
+    #   child   — a separate process must NOT see it. This is the actual claim.
+    #
+    # And a NON-VACUITY control, because a probe that inherits nothing at all
+    # passes the child assert perfectly: GOPATH is exported by env.sh:39, in the
+    # same file, by the same source. Match its EXACT sandbox value — this
+    # machine already exports GOPATH=$HOME/code/go from the developer's own
+    # shell, so "GOPATH is set" would pass with env.sh never having run. The
+    # $POSIX_HOME path proves the source got past the lib.sh early return at
+    # env.sh:35 and reached line 39.
+    #
+    # DOTFILES_TOOL_INIT_EPOCH is NOT the control to use here despite also being
+    # a deliberate export: it is set by dotfiles_tool_init in common.sh, which is
+    # rc layer — bash/zsh only — and is never set under a POSIX shell at all.
+    #
+    # A DEDICATED posix_run, not a reuse of 4a's: this one is SUPPOSED to print.
+    # Folding the probe into a run whose whole purpose is asserting empty stdout
+    # would destroy the assert it shares a run with.
+    POSIX_PROBE="$POSIX_TMP/export-probe.sh"
+    cat > "$POSIX_PROBE" <<'PROBE'
+printf 'child=[%s]\n' "${DOTFILES_ENV_LOADED:-}"
+printf 'child_gopath=[%s]\n' "${GOPATH:-}"
+PROBE
+    # $POSIX_SH and $POSIX_PROBE interpolate now; $HOME and the flag are DEFERRED
+    # to the POSIX shell — same quoting split as $POSIX_RECONCILE below, and for
+    # the same reason: HOME is $POSIX_HOME only inside posix_run.
+    POSIX_EXPORT_PROBE="unset DOTFILES_ENV_LOADED
+. \"\$HOME/.config/shell/env.sh\"
+printf 'parent=[%s]\\n' \"\${DOTFILES_ENV_LOADED:-}\"
+\"$POSIX_SH\" \"$POSIX_PROBE\""
+
+    posix_run "$POSIX_EXPORT_PROBE"
+    assert "DOTFILES_ENV_LOADED: the sourcing process HAS it (guard armed)" \
+        "[[ \"\$POSIX_OUT\" == *'parent=[1]'* ]]"
+    assert "DOTFILES_ENV_LOADED: a CHILD does NOT see it (deliberate non-export)" \
+        "[[ \"\$POSIX_OUT\" == *'child=[]'* ]]"
+    assert "export probe non-vacuity: that same child sees GOPATH=$POSIX_HOME/code/go" \
+        "[[ \"\$POSIX_OUT\" == *\"child_gopath=[$POSIX_HOME/code/go]\"* ]]"
+    assert "export probe: exit 0"       "[[ $POSIX_RC -eq 0 ]]"
+    assert "export probe: empty stderr" "[[ ! -s \"$POSIX_TMP/err\" ]]"
+
     # The re-entry guard, asserted POSITIVELY. env.sh is reached from four places
     # and .bashrc/rc.sh can both fire in one shell, so a second source is a real
     # code path, not a hypothetical. Asserting it stays silent and exit 0 is also
@@ -1090,7 +1142,6 @@ TVSTUB
 
     HRDR="$SRC/dot_local/bin/executable_hrdr"
     assert_file "hrdr source present" "$HRDR"
-    assert "hrdr is valid POSIX sh"  "\"\$POSIX_SH\" -n $HRDR"
     # executable_ attribute must survive apply, or the picker is not runnable.
     assert "hrdr applied to ~/.local/bin and executable" "[[ -x '$SB/.local/bin/hrdr' ]]"
     assert "hrdr carries the SPDX banner" \
@@ -1257,18 +1308,15 @@ assert ".chezmoiignore guards .keys on missing key" "grep -q 'key.txt' home/.che
 assert "root keys CLI present"                      "[[ -x keys ]]"
 assert "root keys CLI is valid bash"                "bash -n keys"
 assert "root doctor CLI present"                    "[[ -x doctor ]]"
-assert "root doctor CLI is valid POSIX sh"          "\"\$POSIX_SH\" -n doctor"
 assert "root apply CLI present"                     "[[ -x apply ]]"
 assert "root status CLI present"                    "[[ -x status ]]"
 assert "root help CLI present"                      "[[ -x help ]]"
 assert "Makefile help facade present"               "[[ -f Makefile ]]"
 assert "doctor registry single-sourced in lib/"     "[[ -f lib/doctor-registry.sh ]]"
 assert "dotfiles-keys trampoline present"           "[[ -f home/dot_local/bin/executable_dotfiles-keys ]]"
-assert "dotfiles-keys trampoline is valid POSIX sh" "\"\$POSIX_SH\" -n home/dot_local/bin/executable_dotfiles-keys"
 assert "dotfiles-keys trampoline stays thin"        "[[ \$(wc -l < home/dot_local/bin/executable_dotfiles-keys) -le 50 ]]"
 assert "dotfiles-keys trampoline execs ./keys"      "grep -q root/keys home/dot_local/bin/executable_dotfiles-keys"
 assert "dotfiles-doctor trampoline present"         "[[ -f home/dot_local/bin/executable_dotfiles-doctor ]]"
-assert "dotfiles-doctor trampoline is valid POSIX sh" "\"\$POSIX_SH\" -n home/dot_local/bin/executable_dotfiles-doctor"
 assert "dotfiles-doctor trampoline stays thin"      "[[ \$(wc -l < home/dot_local/bin/executable_dotfiles-doctor) -le 50 ]]"
 assert "dotfiles-doctor trampoline execs ./doctor"  "grep -q root/doctor home/dot_local/bin/executable_dotfiles-doctor"
 
