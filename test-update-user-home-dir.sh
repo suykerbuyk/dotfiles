@@ -1272,6 +1272,19 @@ jqbody="$( . "$LIB" >/dev/null 2>&1; declare -f fetch_jq )"
 assert "fetch_jq is defined in _lib.sh"           "[[ -n \"\$jqbody\" ]]"
 assert "fetch_jq uses gh_latest_tag_nojq"         "grep -q 'gh_latest_tag_nojq' <<<\"\$jqbody\""
 assert "fetch_jq avoids the jq-dependent gh_ helpers" "! grep -Eq 'gh_asset_url|gh_latest_tag[^_]' <<<\"\$jqbody\""
+# Regression: GitHub's API returns this JSON minified on one line, not one key
+# per line. A bare `grep '"tag_name"'` used to match the WHOLE document (grep
+# is line-based) and `awk -F'"' '{print $4}'` grabbed the 4th quoted field of
+# the entire blob -- the "url" field's value, itself a full api.github.com URL
+# -- instead of the tag. fetch_jq then spliced that bogus "tag" into its own
+# download URL, embedding one URL inside another (404). Feed
+# gh_latest_tag_nojq a realistic minified fixture (url field first, tag_name
+# after) via a stubbed curl, offline, so this is caught without live network.
+nojq_tag="$( . "$LIB" >/dev/null 2>&1
+    curl() { printf '%s' '{"url":"https://api.github.com/repos/jqlang/jq/releases/342331441","tag_name":"jq-1.8.2","name":"jq 1.8.2"}'; }
+    gh_latest_tag_nojq jqlang/jq )"
+assert "gh_latest_tag_nojq parses tag_name from minified JSON" "[[ \"\$nojq_tag\" == 'jq-1.8.2' ]]"
+assert "gh_latest_tag_nojq does not return the url field"      "[[ \"\$nojq_tag\" != *api.github.com* ]]"
 # fb_init must put ~/.local/bin on PATH, or a just-fetched jq is invisible to the
 # bare \`jq\` calls in every later fetcher within the same installer run.
 pth="$( . "$LIB" >/dev/null 2>&1; PATH=/usr/bin:/bin; fb_init >/dev/null 2>&1; printf '%s' "$PATH" )"

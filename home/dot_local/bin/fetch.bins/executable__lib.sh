@@ -121,8 +121,13 @@ gh_latest_tag_nojq() {
         exit 1
     fi
 
+    # GitHub returns this JSON minified on one line, so a bare `grep '"tag_name"'`
+    # matches the WHOLE document (grep is line-based) and awk -F'"' '{print $4}'
+    # grabs the 4th quoted field of the entire blob -- the "url" field's value,
+    # not the tag. grep -o isolates the "tag_name":"..." pair first so the awk
+    # split is relative to it, not the whole line, regardless of JSON layout.
     local tag
-    tag="$(printf '%s' "$json" | grep '"tag_name"' | awk -F '"' '{print $4}')"
+    tag="$(printf '%s' "$json" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | awk -F '"' '{print $4}')"
     if [[ -z "$tag" ]]; then
         echo "Error: could not parse a release tag from the API response." >&2
         exit 1
