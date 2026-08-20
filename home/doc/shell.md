@@ -38,15 +38,47 @@ The env layer is reached from four places, so no shell can miss it:
 whole fix, since bash reads `~/.bashrc` (and nothing else) for the shell it spawns
 for `ssh host cmd`.
 
-### The `bash -c` residual
+### The `bash -c` residual — and its second, invisible precondition
 
 A bare `bash -c` reads **no** startup file — only `$BASH_ENV`, which this repo
 deliberately does **not** set (it would fire for every `#!/bin/bash` script on the
 box). `bash -c` works anyway because it *inherits* PATH from a parent that finally
 has one. The only case that stays broken is `env -i bash -c`, which strips the
 environment first — but that arises only when the ancestor was already broken,
-which is what the env layer fixes. A test pins this reasoning so nobody "fixes" it
-by reaching for `BASH_ENV`.
+which is what the env layer fixes. A test pins this so nobody "fixes" it by
+reaching for `BASH_ENV`.
+
+**That "reads no startup file" holds only when stdin is not a socket.** bash runs
+`~/.bashrc` for a *non-interactive* `-c` shell when it believes a remote shell
+daemon started it, and it decides that by asking whether file descriptor 0 is a
+network connection (bash's `isnetconn()`), plus `$SSH_CLIENT` on builds carrying
+`SSH_SOURCE_BASHRC` — **this box's bash does not carry it; measured, not assumed**.
+It is additionally gated on `SHLVL < 2`. Measured, same `$HOME`, same `.bashrc`,
+with an observable marker planted in `env.sh`:
+
+| stdin | `~/.bashrc` read? |
+|---|---|
+| tty, `/dev/null`, or a regular file | no |
+| a socket (CI, an agent harness, `ssh host cmd`) | **yes** |
+| a socket with `SHLVL >= 2` | no |
+| `--norc` | no |
+
+This is not a footnote: it is the mechanism the `ssh host cmd` path *depends* on,
+and it is why `~/.bashrc` sources `env.sh` above the interactivity gate. The two
+readings are easy to confuse, because on a socket stdin `env.sh` runs and sets PATH
+itself — so a naive "did PATH survive?" check passes either way and proves nothing.
+The suite therefore asserts a **pair** with stdin pinned (`</dev/null`): PATH
+*without* `~/.local/bin` must come back `MISSING` (no startup file ran), and PATH
+*with* it must come back `HAS` (inheritance works). Pinning stdin is the whole
+point — without it the pair measures whatever the caller's fd 0 happened to be.
+
+The socket half is **documented but not asserted**, by ruling. An assertion for it
+was written and mutation-proved, then dropped: the trigger is a bash *build*
+heuristic this repo does not control, so the test needed a `python3` dependency to
+open a socketpair, plus a per-machine capability probe to avoid reddening a correct
+config on a build that omits the behaviour. What guards the ordering the
+`ssh host cmd` path depends on is the structural assertion that `~/.bashrc` sources
+`env.sh` **above** its interactivity gate.
 
 zsh has no equivalent gap: `~/.zshenv` is read for *every* zsh, `-c` included.
 

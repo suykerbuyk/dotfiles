@@ -63,12 +63,67 @@ done
 
 # ---- assertion framework ---------------------------------------------------
 PASS=0; FAIL=0
+# Every failure is also accumulated, because printing it inline is not the same
+# as being able to READ it: a full run emits 520 lines and the one 513/4 anomaly
+# lost its FAIL list to scrollback. Recovering it by grep does not work either —
+# `grep FAIL` matches PASS lines whose description contains the word (the POSIX
+# positive control is literally "doctor.sh FAILS the POSIX parse"), and the ANSI
+# colouring means it needs -a. So the summary re-prints them verbatim.
+FAILED=()
 ok()   { PASS=$((PASS+1)); printf '  \033[32mPASS\033[0m %s\n' "$1"; }
-bad()  { FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m %s\n' "$1"; }
+# $2 is the evaluated assertion expression, with the captured value ALREADY
+# interpolated. Printing it is what turns "which property broke" into "why":
+# 18 asserts in this file compare a live-probed value inside a single-quoted
+# `eval`, so a stray quote in the data yields `[[ 'ab'c' == HAS ]]` — a shell
+# syntax error reported as an ordinary FAIL. The expr line shows that instantly.
+# Ends in an explicit `return 0`: a trailing `[[ ]] && printf` would hand the
+# test's status back to callers, and assert_file chains bad() through `||`.
+bad()  { FAIL=$((FAIL+1)); FAILED+=("$1"); printf '  \033[31mFAIL\033[0m %s\n' "$1"
+         [[ -n "${2:-}" ]] && printf '       %s\n' "$2"
+         return 0; }
 skip() { printf '  \033[33mSKIP\033[0m %s\n' "$1"; }
 sec()  { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
-assert()      { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
+# Assertions are evaluated with pipefail OFF, then it is restored immediately.
+# `producer | grep -q PATTERN` is a SIGPIPE RACE under `set -o pipefail`: grep -q
+# exits at the FIRST match, the producer takes SIGPIPE and exits 141 if it has not
+# finished writing by then, and pipefail promotes that 141 into a failed assertion
+# on input that is perfectly correct. 16 assertions in this file have that shape,
+# and the exposure is worst where the match is EARLY in a large file — the one that
+# actually fired greps a 10 KB file whose match is on line 23 of 248.
+# Measured: 1 spurious FAIL in 46 clean runs, total assertion count unchanged. That
+# is the signature of the unreproduced 513/4 run (513+4 == 514+3 == 517: the set was
+# identical and exactly one verdict flipped) and is the best explanation on record
+# for it. An assertion's verdict is its FINAL predicate — never whether an upstream
+# producer got to finish writing into a pipe nobody is reading any more.
+# $? is captured on its own line, before anything else can overwrite it.
+assert() {
+    local _rc
+    set +o pipefail
+    eval "$2"
+    _rc=$?
+    set -o pipefail
+    if [[ $_rc -eq 0 ]]; then ok "$1"; else bad "$1" "expr: $2"; fi
+}
 assert_file() { [[ -e "$2" ]] && ok "$1" || bad "$1 (missing: $2)"; }
+
+# ---- value assertions ------------------------------------------------------
+# assert() splices its expression into `eval`, which is right for expressions built
+# from literals and WRONG for a value captured from a probe: the value is pasted in
+# as SOURCE CODE, so one stray quote makes the shell parse `[[ 'ab'c' == HAS ]]` and
+# the assertion dies of a syntax error that is indistinguishable from a real verdict.
+# Proved by planting a quote in GOPATH — `unexpected EOF while looking for matching
+# '`, reported as an ordinary FAIL against a config that was otherwise fine.
+# These take the value as an ARGUMENT, so it stays data at every step and can never
+# be parsed. Use them for anything a shell, a probe or a binary printed; keep
+# assert() for expressions over literals, files and command exit status.
+# They also report the value on failure, which the eval form could not: `[[ '' == HAS ]]`
+# tells you the comparison failed and never what the probe actually said.
+assert_eq()    { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1" "got [$2]  want [$3]"; fi; }
+assert_ne()    { if [[ "$2" != "$3" ]]; then ok "$1"; else bad "$1" "got [$2]  want anything but [$3]"; fi; }
+# $3 unquoted on purpose in the two below: that is what makes it a pattern.
+assert_glob()  { if [[ "$2" == $3   ]]; then ok "$1"; else bad "$1" "got [$2]  want glob [$3]"; fi; }
+assert_re()    { if [[ "$2" =~ $3   ]]; then ok "$1"; else bad "$1" "got [$2]  want regex [$3]"; fi; }
+assert_empty() { if [[ -z "$2"      ]]; then ok "$1"; else bad "$1" "got [$2]  want empty"; fi; }
 
 # Comment-stripped view of a source file, for NEGATIVE and COUNTING asserts.
 # Those must never read raw source: this repo documents at length WHY a rejected
@@ -110,7 +165,14 @@ unset _cand
 # ---- isolated sandbox ------------------------------------------------------
 CHEZMOI_ON_PATH="$(command -v chezmoi 2>/dev/null || true)"   # capture before HOME moves
 SB="$(mktemp -d)"
-trap 'rm -rf "$SB"' EXIT
+# Raw probe evidence lives OUTSIDE $SB deliberately: the parity walk and the
+# plaintext-leak sweep both traverse the sandbox HOME, so a transcript in there
+# would be test scaffolding masquerading as applied state. Kept only when the
+# run has failures (see the summary); a green run takes it away.
+EVID="$(mktemp -d)"
+EVID_LOG="$EVID/probe-transcript.txt"
+KEEP_EVID=0
+trap 'rm -rf "$SB"; [[ $KEEP_EVID == 1 ]] || rm -rf "$EVID"' EXIT
 export HOME="$SB"
 export XDG_CONFIG_HOME="$SB/.config" XDG_CACHE_HOME="$SB/.cache" XDG_DATA_HOME="$SB/.local/share"
 # The delta fetcher (slot 20) wires itself into git with `git config --global`.
@@ -673,7 +735,28 @@ if [[ -n "$CHEZMOI" ]]; then
     #
     # `env -i` strips the environment to nothing, which is what makes these honest:
     # a shell that merely INHERITED a good PATH from its parent proves nothing.
-    probe()    { ( cd /tmp && env -i HOME="$SB" TERM=xterm PATH=/usr/bin:/bin "$1" "$2" "$3" 2>/dev/null | tr -d '\r' | tail -1 ); }
+    # The emitted VALUE is unchanged — still the last \r-stripped stdout line —
+    # but the raw streams are now kept instead of thrown away. The old form was
+    # `2>/dev/null | tr -d '\r' | tail -1`, which discarded stderr entirely and
+    # every stdout line but the last BEFORE the assert ran, so a probe-backed
+    # failure could report which property broke and never why. `tail -1` is also
+    # a flake amplifier in its own right: one extra line of shell startup chatter
+    # silently changes which line is compared.
+    _probe_evid() {
+        { printf '=== probe: %s %s\n--- script: %s\n' "$1" "$2" "$3"
+          printf -- '--- raw stdout (%s bytes):\n' "$(wc -c <"$EVID/probe.out")"
+          sed 's/^/    /' "$EVID/probe.out"
+          printf -- '\n--- raw stderr (%s bytes):\n' "$(wc -c <"$EVID/probe.err")"
+          sed 's/^/    /' "$EVID/probe.err"
+          printf '\n'
+        } >>"$EVID_LOG"
+    }
+    probe() {
+        ( cd /tmp && env -i HOME="$SB" TERM=xterm PATH=/usr/bin:/bin "$1" "$2" "$3" ) \
+            >"$EVID/probe.out" 2>"$EVID/probe.err"
+        _probe_evid "$@"
+        tr -d '\r' <"$EVID/probe.out" | tail -1
+    }
     sh_probe() { probe "$1" -ic "$2"; }
     HAS_LOCALBIN='case ":$PATH:" in *":'"$SB"'/.local/bin:"*) printf HAS ;; *) printf MISSING ;; esac'
 
@@ -693,31 +776,65 @@ if [[ -n "$CHEZMOI" ]]; then
             continue
         fi
         p="$(probe "$s" "$flag" "$HAS_LOCALBIN")"
-        assert "$s $flag ($kind): ~/.local/bin on PATH" "[[ '$p' == HAS ]]"
+        assert_eq "$s $flag ($kind): ~/.local/bin on PATH" "$p" HAS
 
         d="$(probe "$s" "$flag" 'printf "%s" "$PATH"' | tr ':' '\n' | sort | uniq -d | grep -c . || true)"
-        assert "$s $flag ($kind): PATH has no duplicate entries" "[[ '$d' -eq 0 ]]"
+        assert_eq "$s $flag ($kind): PATH has no duplicate entries" "$d" 0
     done
 
     # Documented residual: a bare `bash -c` reads NO startup file — only $BASH_ENV,
     # which we deliberately do not set, because it would fire for every
     # #!/bin/bash script on the box. It works anyway because it INHERITS PATH from
-    # a parent that finally has one. Pin that reasoning with a test rather than a
-    # comment, so nobody "fixes" it by reaching for BASH_ENV.
-    p="$( cd /tmp && env -i HOME="$SB" PATH="$SB/.local/bin:/usr/bin:/bin" bash -c "$HAS_LOCALBIN" 2>/dev/null )"
-    assert "bash -c (non-interactive): inherits PATH from its parent" "[[ '$p' == HAS ]]"
+    # a parent that finally has one. Never "fix" that by reaching for BASH_ENV.
+    #
+    # That residual has a SECOND precondition the old single assertion left
+    # implicit and got wrong: STDIN. bash runs ~/.bashrc for a non-interactive -c
+    # shell when it believes a remote shell daemon started it, which it decides by
+    # asking whether fd 0 is a socket (bash's isnetconn(), plus $SSH_CLIENT on
+    # builds carrying SSH_SOURCE_BASHRC — this box's does NOT; measured, not
+    # assumed). CI, an agent harness and `ssh host cmd` all hand it a socket. So on
+    # everything except a developer's terminal the old assertion passed because
+    # env.sh had RUN and set PATH itself — the exact opposite of the inheritance it
+    # claimed — and both readings print HAS, so it could not tell them apart.
+    #
+    # Pin stdin, then assert the PAIR. NOPATH deliberately omits ~/.local/bin: the
+    # old assertion passed a PATH that already contained it, which makes every
+    # reading HAS and measures nothing.
+    NOPATH="/usr/bin:/bin"
+
+    # NEGATIVE — the residual itself, and the assertion with the teeth. No startup
+    # file ran, so nothing added ~/.local/bin and the shell must report it MISSING.
+    # Reach for BASH_ENV, or let something start sourcing rc files unconditionally,
+    # and this goes red.
+    p="$( cd /tmp && env -i HOME="$SB" PATH="$NOPATH" bash -c "$HAS_LOCALBIN" </dev/null 2>/dev/null )"
+    assert_eq "bash -c (stdin not a socket): reads no startup file" "$p" MISSING
+
+    # POSITIVE — the original claim, with its precondition now established rather
+    # than assumed.
+    p="$( cd /tmp && env -i HOME="$SB" PATH="$SB/.local/bin:/usr/bin:/bin" bash -c "$HAS_LOCALBIN" </dev/null 2>/dev/null )"
+    assert_eq "bash -c (non-interactive): inherits PATH from its parent" "$p" HAS
+
+    # The `ssh host cmd` path -- ~/.bashrc sourcing env.sh above the interactivity
+    # gate, which is what gets PATH into `ssh host cmd` -- is deliberately NOT
+    # asserted here. It was implemented and mutation-proved (a socket on fd 0 via
+    # python3), then dropped by human ruling: the trigger is a bash BUILD heuristic
+    # this repo does not control, so the assertion would have carried a python3
+    # dependency and a per-machine capability probe to avoid reddening correct
+    # configs on builds that omit it. The behaviour itself is real and documented in
+    # home/doc/shell.md; the structural assertion above ("~/.bashrc sources env.sh
+    # ABOVE its interactivity gate") is what guards the ordering it depends on.
 
     # env.sh, not rc.sh, is what exports GOPATH — so a non-interactive zsh has it.
     g="$(probe zsh -c 'printf "%s" "${GOPATH:-UNSET}"')"
-    assert "zsh -c: GOPATH exported by the env layer" "[[ '$g' == '$SB/code/go' ]]"
+    assert_eq "zsh -c: GOPATH exported by the env layer" "$g" "$SB/code/go"
 
     # ~/.keys is deliberately rc-layer: API keys stay confined to shells you typed
     # into, and a cron job or git hook must not inherit them.
     printf 'export DOTFILES_TEST_SECRET=leaked\n' > "$SB/.keys"
     k="$(probe zsh -c 'printf "%s" "${DOTFILES_TEST_SECRET:-ABSENT}"')"
-    assert "zsh -c: ~/.keys NOT sourced (secrets stay interactive-only)" "[[ '$k' == ABSENT ]]"
+    assert_eq "zsh -c: ~/.keys NOT sourced (secrets stay interactive-only)" "$k" ABSENT
     k="$(sh_probe zsh 'printf "%s" "${DOTFILES_TEST_SECRET:-ABSENT}"')"
-    assert "zsh -ic: ~/.keys IS sourced" "[[ '$k' == leaked ]]"
+    assert_eq "zsh -ic: ~/.keys IS sourced" "$k" leaked
     rm -f "$SB/.keys"
 
     sec "shell: rc layer still intact (regression guard)"
@@ -728,13 +845,13 @@ if [[ -n "$CHEZMOI" ]]; then
         fi
 
         g="$(sh_probe "$s" 'printf "%s" "${GOPATH:-UNSET}"')"
-        assert "$s: rc loads from a cwd outside \$HOME" "[[ '$g' == '$SB/code/go' ]]"
+        assert_eq "$s: rc loads from a cwd outside \$HOME" "$g" "$SB/code/go"
 
         w="$(sh_probe "$s" 'command -v dotfiles-doctor >/dev/null && printf yes || printf no')"
-        assert "$s: dotfiles-doctor is defined" "[[ '$w' == yes ]]"
+        assert_eq "$s: dotfiles-doctor is defined" "$w" yes
 
         e="$(sh_probe "$s" 'printf "%s" "${EDITOR:-UNSET}"')"
-        assert "$s: EDITOR resolved" "[[ '$e' != UNSET ]]"
+        assert_ne "$s: EDITOR resolved" "$e" UNSET
     done
 
     # ~/.zshenv runs for EVERY zsh — including the one scp, sftp and rsync spawn on
@@ -745,7 +862,7 @@ if [[ -n "$CHEZMOI" ]]; then
     for s in bash zsh; do
         command -v "$s" >/dev/null 2>&1 || continue
         noise="$( cd /tmp && env -i HOME="$SB" PATH=/usr/bin:/bin "$s" -c true 2>&1 | tr -d '\r\n \t' )"
-        assert "$s -c: non-interactive startup emits nothing (scp/rsync safe)" "[[ -z '$noise' ]]"
+        assert_empty "$s -c: non-interactive startup emits nothing (scp/rsync safe)" "$noise"
     done
 
     # Interactive startup used to print 4 nag lines per zsh start. An interactive
@@ -755,7 +872,7 @@ if [[ -n "$CHEZMOI" ]]; then
         for s in bash zsh; do
             command -v "$s" >/dev/null 2>&1 || continue
             noise="$(cd /tmp && script -qec "env -i HOME=$SB TERM=xterm PATH=/usr/bin:/bin $s -ic true" /dev/null 2>&1 | tr -d '\r\n \t')"
-            assert "$s: interactive startup is silent" "[[ -z '$noise' ]]"
+            assert_empty "$s: interactive startup is silent" "$noise"
         done
     else
         skip "startup-silence probes (no 'script' for a pty)"
@@ -843,19 +960,19 @@ if [[ -n "$CHEZMOI" ]]; then
             "! grep -q 'command not found: compdef' <<<\"\$err\""
 
         b="$(sh_probe zsh 'printf "%s" "$(whence -w br 2>/dev/null || printf UNDEF)"')"
-        assert "zsh: br is defined as a function" "[[ '$b' == 'br: function' ]]"
+        assert_eq "zsh: br is defined as a function" "$b" "br: function"
         c="$(sh_probe zsh 'printf "%s" "${_comps[herdr]:-UNSET}"')"
-        assert "zsh: herdr completion is registered with compdef" "[[ '$c' == '_herdr' ]]"
+        assert_eq "zsh: herdr completion is registered with compdef" "$c" _herdr
 
         if command -v bash >/dev/null 2>&1; then
             b="$(sh_probe bash 'printf "%s" "$(type -t br 2>/dev/null || printf UNDEF)"')"
-            assert "bash: br is defined as a function" "[[ '$b' == function ]]"
+            assert_eq "bash: br is defined as a function" "$b" function
         fi
 
         # Neither eval may break the silence contract (both are 2>/dev/null).
         if command -v script >/dev/null 2>&1; then
             noise="$(cd /tmp && script -qec "env -i HOME=$SB TERM=xterm PATH=/usr/bin:/bin zsh -ic true" /dev/null 2>&1 | tr -d '\r\n \t')"
-            assert "startup stays silent with herdr+broot wired" "[[ -z '$noise' ]]"
+            assert_empty "startup stays silent with herdr+broot wired" "$noise"
         fi
 
         rm -f "$fakeherdr" "$fakebroot"
@@ -963,36 +1080,36 @@ TVSTUB
         chmod +x "$SB/.local/bin/fzf" "$SB/.local/bin/tv"
 
         r="$(sh_probe zsh 'bindkey "^R"')"
-        assert "zsh: ^R is fzf's widget, not tv's" "[[ '$r' == *fzf-history-widget* ]]"
+        assert_glob "zsh: ^R is fzf's widget, not tv's" "$r" '*fzf-history-widget*'
         t="$(sh_probe zsh 'bindkey "^T"')"
-        assert "zsh: ^T is left to tv" "[[ '$t' == *tv-smart-autocomplete* ]]"
+        assert_glob "zsh: ^T is left to tv" "$t" '*tv-smart-autocomplete*'
         # THE assertion for the inside-the-function rule. If the rebind ever
         # moves out of dotfiles_tool_init this goes red while everything above
         # stays green.
         r2="$(sh_probe zsh 'dotfiles-reinit >/dev/null 2>&1; bindkey "^R"')"
-        assert "zsh: ^R survives a dotfiles-reinit" "[[ '$r2' == *fzf-history-widget* ]]"
+        assert_glob "zsh: ^R survives a dotfiles-reinit" "$r2" '*fzf-history-widget*'
 
         e="$(sh_probe zsh 'printf "%s" "${DOTFILES_TOOL_INIT_EPOCH:-UNSET}"')"
-        assert "zsh: tool-init stamp is set and numeric" "[[ '$e' =~ ^[0-9]+$ ]]"
+        assert_re "zsh: tool-init stamp is set and numeric" "$e" '^[0-9]+$'
 
         # Idempotency, behaviourally — this is what makes dotfiles-reinit safe to
         # recommend at all. Compares the WHOLE keymap plus the hook arrays, not a
         # sampled key: a double-registered precmd would be a worse bug than the
         # staleness this fixes.
         idem="$(sh_probe zsh 'a="$(bindkey; print -l $precmd_functions $preexec_functions)"; dotfiles_tool_init >/dev/null 2>&1; b="$(bindkey; print -l $precmd_functions $preexec_functions)"; [ "$a" = "$b" ] && printf SAME || printf DIFF')"
-        assert "zsh: re-running the init changes no binding and no hook" "[[ '$idem' == SAME ]]"
+        assert_eq "zsh: re-running the init changes no binding and no hook" "$idem" SAME
 
         # bash loses ^R by a different mechanism (bind -x, not bindkey), so it
         # needs its own coverage or that branch of common.sh rots unasserted.
         if command -v bash >/dev/null 2>&1; then
             rb="$(sh_probe bash 'bind -X 2>/dev/null | grep -i "C-r"')"
-            assert "bash: ^R is fzf's __fzf_history__, not tv's" \
-                "[[ '$rb' == *__fzf_history__* ]]"
+            assert_glob "bash: ^R is fzf's __fzf_history__, not tv's" \
+                "$rb" '*__fzf_history__*'
             rb2="$(sh_probe bash 'dotfiles-reinit >/dev/null 2>&1; bind -X 2>/dev/null | grep -i "C-r"')"
-            assert "bash: ^R survives a dotfiles-reinit" \
-                "[[ '$rb2' == *__fzf_history__* ]]"
+            assert_glob "bash: ^R survives a dotfiles-reinit" \
+                "$rb2" '*__fzf_history__*'
             eb="$(sh_probe bash 'printf "%s" "${DOTFILES_TOOL_INIT_EPOCH:-UNSET}"')"
-            assert "bash: tool-init stamp is set and numeric" "[[ '$eb' =~ ^[0-9]+$ ]]"
+            assert_re "bash: tool-init stamp is set and numeric" "$eb" '^[0-9]+$'
         fi
 
         rm -f "$SB/.local/bin/fzf" "$SB/.local/bin/tv"
@@ -2478,4 +2595,21 @@ done
 # ---- summary ---------------------------------------------------------------
 sec "summary"
 printf '  %d passed, %d failed\n' "$PASS" "$FAIL"
-[[ $FAIL -eq 0 ]] && { echo "  ✅ all assertions passed"; exit 0; } || { echo "  ❌ failures above"; exit 1; }
+if [[ $FAIL -eq 0 ]]; then
+    echo "  ✅ all assertions passed"
+    exit 0
+fi
+printf '  failing assertions:\n'
+printf '    - %s\n' "${FAILED[@]}"
+# The counter and the list are written by the same line of bad(), so they can only
+# disagree if a failure was raised in a subshell — where the increment is lost too.
+# That is unprovable from here, but the divergence it leaves behind is not.
+[[ ${#FAILED[@]} -eq $FAIL ]] || \
+    printf '  ⚠ %d failures counted but %d captured — a bad() ran in a subshell\n' \
+        "$FAIL" "${#FAILED[@]}"
+if [[ -s "$EVID_LOG" ]]; then
+    KEEP_EVID=1
+    printf '  probe transcript (the raw stdout/stderr the asserts discard): %s\n' "$EVID_LOG"
+fi
+echo "  ❌ failures above"
+exit 1
