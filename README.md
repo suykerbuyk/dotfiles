@@ -175,6 +175,8 @@ directory.
 | [`shell.md`](home/doc/shell.md) | The env/rc layering and the bugs it fixed. |
 | [`secrets.md`](home/doc/secrets.md) | The age-encrypted secrets model. |
 | [`ssh-agent.md`](home/doc/ssh-agent.md) | The systemd user ssh-agent with socket activation. |
+| [`multiplexers.md`](home/doc/multiplexers.md) | tmux and herdr as peers: the shared prefix, `tm`/`hrdr`. |
+| [`teleport.md`](home/doc/teleport.md) | Reaching hosts via `tsh`, and browser-less boxes via `--headless`. |
 
 ## Running the tests
 

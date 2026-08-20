@@ -3,6 +3,17 @@
 # Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
+# `tsh login` helper for the syketech.com cluster.
+#
+# 1Password is the PREFERRED secret source, never a requirement: with a working
+# `op` the prompts are answered automatically, and without one this degrades to
+# an ordinary interactive login. The cluster is LOCAL auth (password + TOTP), so
+# no path here needs a browser and a headless box can hold a full certificate.
+#
+# `tsh ssh --headless` is a different tool for a different goal -- it leaves NO
+# certificate behind -- so it is offered as advice, never as a fallback for this
+# script. See home/doc/teleport.md.
+
 set -eu
 
 # Derived from arg0, never hardwired: this file is applied by chezmoi and the
@@ -44,13 +55,6 @@ if ! command -v tsh >/dev/null 2>&1; then
 	exit 1
 fi
 
-if ! command -v op >/dev/null 2>&1; then
-	printf '%s: 1Password CLI (op) not found on PATH.\n' "$me" >&2
-	printf '  Install it, or log in manually:\n' >&2
-	printf '    tsh login --proxy=%s --user=%s\n' "$PROXY" "$login" >&2
-	exit 1
-fi
-
 export TELEPORT_TLS_ROUTING_CONN_UPGRADE=true
 # The rc layer already exports this on desktops carrying the 1Password agent
 # (dot_config/bashrc.d/10-ssh-agent.sh). Repeated here for headless boxes and
@@ -60,8 +64,52 @@ export TELEPORT_USE_LOCAL_SSH_AGENT=false
 # One `op` call per distinct secret. An earlier version fetched the password
 # twice -- once into a variable it then never read, and once inline for a paste
 # buffer -- costing an extra unlock prompt for nothing.
-pass="$(op item get "$ITEM" --fields label=password --reveal)"
-otp="$(op item get "$ITEM" --otp)"
+#
+# The predicate is OPERABILITY, not presence. `command -v op` proves only that a
+# binary exists; the failure actually observed was an INSTALLED op returning
+# "authorization timeout" because its biometric prompt went unanswered. `op
+# --help` and `op --version` both pass in exactly that state -- neither touches
+# the desktop integration that fails -- so the only honest test of "can op hand
+# over this secret" is asking it for the secret. Same rule
+# df_delta_gitconfig_reconcile() follows for delta.
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT INT TERM
+op_err="${tmpdir}/op.err"
+op_reason=""
+
+if ! command -v op >/dev/null 2>&1; then
+	op_reason="1Password CLI (op) not found on PATH"
+elif ! pass="$(op item get "$ITEM" --fields label=password --reveal 2>"$op_err")"; then
+	op_reason="op could not read the password"
+elif ! otp="$(op item get "$ITEM" --otp 2>"$op_err")"; then
+	op_reason="op could not read the one-time password"
+fi
+
+# DEGRADE, never refuse. A box with no usable `op` can still get a full
+# certificate: the human types the two secrets that op would have supplied. The
+# command below is the SAME one the no-python3 path already ends with, so this
+# adds no new authentication path -- it only stops the script refusing work it
+# is perfectly able to do. Exiting 1 here (the previous behaviour) turned a
+# missed biometric prompt into a dead end.
+#
+# `tsh ssh --headless` is deliberately OFFERED, not taken: it produces no
+# certificate, so silently substituting it would report success and leave `ssh
+# <host>` still broken.
+if [ -n "$op_reason" ]; then
+	printf '%s: %s -- falling back to an interactive login.\n' "$me" "$op_reason" >&2
+	# `[ -s f ] && cmd` would be the last command in the branch, and a false test
+	# returns 1 -- which `set -e` turns into an exit. Keep it an `if`.
+	if [ -s "$op_err" ]; then
+		sed 's/^/  op: /' "$op_err" >&2
+	fi
+	printf '  Type your password and OTP at the prompts below.\n' >&2
+	printf '  To reach a node WITHOUT leaving a certificate on this host, cancel and use:\n' >&2
+	printf '    tsh ssh --headless --proxy=%s --user=%s <login>@<node>\n' "$PROXY" "$login" >&2
+	printf '  See home/doc/teleport.md.\n' >&2
+	# No pty driver: with nothing to inject, the human owns the terminal directly.
+	tsh login --proxy="$PROXY" --user="$login" --mfa-mode="$mfa_mode" --ttl 1800
+	exit $?
+fi
 
 # ---------------------------------------------------------------------------
 # Preferred path: drive `tsh login` under a pty and answer its prompts directly.
@@ -82,8 +130,7 @@ otp="$(op item get "$ITEM" --otp)"
 # select, termios, tty, fcntl and signal are all standard library.
 # ---------------------------------------------------------------------------
 if command -v python3 >/dev/null 2>&1; then
-	driver="$(mktemp)"
-	trap 'rm -f "$driver"' EXIT INT TERM
+	driver="${tmpdir}/driver.py"
 	cat >"$driver" <<'PYDRIVER'
 import errno, fcntl, os, pty, select, signal, sys, termios, time, tty
 

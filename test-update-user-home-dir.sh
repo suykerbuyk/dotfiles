@@ -1701,8 +1701,44 @@ assert "tsh-login: driver is fed from a pipe, not argv" \
 # continuation sailed straight past it. Mutation testing caught that.
 assert "tsh-login: no secret on the driver command line" \
     "[[ -z \$(nocomment $TSHL | grep -A2 'python3 \"\$driver\"' | grep -E '\\\$pass|\\\$otp') ]]"
-assert "tsh-login: driver temp file is trapped for removal" \
-    "nocomment $TSHL | grep -qE 'trap .rm -f .\\\$driver.* EXIT INT TERM'"
+# The driver used to take its own mktemp file and its own trap. It now lives in
+# one scratch dir that a single trap owns, so the op-unusable path -- which
+# writes no driver at all -- cannot leave a stray temp behind. Assert BOTH
+# halves: a trap on the dir, AND the driver actually inside it. A trap on a dir
+# the driver does not live in would clean up nothing and still grep clean.
+assert "tsh-login: scratch dir is trapped for removal" \
+    "nocomment $TSHL | grep -qE 'trap .rm -rf .\\\$tmpdir.* EXIT INT TERM'"
+assert "tsh-login: driver lives inside the trapped dir" \
+    "nocomment $TSHL | grep -q 'driver=\"\\\${tmpdir}/'"
+
+# DEGRADE, never refuse. `op` is the PREFERRED secret source, never a
+# requirement: this cluster is LOCAL auth (password + TOTP), so a box with no
+# usable op can still hold a full certificate -- the human types what op would
+# have supplied. The old behaviour exited 1 on a missing op, which turned an
+# unanswered biometric prompt into a dead end while the script sat on a working
+# interactive path it refused to use.
+#
+# The predicate is OPERABILITY, not presence: `command -v op` proves only that a
+# binary exists, and the failure actually observed was an INSTALLED op returning
+# "authorization timeout". Asserted as the elif CHAIN, because a presence check
+# that does not also catch a failing fetch is exactly the bug.
+assert "tsh-login: degrades to an interactive login, never refuses" \
+    "[[ \$(nocomment $TSHL | grep -c 'tsh login --proxy=') -eq 3 ]]"
+# COUNT, not presence: `grep -q` here matches EITHER elif, so converting just one
+# of the two fetches back to a hard guard sailed straight past it. Mutation
+# testing caught that. Both fetches must degrade -- a password that falls back
+# while the OTP still exits is half a fix.
+assert "tsh-login: a failing op fetch degrades too, not just a missing binary" \
+    "[[ \$(nocomment $TSHL | grep -cE 'elif ! (pass|otp)=') -eq 2 ]]"
+
+# --headless produces NO certificate, so substituting it for a login would report
+# success and leave `ssh <host>` still broken. It is OFFERED as advice and never
+# executed. COUNT-based: an occurrence outside a printf trips it. The first
+# assert is the non-vacuity control -- the equality below is satisfied by 0 == 0.
+assert "tsh-login: offers --headless as the no-certificate alternative" \
+    "[[ \$(nocomment $TSHL | grep -c 'tsh ssh --headless') -ge 1 ]]"
+assert "tsh-login: --headless is advice, never executed" \
+    "[[ \$(nocomment $TSHL | grep -c 'tsh ssh --headless') -eq \$(nocomment $TSHL | grep 'tsh ssh --headless' | grep -c printf) ]]"
 
 # POSITIVE, and deliberately so. Human ruling 2026-08-15: the OTP is printed on
 # stdout. A known exposure -- tmux-pane-log can persist it, and it sits in
@@ -1712,7 +1748,7 @@ assert "tsh-login: driver temp file is trapped for removal" \
 # never displays it, which is why this assert must NOT require it on both paths.
 assert "tsh-login: OTP on stdout is a RULING"       "nocomment $TSHL | grep -q 'One time password'"
 # --ttl is MINUTES: 1800 is 30 HOURS, already at Teleport's typical hard cap.
-assert "tsh-login: --ttl stays 1800 (30 HOURS)"     "[[ \$(nocomment $TSHL | grep -c -- '--ttl 1800') -eq 2 ]]"
+assert "tsh-login: --ttl stays 1800 (30 HOURS)"     "[[ \$(nocomment $TSHL | grep -c -- '--ttl 1800') -eq 3 ]]"
 
 # Enrolling a WebAuthn passkey CHANGED tsh's MFA prompt, mid-task and without
 # warning: with one factor it read "Enter an OTP code from a device:", with two
@@ -1721,8 +1757,8 @@ assert "tsh-login: --ttl stays 1800 (30 HOURS)"     "[[ \$(nocomment $TSHL | gre
 # hung with the code in hand and never sent. Two defences, both asserted.
 #
 # 1. Make the prompt DETERMINISTIC rather than something to pattern-match.
-assert "tsh-login: pins --mfa-mode on both paths" \
-    "[[ \$(nocomment $TSHL | grep -c -- '--mfa-mode=\"\$mfa_mode\"') -eq 2 ]]"
+assert "tsh-login: pins --mfa-mode on all three paths" \
+    "[[ \$(nocomment $TSHL | grep -c -- '--mfa-mode=\"\$mfa_mode\"') -eq 3 ]]"
 assert "tsh-login: --mfa-mode is overridable"       "nocomment $TSHL | grep -q 'TSH_LOGIN_MFA_MODE'"
 # 2. Match a SET of cues anyway -- a silent hang is the expensive failure. This
 #    is a COUNT: a lone literal is exactly the bug, so presence proves nothing.
