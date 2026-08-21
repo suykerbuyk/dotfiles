@@ -70,7 +70,7 @@ teardown strands them exactly the way tree-sitter's binary was stranded.
 
 Each `NN_fetch.<tool>.sh` sources `_lib.sh` and installs one tool as a **versioned
 static binary** under `~/.local/apps/`, symlinked into `~/.local/bin/`. There are
-currently **21 slots** (01–21).
+currently **22 slots** (01–22).
 
 Key `_lib.sh` helpers:
 - `fb_init` — dirs, temp dir with cleanup trap, and a guard against running inside
@@ -352,6 +352,44 @@ Key `_lib.sh` helpers:
     points must move together — a partial switch is how you end up with two
     terminals whose configs drift, which is exactly the bug that put a dead
     `font_family` override in `kitty.conf` for months.
+
+- **tsh / tctl** (slot **22**) are the Teleport client tools, and this slot
+  inverts four rules the others establish — read the file's own header before
+  changing it. It makes **no GitHub API call at all** (Teleport publishes on
+  `cdn.teleport.dev`), so it is the only fetcher that cannot be rate-limited.
+  It pins the version to the **cluster**, not to upstream latest, by reading
+  `auto_update.tools_version` from `https://<proxy>/v1/webapi/find`; a client
+  matching its own proxy avoids `tsh`'s version-skew warnings by construction,
+  and being unable to read it is a hard failure rather than a hardcoded
+  fallback, which would quietly stage the skewed client the pinning exists to
+  prevent. **`fb_arch` is correct here** — the opposite of slots 17–21 —
+  because Teleport names assets `amd64`/`arm64`, exactly what `fb_arch` emits;
+  "correcting" it to raw `uname -m` 404s on arm64 and is invisible from x86_64.
+  And `version` is a **subcommand**: `tsh --version` is a hard error, so that
+  argv is what `install_bin` receives.
+
+  Two behaviours are specific to this slot:
+  - **It defers to a system-wide `tsh`.** Teleport's vendor installer writes
+    `/usr/local/bin/tsh`, and a box provisioned that way needs nothing from us
+    — a second copy in `~/.local/bin` would only *shadow* it, since the env
+    layer puts `~/.local/bin` first. The check is `fb_system_bin`, not a bare
+    `command -v`: `fb_init` puts `$BIN_DIR` on `PATH`, so `command -v tsh`
+    finds **our own symlink** and the fetcher would skip forever after its
+    first install. `fb_system_bin` strips `$BIN_DIR`, rejects anything
+    resolving into `$APP_DIR`, and probes **operability** rather than presence.
+    `TSH_FETCH_FORCE=1` overrides the deferral.
+  - **It checks the installed version before downloading.** The asset is
+    ~207 MB — the whole Teleport suite, of which only `tsh` and `tctl` are
+    extracted — and the installer runs every fetcher on every Phase-5 pass.
+    Leaving that decision to `install_bin` would re-pull a fifth of a gigabyte
+    each run only to be told "already valid". Same reasoning as the versioned
+    ghostty AppImage in slot 16.
+
+  It installs **no completions**, deliberately: `tsh --completion-script-zsh`
+  emits a `#compdef` directive with no command name and a function named
+  literally `_`, which zsh either ignores or loads as a garbage completer,
+  silently either way. That is worse than bat's rename trap, so the honest
+  move is to ship none.
 
 ## chezmoi source layout (`home/`)
 - Attribute-encoded names: `dot_*`, `private_*` (e.g. `private_dot_ssh` → 0700),

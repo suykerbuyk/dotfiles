@@ -32,6 +32,7 @@ df_doctor_registry() {
 		'bat|bat|' \
 		'delta|delta| git pager; also wires five global git config keys' \
 		'xh|xh|' \
+		'tsh|tsh| Teleport client; the fetcher DEFERS when a system-wide tsh exists' \
 		'zed|zed|' \
 		'ghostty|ghostty| community AppImage; upstream ships Linux via distros' \
 		'chezmoi|chezmoi|' \

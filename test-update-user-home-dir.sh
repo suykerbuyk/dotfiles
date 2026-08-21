@@ -1959,6 +1959,113 @@ assert "installer uninstall covers xh"              "grep -qE '^[[:space:]]*for 
 assert "installer uninstall removes delta binary"   "grep -qE '^[[:space:]]*remove_bin delta\$' update-user-home-dir.sh"
 assert "installer uninstall removes completions"    "grep -qE '^[[:space:]]*fb_remove_completions fd bat delta xh\$' update-user-home-dir.sh"
 
+# ---------------------------------------------------------------------------
+# Slot 22 — Teleport client tools (tsh, tctl).
+#
+# This fetcher INVERTS four rules the other slots establish, so every assert
+# below is pinning a departure a well-meaning reader would otherwise "fix":
+#
+#   1. fb_arch is CORRECT here. Slots 17-21 all document it as a trap because
+#      those projects use raw `uname -m`; Teleport uses amd64/arm64, which is
+#      exactly what fb_arch emits. The 18-21 loop asserts fb_arch is NEVER
+#      called; this one asserts it IS.
+#   2. No GitHub API, at all. cdn.teleport.dev serves the asset, so the tag and
+#      asset helpers must not appear — only gh_download, a plain URL fetcher.
+#   3. The version comes from the CLUSTER. A hardcoded fallback would quietly
+#      stage a skewed client, which is the thing pinning exists to prevent.
+#   4. `version` is a SUBCOMMAND. `tsh --version` is a hard error, so the
+#      install_bin verify argv must not carry the flag form.
+sec "structural: Teleport tsh fetcher (slot 22, no network)"
+TSH_FETCHER="home/dot_local/bin/fetch.bins/executable_22_fetch.tsh.sh"
+assert "22_fetch.tsh.sh present"                    "[[ -f $TSH_FETCHER ]]"
+assert "22_fetch.tsh.sh is executable (0755)"       "[[ -x $TSH_FETCHER ]]"
+assert "22_fetch.tsh.sh is valid bash"              "bash -n $TSH_FETCHER"
+assert "22_fetch.tsh.sh sources _lib.sh"            "grep -q '_lib.sh' $TSH_FETCHER"
+assert "22_fetch.tsh.sh carries the SPDX banner" \
+    "grep -q 'SPDX-License-Identifier: MIT OR Apache-2.0' $TSH_FETCHER"
+assert "tsh fetcher goes through install_bin" \
+    "grep -qE '^[[:space:]]*install_bin[[:space:]]' $TSH_FETCHER"
+
+# Trap 1 — the fb_arch inversion. Assert the CALL, on comment-stripped source:
+# the header explains the inversion at length and a raw grep would match its own
+# rationale in either direction.
+assert "tsh fetcher CALLS fb_arch (Teleport uses amd64/arm64)" \
+    "awk '/^[[:space:]]*#/{next} /fb_arch/{f=1} END{exit f?0:1}' $TSH_FETCHER"
+assert "tsh fetcher does NOT use raw uname -m" \
+    "awk '/^[[:space:]]*#/{next} /uname -m/{f=1} END{exit f?1:0}' $TSH_FETCHER"
+
+# Trap 2 — no GitHub API. Comment-stripped, since the header names all three
+# helpers while explaining that they are unused.
+for helper in gh_latest_tag gh_latest_tag_nojq gh_asset_url; do
+    assert "tsh fetcher never calls $helper" \
+        "awk -v h=$helper '/^[[:space:]]*#/{next} \$0 ~ h {f=1} END{exit f?1:0}' $TSH_FETCHER"
+done
+assert "tsh fetcher downloads via gh_download" \
+    "awk '/^[[:space:]]*#/{next} /gh_download/{f=1} END{exit f?0:1}' $TSH_FETCHER"
+
+# Trap 3 — cluster-pinned, and NO hardcoded version fallback. The second assert
+# is the load-bearing one: a literal vNN.NN.NN in executable code would be the
+# silently-stale client the header forbids. Version-shaped strings are expected
+# in the COMMENTS (measured URLs), so this reads stripped source.
+assert "tsh fetcher reads the cluster's tools_version" \
+    "grep -qF 'auto_update.tools_version' $TSH_FETCHER"
+assert "tsh fetcher queries /v1/webapi/find"        "grep -qF '/v1/webapi/find' $TSH_FETCHER"
+assert "tsh fetcher hardcodes no version fallback" \
+    "awk '/^[[:space:]]*#/{next} /teleport-v[0-9]+\\./{f=1} END{exit f?1:0}' $TSH_FETCHER"
+
+# Trap 4 — `version` is a subcommand. Pin both install_bin call sites: passing
+# --version fails the verification gate outright and takes the install with it.
+assert "tsh fetcher verifies with the 'version' subcommand" \
+    "[[ \$(nocomment $TSH_FETCHER | grep -cE '^[[:space:]]*install_bin .* version\$') -eq 2 ]]"
+assert "tsh fetcher never passes --version to install_bin" \
+    "awk '/^[[:space:]]*#/{next} /install_bin/ && /--version/{f=1} END{exit f?1:0}' $TSH_FETCHER"
+
+# Defers to a system-wide tsh. fb_system_bin is what makes that safe on run
+# 2..n — a bare `command -v` would find our OWN symlink, because fb_init puts
+# BIN_DIR on PATH, and the fetcher would skip forever after the first install.
+assert "tsh fetcher defers via fb_system_bin" \
+    "awk '/^[[:space:]]*#/{next} /fb_system_bin/{f=1} END{exit f?0:1}' $TSH_FETCHER"
+assert "tsh fetcher does not key the skip on bare command -v" \
+    "awk '/^[[:space:]]*#/{next} /command -v/{f=1} END{exit f?1:0}' $TSH_FETCHER"
+assert "tsh fetcher offers a force override"        "grep -qF 'TSH_FETCH_FORCE' $TSH_FETCHER"
+
+# The version fast path must precede the download, or every Phase-5 installer
+# run re-pulls ~207 MB only for install_bin to answer "already valid". ORDERING
+# assert, so it reads comment-stripped source (the iter-44 `tv init` lesson).
+assert "tsh version fast path precedes gh_download" \
+    "awk '/^[[:space:]]*#/{next} /already installed and matching/{seen=1} /gh_download/{exit seen?0:1}' $TSH_FETCHER"
+
+# Installs the CLIENT only, and never the vendor's root installer.
+assert "tsh fetcher extracts only tsh and tctl" \
+    "grep -qF 'teleport/tsh teleport/tctl' $TSH_FETCHER"
+assert "tsh fetcher never runs the bundled install script" \
+    "awk '/^[[:space:]]*#/{next} /teleport\\/install/{f=1} END{exit f?1:0}' $TSH_FETCHER"
+
+# No completions, deliberately: tsh's --completion-script-zsh emits a bare
+# `#compdef` and a function literally named `_`. Shipping that is worse than
+# bat's rename trap, so the fetcher must not route through the helper at all.
+assert "tsh fetcher installs NO completions" \
+    "awk '/^[[:space:]]*#/{next} /fb_install_completions/{f=1} END{exit f?1:0}' $TSH_FETCHER"
+
+assert "doctor registry lists tsh"                  "grep -q 'tsh|tsh|' lib/doctor-registry.sh"
+assert "installer uninstall covers tsh"             "grep -qE '^[[:space:]]*for b in .*\\btsh\\b' update-user-home-dir.sh"
+assert "installer uninstall covers tctl"            "grep -qE '^[[:space:]]*for b in .*\\btctl\\b' update-user-home-dir.sh"
+
+# fb_system_bin's own contract, asserted on the library. The PATH strip is the
+# whole point: without it the helper answers "system-provided" for our own
+# symlink and the deferral becomes permanent.
+assert "fb_system_bin strips BIN_DIR from the search PATH" \
+    "grep -qF 'search=\"\${search//:\${BIN_DIR}:/:}\"' $LIB"
+assert "fb_system_bin rejects anything resolving into APP_DIR" \
+    "grep -qF '\"\${APP_DIR}\"/*) return 1 ;;' $LIB"
+assert "fb_system_bin probes operability, not presence" \
+    "grep -qF '\"\$found\" \"\${probe[@]}\" >/dev/null 2>&1 || return 1' $LIB"
+# install_bin's printed version line must follow the caller's argv. Hardcoding
+# --version made it print a usage error under the label "version:" for any tool
+# whose flag differs (tsh, age-keygen).
+assert "install_bin version line reuses the verify argv" \
+    "grep -qF 'version_args=(\"\${verify_args[@]}\")' $LIB"
+
 # ---- Part C: delta's git wiring is imperative, not a managed gitconfig ------
 # The five keys are set by the fetcher after a successful install. A COUNT, not a
 # presence check: "some git config --global call exists" passes a mutation that

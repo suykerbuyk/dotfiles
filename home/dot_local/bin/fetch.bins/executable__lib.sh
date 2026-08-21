@@ -292,6 +292,58 @@ fb_check_bin() {
 }
 
 # ----------------------------------------------------------------------
+# System-provided binary detection
+#
+#   fb_system_bin <name> [probe-argv...]
+#     -> prints the path and returns 0 when a WORKING <name> exists on PATH
+#        that this tree did not install; returns 1 otherwise.
+#
+# Answers "has this box already been provisioned with <name> by someone else?"
+# — the question a fetcher asks before spending a download on a tool the distro,
+# a vendor installer, or an admin already maintains.
+#
+# Two traps make a bare `command -v <name>` wrong here:
+#
+#   1. fb_init PREPENDS $BIN_DIR to PATH, so `command -v` finds OUR OWN symlink
+#      first. A fetcher keying off that would conclude "already provided" on its
+#      SECOND run and never update itself again — the bug is invisible on a
+#      fresh box and permanent on every other one. $BIN_DIR is therefore removed
+#      from PATH for the lookup, and anything whose symlink chain lands in
+#      $APP_DIR is rejected as ours no matter which PATH entry found it.
+#   2. Presence is not operability. This is the delta/`op` rule: `command -v`
+#      proves a name resolves, not that the file runs. A binary for the wrong
+#      arch, with a missing loader, or half-written by an interrupted install
+#      must NOT suppress the fetch. The caller supplies the probe argv because
+#      tools disagree about the flag — `tsh version` is a subcommand and
+#      `tsh --version` is a hard error. Pass no probe to skip the run check.
+# ----------------------------------------------------------------------
+fb_system_bin() {
+    local name="$1"; shift
+    local probe=("$@")
+    local search found resolved
+
+    search=":${PATH}:"
+    search="${search//:${BIN_DIR}:/:}"
+    search="${search#:}"
+    search="${search%:}"
+
+    found="$(PATH="$search" command -v "$name" 2>/dev/null || true)"
+    [[ -n "$found" && -x "$found" ]] || return 1
+    [[ "$found" != "${BIN_DIR}/${name}" ]] || return 1
+
+    resolved="$(readlink -f "$found" 2>/dev/null || printf '%s' "$found")"
+    case "$resolved" in
+        "${APP_DIR}"/*) return 1 ;;
+    esac
+
+    if [[ ${#probe[@]} -gt 0 ]]; then
+        "$found" "${probe[@]}" >/dev/null 2>&1 || return 1
+    fi
+
+    printf '%s' "$found"
+}
+
+# ----------------------------------------------------------------------
 # Installation helper — verify before symlink (now with fb_check_bin)
 # ----------------------------------------------------------------------
 install_bin() {
@@ -335,7 +387,15 @@ install_bin() {
     ln -sfn "$src" "${BIN_DIR}/${bin_name}"
     echo "Installed ${bin_name} -> ${BIN_DIR}/${bin_name}"
     if [[ -x "${BIN_DIR}/${bin_name}" ]]; then
-        echo "  version: $("${BIN_DIR}/${bin_name}" --version 2>&1 | head -1)"
+        # Reuse the caller's verify argv instead of hardcoding --version: not
+        # every tool has that flag (`tsh version` is a SUBCOMMAND, and
+        # `tsh --version` is a usage error), and printing a usage error under
+        # the label "version:" is worse than printing nothing. Callers that
+        # passed no probe keep the historical default, so this is a no-op for
+        # every existing fetcher.
+        local version_args=(--version)
+        [[ ${#verify_args[@]} -eq 0 ]] || version_args=("${verify_args[@]}")
+        echo "  version: $("${BIN_DIR}/${bin_name}" "${version_args[@]}" 2>&1 | head -1)"
     fi
 }
 
