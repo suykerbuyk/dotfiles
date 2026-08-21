@@ -9,8 +9,9 @@ scripts `update.teleport.sh` / `teleport.versions.sh`.
 everything through the proxy. Anywhere else, choose by **credential exposure,
 not by whether a browser exists** — `tsh login` works fine on a headless box,
 because this cluster is local auth (password + TOTP, both typed, no browser
-anywhere in the flow). It just leaves a 12h certificate on that machine. When
-you would rather leave nothing behind, use `tsh ssh --headless` and approve in a
+anywhere in the flow). It just leaves a long-lived certificate on that machine —
+30h through the login helper, 12h from a bare `tsh login` (§4). When you would
+rather leave nothing behind, use `tsh ssh --headless` and approve in a
 browser elsewhere. Everything below is why, and the traps on the way.
 
 > **`--headless` is not "the way to use a browser-less box".** That was the
@@ -24,7 +25,7 @@ Deciding which one you are in comes first, because the answers do not transfer.
 | | Situation | Answer |
 |---|---|---|
 | **a** | **Remote headless** — a node in a rack, you at a workstation | Reach it *through* the proxy. Never authenticate on it. |
-| **b** | **Local headless** — you at a console with no GUI/browser | `tsh login` works (typed secrets, 12h cert). Prefer `tsh ssh --headless` when the box should hold **no** credential. |
+| **b** | **Local headless** — you at a console with no GUI/browser | `tsh login` works (typed secrets; 30h cert via the helper, 12h bare). Prefer `tsh ssh --headless` when the box should hold **no** credential. |
 | **c** | **Unattended** — cron or an agent, no human at all | Machine ID (`tbot`). Out of scope here. |
 
 Case **a** is the common one and needs no new machinery — it is already built and
@@ -190,13 +191,44 @@ to *any* cluster.
 > This is the same hazard recorded under mutation discipline in the test suite,
 > and it was re-derived the hard way against the live cluster.
 
-Sessions last **12h** — the cluster's `default_session_ttl`, readable without
-logging in:
+Sessions created by the login helper last **30h**. It passes `--ttl 1800` (the
+flag is in **minutes**), and both roles on this cluster allow that much:
+
+```console
+$ tsh ssh root@syketech 'tctl get roles/access --format=json' \
+    | jq -r '.[0].spec.options.max_session_ttl'
+30h0m0s
+```
+
+A login that passes **no** `--ttl` gets **12h** instead — the cluster's
+`default_session_ttl`, readable without logging in:
 
 ```console
 $ curl -s https://syketech.com/v1/webapi/ping | jq -r .auth.default_session_ttl
 12h0m0s
 ```
+
+**These are two different fields and they do not compete.**
+`default_session_ttl` is the default for a request that names no TTL;
+`max_session_ttl` is the ceiling on one that does. Reading the first as a cap
+on the second is what put a "sessions are silently clamped to 12h" claim in
+this document, and it was wrong — 30h certificates had been issuing all along.
+
+> **🔴 `tsh status` cannot prove a TTL.** It prints an expiry and a countdown,
+> never an *issuance* time, so any lifetime "derived" from it merely returns the
+> lifetime you assumed. That circle is how the 12h claim got here: a 30h
+> certificate issued the previous evening and a 12h one issued this morning land
+> on the same `Valid until`, and `tsh status` cannot tell you which you hold.
+> Measure from the auth server, where issuance is recorded:
+>
+> ```console
+> $ grep -h cert.create /var/lib/teleport/log/<host-uuid>/2026-08-*.log \
+>     | jq -r 'select(.identity.user=="suykerbuyk") | [.time, .identity.expires] | @tsv'
+> 2026-08-20T00:39:30Z	2026-08-21T06:39:30Z    # 30h, not 12h
+> ```
+>
+> Read several days: the short rows are per-connection re-issues, which inherit
+> their parent certificate's expiry and are not logins.
 
 ## 5. The login helper prefers 1Password, but does not require it
 
@@ -208,8 +240,8 @@ never a requirement:
   `/dev/tty` with echo off, not from stdin — so no secret reaches a paste
   buffer, a clipboard, or argv. tmux, herdr and a bare terminal take one path.
 - With `op` missing **or failing**, it says so and falls through to an ordinary
-  interactive `tsh login`. Same 12h certificate; you type the two secrets that
-  `op` would have supplied.
+  interactive `tsh login`. Same 30h certificate — all three login paths pass the
+  same `--ttl 1800`; you type the two secrets that `op` would have supplied.
 
 **The predicate is operability, not presence.** `command -v op` proves only that
 a binary exists. The failure actually observed was an *installed* `op` returning
