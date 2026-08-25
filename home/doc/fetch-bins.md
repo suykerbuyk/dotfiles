@@ -391,6 +391,15 @@ Key `_lib.sh` helpers:
   silently either way. That is worse than bat's rename trap, so the honest
   move is to ship none.
 
+- **op** (slot **23**) is the 1Password CLI (v2). It uses the official
+  AgileBits CDN (`cache.agilebits.com`) with a predictable URL pattern.
+  The fetcher **automatically discovers the latest version** using their
+  check endpoint rather than being pinned. It downloads the simple
+  `op_linux_amd64_vX.Y.Z.zip` containing a single static binary, extracts
+  it with `fb_unzip`, and installs via `install_bin`.
+
+  Set `OP_FETCH_VERSION=2.x.y` to pin a specific release.
+
 ## chezmoi source layout (`home/`)
 - Attribute-encoded names: `dot_*`, `private_*` (e.g. `private_dot_ssh` → 0700),
   `executable_*`, `symlink_*` (a text file holding the link target), `empty_*` (so

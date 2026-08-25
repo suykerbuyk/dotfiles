@@ -44,12 +44,17 @@ template, substituting your `$HOME` and the checkout path.
 ## Fresh machine
 
 1. **Get the age identity onto the box** — the installer does this automatically
-   from 1Password when `op` is signed in. Otherwise, place it by hand:
+   from 1Password when `op` is signed in. The `op` binary is now fetched
+   automatically by `./update-user-home-dir.sh` (slot 23). Otherwise, place
+   the age key by hand:
    ```
    op document get 'dotfiles age key' --vault Personal --out-file ~/.config/chezmoi/key.txt
    chmod 600 ~/.config/chezmoi/key.txt
    ```
    (or paste it from the 1Password app).
+
+   After installation, run `op-login` to authenticate. It uses `OP_SECRET_KEY`
+   from `~/.keys`.
 2. `git pull` (or clone) and run `./update-user-home-dir.sh`.
 
 That's it — `~/.keys` materializes at `0600`. A machine **without** the key still
