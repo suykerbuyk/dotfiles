@@ -1588,6 +1588,7 @@ assert "ghostty config sets the catppuccin theme"   "grep -qi '^theme = Catppucc
 assert "ghostty config pins an installed Nerd Font" "grep -q '^font-family = CaskaydiaCove Nerd Font' $GH_CONF"
 assert "ghostty config leaves TERM at the default"  "! grep -qE '^term[[:space:]]*=' $GH_CONF"
 assert "ghostty config propagates ssh terminfo"     "grep -q 'ssh-terminfo' $GH_CONF"
+assert "ghostty config unbinds ctrl+enter fullscreen" "grep -q '^keybind = ctrl+enter=unbind$' $GH_CONF"
 
 # alacritty was retired (no longer used, and the binary is not installed). Its
 # source dir is gone; the already-applied copies are cleaned off every machine

@@ -37,3 +37,10 @@ scrollback-limit = 10000000
 copy-on-select = clipboard
 confirm-close-surface = true
 mouse-hide-while-typing = true
+
+# --- keybinds ---------------------------------------------------------------
+# Ghostty's Linux default binds ctrl+enter to toggle_fullscreen. That chord
+# never reaches herdr or the child process, and it is not sway (sway's
+# fullscreen is Super+f) or herdr (pane zoom is prefix+z). Unbind so the
+# sequence is delivered through.
+keybind = ctrl+enter=unbind
