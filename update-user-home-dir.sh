@@ -27,6 +27,9 @@
 #   ./update-user-home-dir.sh [--dry-run] [--force] [--uninstall]
 #     --dry-run    show what would happen; make no changes
 #     --force      re-fetch the chezmoi binary even if present
+#                  (jq is NOT re-fetched when a system jq already works —
+#                  that path was burning the unauthenticated GitHub API
+#                  budget of 60 req/hour on every --force)
 #     --uninstall  remove applied dotfiles + fetched tools (dry-run unless --force)
 set -euo pipefail
 
@@ -91,7 +94,7 @@ if $UNINSTALL; then
     # gone, so the tool is no longer on PATH. Keep this list in lockstep with the
     # fetch.bins/ scripts (every 0N_fetch.<tool>.sh must map to an entry here, a
     # special case below, or the rust block).
-    for b in jq rg go gofmt broot fzf nvim ninja starship chezmoi age age-keygen tree-sitter herdr fd bat xh tsh tctl; do
+    for b in jq rg go gofmt broot fzf nvim ninja starship chezmoi age age-keygen tree-sitter herdr fd bat xh tsh tctl op; do
         if $FORCE; then remove_bin "$b"; else echo "  would remove_bin $b"; fi
     done
     # Slots 18-21 (fd, bat, delta, xh) also install SHELL COMPLETIONS into the
@@ -212,6 +215,14 @@ echo "=== Phase 1: jq (jq-free bootstrap) ==="
 JQ="${BIN_DIR}/jq"
 if ! $FORCE && fb_check_bin jq && [[ -x "$JQ" ]]; then
     echo "jq present: $("$JQ" --version)"
+elif SYSTEM_JQ="$(fb_system_bin jq --version)"; then
+    # A distro jq is enough for every later fetcher to parse GitHub JSON.
+    # --force used to remove_bin + fetch_jq anyway, which is what exhausted
+    # the unauthenticated GitHub API budget (60 req/hour) after a couple of
+    # installer runs. Defer even under --force; JQ_FETCH_FORCE=1 still
+    # reaches fetch_jq via 01_fetch.jq.sh if a user-local copy is required.
+    echo "jq: already provided system-wide at ${SYSTEM_JQ} — skipping GitHub fetch."
+    echo "  $("$SYSTEM_JQ" --version 2>&1 | head -1)"
 elif $DRY_RUN; then
     echo "DRY-RUN: fetch_jq (static release binary, no jq required)"
 else

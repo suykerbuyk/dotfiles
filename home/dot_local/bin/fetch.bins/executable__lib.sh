@@ -365,11 +365,40 @@ install_bin() {
     # Critical: copy to persistent location *before* trap cleanup of FB_TMP
     # (fixes broken symlinks for broot/rg/fzf that lived only in temp dir)
     local final_src="${APP_DIR}/${bin_name}"
+
+    # Missing PATH symlink, payload present: restore the link and stop.
+    # In-place `cp` onto a running payload is ETXTBSY (measured 2026-08-29:
+    # `op daemon` holds ~/.local/apps/op). Recreating the symlink is the
+    # whole repair; replacing the inode would also strip setgid.
+    if [[ -x "$final_src" ]] && { [[ ! -e "${BIN_DIR}/${bin_name}" ]] || [[ -L "${BIN_DIR}/${bin_name}" && ! -e "${BIN_DIR}/${bin_name}" ]]; }; then
+        ln -sfn "$final_src" "${BIN_DIR}/${bin_name}"
+        if [[ -x "${BIN_DIR}/${bin_name}" ]]; then
+            echo "Installed ${bin_name} -> ${BIN_DIR}/${bin_name} (restored symlink onto existing payload)"
+            return 0
+        fi
+    fi
+
     # A caller that already placed the binary at $final_src would otherwise make
     # this a self-copy; cp fails ("are the same file") and set -e kills the script
     # before the symlink below, leaving the runtime installed but nothing on PATH.
+    #
+    # Never cp onto $final_src in place: Linux refuses to write a running
+    # executable (ETXTBSY). Stage beside it and `mv -f` — rename(2) unlinks the
+    # old name; any process still running the previous inode keeps it.
     if [[ "$(realpath -m "$src")" != "$(realpath -m "$final_src")" ]]; then
-        cp -a "$src" "$final_src" 2>/dev/null || cp "$src" "$final_src"  # cp -a may fail on some files
+        local staging="${final_src}.new.$$"
+        if cp -a "$src" "$staging" 2>/dev/null || cp "$src" "$staging"; then
+            chmod +x "$staging"
+            if ! mv -f "$staging" "$final_src"; then
+                rm -f "$staging"
+                echo "Error: could not replace $final_src" >&2
+                exit 1
+            fi
+        else
+            rm -f "$staging"
+            echo "Error: could not stage $bin_name to $staging" >&2
+            exit 1
+        fi
     fi
     chmod +x "$final_src"
     src="$final_src"  # update for symlink and verification

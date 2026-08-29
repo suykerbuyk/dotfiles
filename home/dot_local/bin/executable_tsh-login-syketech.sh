@@ -77,6 +77,35 @@ trap 'rm -rf "$tmpdir"' EXIT INT TERM
 op_err="${tmpdir}/op.err"
 op_reason=""
 
+# Linux desktop-app IPC authenticates the CLI by setgid group onepassword-cli.
+# A user-owned 0755 binary connects to 1Password-BrowserSupport.sock and gets
+# ECONNRESET before any message is accepted (measured 2026-08-29). Keep this
+# predicate in lockstep with df_op_linux_sgid_ok in lib/df-common.sh — this
+# file sources nothing (lifestyle-bin; see executable_hrdr).
+op_linux_sgid_ok() {
+	local bin real
+	bin=$(command -v op) || return 1
+	real=$(readlink -f "$bin" 2>/dev/null) || real=$bin
+	[ -g "$real" ] || return 1
+	[ "$(stat -c '%G' "$real" 2>/dev/null)" = onepassword-cli ] || return 1
+	return 0
+}
+
+op_print_linux_sgid_fix() {
+	local bin real
+	bin=$(command -v op) || return 0
+	real=$(readlink -f "$bin" 2>/dev/null) || real=$bin
+	printf '  On Linux, the 1Password app authenticates the CLI by setgid group onepassword-cli.\n' >&2
+	printf '  A user-owned binary gets connection-reset on 1Password-BrowserSupport.sock.\n' >&2
+	printf '  This binary: %s\n' "$(stat -c '%A %G %n' "$real" 2>/dev/null || printf '%s' "$real")" >&2
+	printf '  Fix (then re-run %s):\n' "$me" >&2
+	if ! getent group onepassword-cli >/dev/null 2>&1; then
+		printf '    sudo groupadd -f onepassword-cli\n' >&2
+	fi
+	printf '    sudo chgrp onepassword-cli %s\n' "$real" >&2
+	printf '    sudo chmod g+s %s\n' "$real" >&2
+}
+
 if ! command -v op >/dev/null 2>&1; then
 	op_reason="1Password CLI (op) not found on PATH"
 elif ! pass="$(op item get "$ITEM" --fields label=password --reveal 2>"$op_err")"; then
@@ -101,6 +130,17 @@ if [ -n "$op_reason" ]; then
 	# returns 1 -- which `set -e` turns into an exit. Keep it an `if`.
 	if [ -s "$op_err" ]; then
 		sed 's/^/  op: /' "$op_err" >&2
+	fi
+	# The connection-reset failure is a missing setgid bit, not a bad
+	# secret. Print the two sudo lines so the human can unstick desktop
+	# IPC; then still fall through to an interactive login.
+	if [ "$(uname -s)" = Linux ] && command -v op >/dev/null 2>&1; then
+		if ! op_linux_sgid_ok; then
+			op_print_linux_sgid_fix
+		elif grep -qiE 'connection reset|connecting to desktop app' "$op_err" 2>/dev/null; then
+			printf '  Perms look right (setgid onepassword-cli); the app reset the socket.\n' >&2
+			printf '  Restart the 1Password app, then re-run %s.\n' "$me" >&2
+		fi
 	fi
 	printf '  Type your password and OTP at the prompts below.\n' >&2
 	printf '  To reach a node WITHOUT leaving a certificate on this host, cancel and use:\n' >&2

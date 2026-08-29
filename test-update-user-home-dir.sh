@@ -1408,6 +1408,17 @@ pth="$( . "$LIB" >/dev/null 2>&1; PATH=/usr/bin:/bin; fb_init >/dev/null 2>&1; p
 assert "fb_init prepends \$BIN_DIR to PATH"        "case \":\$pth:\" in *\":$BIN_DIR:\"*) true ;; *) false ;; esac"
 # The installer bootstraps jq in Phase 1 and skips 01_fetch.jq.sh in the loop.
 assert "installer skips 01_fetch.jq.sh in fetcher loop" "grep -q '01_fetch.jq.sh ]] && continue' update-user-home-dir.sh"
+# Distro jq is enough; --force used to remove_bin + fetch_jq anyway and
+# burn the unauthenticated GitHub API budget. Same trap as tsh/op:
+# fb_system_bin, never a bare command -v (fb_init prepends BIN_DIR).
+assert "installer defers jq to a system install" \
+    "nocomment update-user-home-dir.sh | grep -q 'fb_system_bin jq'"
+assert "01_fetch.jq.sh defers via fb_system_bin" \
+    "awk '/^[[:space:]]*#/{next} /fb_system_bin/{f=1} END{exit f?0:1}' home/dot_local/bin/fetch.bins/executable_01_fetch.jq.sh"
+assert "01_fetch.jq.sh does not key the skip on bare command -v" \
+    "awk '/^[[:space:]]*#/{next} /command -v/{f=1} END{exit f?1:0}' home/dot_local/bin/fetch.bins/executable_01_fetch.jq.sh"
+assert "01_fetch.jq.sh offers a force override" \
+    "grep -qF 'JQ_FETCH_FORCE' home/dot_local/bin/fetch.bins/executable_01_fetch.jq.sh"
 
 # ===========================================================================
 sec "secrets: age encryption is wired public-repo-safe"
@@ -1506,6 +1517,68 @@ DELTA_NOTE="$(sh -c '. "$1"; df_doctor_registry' sh "$REPO/lib/doctor-registry.s
     | awk -F'|' '$1=="delta"{print $3}')"
 assert "delta carries a non-empty registry note again" \
     "[[ -n \"\${DELTA_NOTE//[[:space:]]/}\" ]]"
+
+# op: presence is not operability on Linux. A user-owned 0755 binary is what
+# fetch.bins install_bin leaves behind, and the 1Password app resets the
+# socket until it is setgid onepassword-cli. Doctor must report NEED (with
+# the two sudo lines) instead of a green ok. Driven against a STUB op on
+# PATH so this machine's real perms cannot satisfy the check.
+sec "doctor: op without Linux setgid is NEED, not ok"
+OPD="$SB/op-sgid-test"
+mkdir -p "$OPD/bin" "$OPD/.local/bin/fetch.bins"
+printf '#!/bin/sh\nexit 0\n' > "$OPD/bin/op"
+chmod 755 "$OPD/bin/op"
+: > "$OPD/.local/bin/fetch.bins/23_fetch.op.sh"
+DFC="lib/df-common.sh"
+assert "df-common defines df_op_linux_sgid_ok" \
+    "grep -qE '^df_op_linux_sgid_ok\\(\\)' $DFC"
+assert "df-common defines df_op_linux_sgid_fix" \
+    "grep -qE '^df_op_linux_sgid_fix\\(\\)' $DFC"
+assert "df-common setgid fix names sudo chgrp" \
+    "nocomment $DFC | grep -q 'sudo chgrp onepassword-cli'"
+assert "df-common setgid fix names sudo chmod g+s" \
+    "nocomment $DFC | grep -q 'sudo chmod g+s'"
+assert "df-common never invokes sudo" \
+    "[[ -z \$(nocomment $DFC | grep -E '^[[:space:]]*sudo[[:space:]]') ]]"
+assert "doctor-report keys op health on setgid" \
+    "grep -q 'df_op_linux_sgid_ok' lib/doctor-report.sh"
+assert "doctor-report never invokes sudo" \
+    "[[ -z \$(nocomment lib/doctor-report.sh | grep -E '^[[:space:]]*sudo[[:space:]]') ]]"
+
+PATH="$OPD/bin:$PATH" sh -c '. "$1"; df_op_linux_sgid_ok' sh "$REPO/lib/df-common.sh"
+_sgid_rc=$?
+assert "df_op_linux_sgid_ok rejects a user-owned 0755 op" "[[ $_sgid_rc -ne 0 ]]"
+# setgid bit ALONE is not enough: the app checks the process GID against
+# onepassword-cli. chmod g+s as the file owner leaves the group as ours.
+chmod g+s "$OPD/bin/op"
+PATH="$OPD/bin:$PATH" sh -c '. "$1"; df_op_linux_sgid_ok' sh "$REPO/lib/df-common.sh"
+_sgid_rc=$?
+assert "df_op_linux_sgid_ok rejects setgid with the wrong group" "[[ $_sgid_rc -ne 0 ]]"
+chmod 755 "$OPD/bin/op"
+
+DR_OP="$(PATH="$OPD/bin:$PATH" HOME="$OPD" DF_ROOT="" sh -c '
+    . "$1/lib/df-common.sh"
+    . "$1/lib/doctor-registry.sh"
+    . "$1/lib/doctor-report.sh"
+    df_doctor_report
+' sh "$REPO" 2>/dev/null)"
+assert_re "doctor: op without setgid is NEED" "$DR_OP" 'op[[:space:]]+NEED'
+assert "doctor NEED row names sudo chgrp" \
+    "grep -q 'sudo chgrp onepassword-cli' <<<\"\$DR_OP\""
+assert "doctor NEED row names sudo chmod g+s" \
+    "grep -q 'sudo chmod g+s' <<<\"\$DR_OP\""
+assert "doctor NEED row does not also say ok for op" \
+    "! grep -E '^[[:space:]]*op[[:space:]]+ok' <<<\"\$DR_OP\""
+# The ok branch exists and is reachable when the predicate passes. Override
+# the function rather than forging onepassword-cli setgid (needs sudo).
+DR_OP_OK="$(PATH="$OPD/bin:$PATH" HOME="$OPD" DF_ROOT="" sh -c '
+    . "$1/lib/df-common.sh"
+    . "$1/lib/doctor-registry.sh"
+    . "$1/lib/doctor-report.sh"
+    df_op_linux_sgid_ok() { return 0; }
+    df_doctor_report
+' sh "$REPO" 2>/dev/null)"
+assert_re "doctor: op with setgid predicate passing is ok" "$DR_OP_OK" 'op[[:space:]]+ok'
 
 # ===========================================================================
 # Structural checks for the podman fetcher — source-only (grep/bash -n), so they
@@ -1731,6 +1804,21 @@ assert "tsh-login: degrades to an interactive login, never refuses" \
 # while the OTP still exits is half a fix.
 assert "tsh-login: a failing op fetch degrades too, not just a missing binary" \
     "[[ \$(nocomment $TSHL | grep -cE 'elif ! (pass|otp)=') -eq 2 ]]"
+
+# Linux setgid diagnostic. The connection-reset failure is a missing GID bit,
+# not a bad secret. The helper must NAME the two sudo commands so the human can
+# unstick desktop IPC, and must NEVER run them (lifestyle bins stay rootless).
+# Comment-stripped: the rationale comments name both commands.
+assert "tsh-login: names sudo chgrp onepassword-cli" \
+    "nocomment $TSHL | grep -q 'sudo chgrp onepassword-cli'"
+assert "tsh-login: names sudo chmod g+s" \
+    "nocomment $TSHL | grep -q 'sudo chmod g+s'"
+assert "tsh-login: never invokes sudo" \
+    "[[ -z \$(nocomment $TSHL | grep -E '^[[:space:]]*sudo[[:space:]]') ]]"
+assert "tsh-login: setgid check uses test -g AND the group name" \
+    "nocomment $TSHL | grep -q -- '-g \"\$real\"' && nocomment $TSHL | grep -q 'onepassword-cli'"
+assert "tsh-login: setgid hint is Linux-only" \
+    "nocomment $TSHL | grep -q 'uname -s'"
 
 # --headless produces NO certificate, so substituting it for a login would report
 # success and leave `ssh <host>` still broken. It is OFFERED as advice and never
@@ -2051,6 +2139,54 @@ assert "tsh fetcher installs NO completions" \
 assert "doctor registry lists tsh"                  "grep -q 'tsh|tsh|' lib/doctor-registry.sh"
 assert "installer uninstall covers tsh"             "grep -qE '^[[:space:]]*for b in .*\\btsh\\b' update-user-home-dir.sh"
 assert "installer uninstall covers tctl"            "grep -qE '^[[:space:]]*for b in .*\\btctl\\b' update-user-home-dir.sh"
+assert "installer uninstall covers op"              "grep -qE '^[[:space:]]*for b in .*\\bop\\b' update-user-home-dir.sh"
+
+# ===========================================================================
+# Structural checks for the 1Password CLI fetcher (slot 23) — source only.
+# The load-bearing invariant is Linux setgid onepassword-cli: install_bin
+# copies a user-owned 0755 binary, the desktop app then resets CLI IPC, and
+# a re-fetch STRIPS any previously-applied bit. The fetcher must check after
+# install_bin (including the skip path), print the two sudo commands, and
+# never invoke sudo itself.
+sec "structural: 1Password op fetcher (slot 23, no network)"
+OP_FETCHER="home/dot_local/bin/fetch.bins/executable_23_fetch.op.sh"
+assert "23_fetch.op.sh present"                     "[[ -f $OP_FETCHER ]]"
+assert "23_fetch.op.sh is valid bash"               "bash -n $OP_FETCHER"
+assert "23_fetch.op.sh sources _lib.sh"             "grep -q '_lib.sh' $OP_FETCHER"
+assert "23_fetch.op.sh carries the SPDX banner" \
+    "grep -q 'SPDX-License-Identifier: MIT OR Apache-2.0' $OP_FETCHER"
+assert "op fetcher goes through install_bin" \
+    "grep -qE '^[[:space:]]*install_bin[[:space:]]' $OP_FETCHER"
+# Defers to a system-wide op (the 1password-cli package). Same trap as
+# slot 22: fb_init prepends BIN_DIR, so a bare command -v would find OUR
+# OWN symlink after run 1 and skip forever.
+assert "op fetcher defers via fb_system_bin" \
+    "awk '/^[[:space:]]*#/{next} /fb_system_bin/{f=1} END{exit f?0:1}' $OP_FETCHER"
+assert "op fetcher does not key the skip on bare command -v" \
+    "awk '/^[[:space:]]*#/{next} /command -v/{f=1} END{exit f?1:0}' $OP_FETCHER"
+assert "op fetcher offers a force override"         "grep -qF 'OP_FETCH_FORCE' $OP_FETCHER"
+assert "op system deferral precedes the CDN download" \
+    "awk '/^[[:space:]]*#/{next} /fb_system_bin/{seen=1} /cache.agilebits.com/{exit seen?0:1}' $OP_FETCHER"
+assert "op fast path restores a missing PATH symlink onto APP_DIR payload" \
+    "nocomment $OP_FETCHER | grep -q 'ln -sfn \"\${APP_DIR}/\${BIN_NAME}\" \"\${BIN_DIR}/\${BIN_NAME}\"'"
+# User-local setgid check is after install_bin (the function is defined
+# earlier so the system-deferral path can call it too). Pin the APP_DIR
+# call site, not the first mention of the group name.
+assert "op fetcher checks user-local setgid after install_bin" \
+    "[[ \$(nocomment $OP_FETCHER | grep -n 'install_bin' | tail -1 | cut -d: -f1) -lt \$(nocomment $OP_FETCHER | grep -n 'op_ensure_linux_sgid \"\${APP_DIR}' | tail -1 | cut -d: -f1) ]]"
+assert "op fetcher names sudo chgrp onepassword-cli" \
+    "nocomment $OP_FETCHER | grep -q 'sudo chgrp onepassword-cli'"
+assert "op fetcher names sudo chmod g+s" \
+    "nocomment $OP_FETCHER | grep -q 'sudo chmod g+s'"
+assert "op fetcher never invokes sudo" \
+    "[[ -z \$(nocomment $OP_FETCHER | grep -E '^[[:space:]]*sudo[[:space:]]') ]]"
+assert "op fetcher has no op-login leftover" \
+    "[[ -z \$(nocomment $OP_FETCHER | grep -F 'op-login') ]]"
+assert "op fetcher tries chgrp without sudo first" \
+    "nocomment $OP_FETCHER | grep -qE '&&[[:space:]]*chgrp onepassword-cli'"
+assert "doctor registry lists op"                   "grep -q 'op|op|' lib/doctor-registry.sh"
+assert "no op-login refs in source or docs" \
+    "! grep -rin --exclude-dir=.git --exclude=.chezmoiremove -e op-login home lib README.md doctor keys update-user-home-dir.sh"
 
 # fb_system_bin's own contract, asserted on the library. The PATH strip is the
 # whole point: without it the helper answers "system-provided" for our own
@@ -2064,6 +2200,10 @@ assert "fb_system_bin probes operability, not presence" \
 # install_bin's printed version line must follow the caller's argv. Hardcoding
 # --version made it print a usage error under the label "version:" for any tool
 # whose flag differs (tsh, age-keygen).
+assert "install_bin restores a missing PATH symlink onto an existing payload" \
+    "nocomment $LIB | grep -q 'restored symlink onto existing payload'"
+assert "install_bin replaces via staging+mv, not in-place cp" \
+    "nocomment $LIB | grep -q 'staging=\"\${final_src}.new.\$\$\"' && nocomment $LIB | grep -q 'mv -f \"\$staging\" \"\$final_src\"'"
 assert "install_bin version line reuses the verify argv" \
     "grep -qF 'version_args=(\"\${verify_args[@]}\")' $LIB"
 

@@ -44,17 +44,31 @@ template, substituting your `$HOME` and the checkout path.
 ## Fresh machine
 
 1. **Get the age identity onto the box** — the installer does this automatically
-   from 1Password when `op` is signed in. The `op` binary is now fetched
-   automatically by `./update-user-home-dir.sh` (slot 23). Otherwise, place
-   the age key by hand:
+   from 1Password when `op` can talk to the desktop app. The `op` binary is
+   fetched by `./update-user-home-dir.sh` (slot 23) only when a system
+   `1password-cli` package is not already on PATH; a distro `op` is preferred
+   because it is already setgid `onepassword-cli`. Otherwise, place the age
+   key by hand:
    ```
    op document get 'dotfiles age key' --vault Personal --out-file ~/.config/chezmoi/key.txt
    chmod 600 ~/.config/chezmoi/key.txt
    ```
    (or paste it from the 1Password app).
 
-   After installation, run `op-login` to authenticate. It uses `OP_SECRET_KEY`
-   from `~/.keys`.
+   After installation, enable **Settings > Developer > Integrate with
+   1Password CLI** in the 1Password app. On Linux the CLI must also be
+   **setgid `onepassword-cli`** — the app resets `1Password-BrowserSupport.sock`
+   otherwise (`connecting to desktop app: read: connection reset`). Slot 23
+   prints these if they are still needed; a re-fetch strips setgid:
+
+   ```
+   sudo chgrp onepassword-cli ~/.local/apps/op
+   sudo chmod g+s ~/.local/apps/op
+   op whoami
+   ```
+
+   `OP_SECRET_KEY` in `~/.keys` is for `op account add` on a box without the
+   desktop app.
 2. `git pull` (or clone) and run `./update-user-home-dir.sh`.
 
 That's it — `~/.keys` materializes at `0600`. A machine **without** the key still

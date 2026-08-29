@@ -244,12 +244,27 @@ never a requirement:
   same `--ttl 1800`; you type the two secrets that `op` would have supplied.
 
 **The predicate is operability, not presence.** `command -v op` proves only that
-a binary exists. The failure actually observed was an *installed* `op` returning
-`error initializing client: authorization timeout` because its biometric prompt
-went unanswered — and `op --help` and `op --version` both pass in exactly that
-state, since neither touches the desktop integration that fails. The only honest
-test of "can `op` hand over this secret" is asking it for the secret, so the
-script tries and degrades rather than pre-flighting a guess.
+a binary exists. Two installed-but-unusable states have been measured:
+
+- **Authorization timeout** — the biometric prompt went unanswered. `op --help`
+  and `op --version` both pass in that state, since neither touches the desktop
+  integration that fails.
+- **`connecting to desktop app: read: connection reset`** — Linux only. The
+  1Password app authenticates CLI IPC by **setgid group `onepassword-cli`**. A
+  fetch.bins install copies a user-owned 0755 binary, so the app resets
+  `1Password-BrowserSupport.sock` before any message is accepted, even when the
+  app is running and Developer > Integrate with 1Password CLI is on. The helper
+  detects a missing setgid bit (or that error text) and prints:
+
+      sudo chgrp onepassword-cli <resolved-op>
+      sudo chmod g+s <resolved-op>
+
+  A re-fetch strips setgid (`install_bin` recopies); slot 23 re-prints the same
+  two commands. Fetchers never sudo. If the bit is already set and the socket
+  still resets, restart the 1Password app.
+
+The only honest test of "can `op` hand over this secret" is asking it for the
+secret, so the script tries and degrades rather than pre-flighting a guess.
 
 It never substitutes `tsh ssh --headless` for a login. That would produce no
 certificate, report success, and leave `ssh <host>` still broken — so the

@@ -33,7 +33,7 @@ df_doctor_registry() {
 		'delta|delta| git pager; also wires five global git config keys' \
 		'xh|xh|' \
 		'tsh|tsh| Teleport client; the fetcher DEFERS when a system-wide tsh exists' \
-		'op|op| 1Password CLI v2; dynamic latest version from AgileBits CDN' \
+		'op|op| 1Password CLI v2; DEFERS when a system-wide op exists; Linux desktop IPC needs setgid onepassword-cli' \
 		'zed|zed|' \
 		'ghostty|ghostty| community AppImage; upstream ships Linux via distros' \
 		'chezmoi|chezmoi|' \

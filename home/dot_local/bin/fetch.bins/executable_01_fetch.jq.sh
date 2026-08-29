@@ -20,6 +20,19 @@ set -euo pipefail
 
 fb_init
 
+# Defer to a system-wide jq (the same trap as slot 22/23): fb_init prepends
+# $BIN_DIR, so a bare `command -v jq` would find OUR OWN symlink after the
+# first install and skip forever. A distro jq is enough; fetching another
+# copy hits the GitHub API for no gain. JQ_FETCH_FORCE=1 overrides.
+if [[ "${JQ_FETCH_FORCE:-0}" != "1" ]]; then
+    if SYSTEM_JQ="$(fb_system_bin jq --version)"; then
+        echo "jq: already provided system-wide at ${SYSTEM_JQ} — skipping."
+        echo "  $("$SYSTEM_JQ" --version 2>&1 | head -1)"
+        echo "  Set JQ_FETCH_FORCE=1 to install a user-local copy anyway."
+        exit 0
+    fi
+fi
+
 # Skip if already present and valid (version-agnostic check).
 if fb_check_bin jq && [[ -x "${BIN_DIR}/jq" ]]; then
     echo "jq: already valid ($("${BIN_DIR}/jq" --version 2>&1 | head -1))"

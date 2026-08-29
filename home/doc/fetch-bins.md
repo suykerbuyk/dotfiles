@@ -31,7 +31,12 @@ runnable in place** from the checkout. So the installer:
    first `jq` call. `fb_init` also puts `~/.local/bin` on `PATH` **for this run**
    (the env layer that normally does so is only laid down in Phase 3 and is never
    sourced into the running installer), so the jq installed here is found by the
-   phases below. Skipped if already present and valid (unless `--force`).
+   phases below. **Defers to a system-wide `jq`** via `fb_system_bin` (same
+   trap as slots 22/23): a distro jq is enough, and hitting GitHub for a second
+   copy is what exhausted the unauthenticated 60 req/hour budget after a couple
+   of `--force` runs. Skipped if the user-local copy is already valid (unless
+   `--force` *and* no system jq). `JQ_FETCH_FORCE=1` on `01_fetch.jq.sh`
+   installs a user-local copy anyway.
 2. **Phase 2 — chezmoi binary.** Fetches the static Go release binary
    (`fetch_chezmoi` in `_lib.sh`, which uses the jq from Phase 1) into
    `~/.local/bin/chezmoi`. Skipped if already present and valid (unless `--force`).
@@ -70,7 +75,7 @@ teardown strands them exactly the way tree-sitter's binary was stranded.
 
 Each `NN_fetch.<tool>.sh` sources `_lib.sh` and installs one tool as a **versioned
 static binary** under `~/.local/apps/`, symlinked into `~/.local/bin/`. There are
-currently **22 slots** (01–22).
+currently **23 slots** (01–23).
 
 Key `_lib.sh` helpers:
 - `fb_init` — dirs, temp dir with cleanup trap, and a guard against running inside
@@ -393,12 +398,27 @@ Key `_lib.sh` helpers:
 
 - **op** (slot **23**) is the 1Password CLI (v2). It uses the official
   AgileBits CDN (`cache.agilebits.com`) with a predictable URL pattern.
-  The fetcher **automatically discovers the latest version** using their
-  check endpoint rather than being pinned. It downloads the simple
-  `op_linux_amd64_vX.Y.Z.zip` containing a single static binary, extracts
+  Default version is 2.39.0 (`OP_FETCH_VERSION=2.x.y` overrides). It
+  downloads `op_linux_amd64_vX.Y.Z.zip` (a single static binary), extracts
   it with `fb_unzip`, and installs via `install_bin`.
 
-  Set `OP_FETCH_VERSION=2.x.y` to pin a specific release.
+  **It defers to a system-wide `op`.** The distro/AUR package is named
+  `1password-cli` and writes `/usr/bin/op` already setgid `onepassword-cli`.
+  A second copy in `~/.local/bin` would only *shadow* it, and a fetch.bins
+  copy is user-owned 0755 — the desktop app then resets CLI IPC. The check
+  is `fb_system_bin`, not a bare `command -v` (same trap as slot 22).
+  `OP_FETCH_FORCE=1` overrides the deferral.
+
+  After a user-local `install_bin` it checks that the binary is **setgid
+  `onepassword-cli`**. The 1Password desktop app authenticates Linux CLI
+  IPC by that GID and resets the connection otherwise (`connecting to
+  desktop app: read: connection reset`). Fetchers are rootless, so if the
+  bit is missing the fetcher tries `chgrp`/`chmod` without sudo, then
+  prints the two `sudo` commands and continues — the binary is installed,
+  just not usable for app integration until those run. A later re-fetch
+  recopies the file and strips setgid, so the check runs every time,
+  including the "already valid" skip. `./doctor` reports `NEED` on the
+  same predicate (`df_op_linux_sgid_ok` in `lib/df-common.sh`).
 
 ## chezmoi source layout (`home/`)
 - Attribute-encoded names: `dot_*`, `private_*` (e.g. `private_dot_ssh` → 0700),

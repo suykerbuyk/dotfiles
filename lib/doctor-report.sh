@@ -60,7 +60,19 @@ df_doctor_report() {
 		# actionable thing on the line — the fetcher to run — at precisely the
 		# moment it is worth reading, i.e. when that fetcher has failed.
 		if df_have "${_cmd}"; then
-			printf '  %-9s %-5s %s\n' "${_cmd}" 'ok' "$(command -v "${_cmd}")"
+			# op: presence is not operability. Linux desktop IPC
+			# authenticates the CLI by setgid group onepassword-cli;
+			# a user-owned 0755 binary gets ECONNRESET. Report NEED
+			# (and the two sudo lines) instead of a green ok.
+			# Requires df_op_linux_sgid_ok from lib/df-common.sh.
+			if [ "${_cmd}" = op ] && [ "$(uname -s)" = Linux ] && ! df_op_linux_sgid_ok; then
+				_op_real=$(df_op_resolve) || _op_real=$(command -v op)
+				printf '  %-9s %-5s %s\n' "${_cmd}" 'NEED' \
+					"${_op_real} is not setgid onepassword-cli (desktop IPC will reset)"
+				df_op_linux_sgid_fix "${_op_real}"
+			else
+				printf '  %-9s %-5s %s\n' "${_cmd}" 'ok' "$(command -v "${_cmd}")"
+			fi
 		elif [ -z "${_stem}" ]; then
 			printf '  %-9s %-5s %s\n' "${_cmd}" 'n/a' "${_note}"
 		elif _inst=$(df_doctor_installer_for "${_stem}"); then

@@ -36,6 +36,51 @@ df_init() {
 
 df_have() { command -v "$1" >/dev/null 2>&1; }
 
+# df_op_resolve [path] — print the real path of the 1Password CLI binary.
+# Default: `command -v op` through readlink -f. Fails if op is not on PATH.
+df_op_resolve() {
+	_op_p=${1-}
+	if [ -z "${_op_p}" ]; then
+		_op_p=$(command -v op) || return 1
+	fi
+	if command -v readlink >/dev/null 2>&1; then
+		_op_r=$(readlink -f "${_op_p}" 2>/dev/null) || _op_r=${_op_p}
+	else
+		_op_r=${_op_p}
+	fi
+	printf '%s\n' "${_op_r}"
+}
+
+# df_op_linux_sgid_ok [path]
+#
+# True when the 1Password CLI binary can pass the Linux desktop-app GID
+# check: the setgid bit is set AND the file group is onepassword-cli.
+# The app resets 1Password-BrowserSupport.sock otherwise (ECONNRESET
+# before any message is accepted). Path defaults to `command -v op`
+# resolved through readlink -f. Non-Linux callers get false — the check
+# is Linux-only. Canonical predicate; the login helper and slot 23
+# duplicate a short copy because those files cannot source this one.
+df_op_linux_sgid_ok() {
+	[ "$(uname -s)" = Linux ] || return 1
+	_op_p=$(df_op_resolve "${1-}") || return 1
+	[ -f "${_op_p}" ] || return 1
+	[ -g "${_op_p}" ] || return 1
+	[ "$(stat -c '%G' "${_op_p}" 2>/dev/null)" = onepassword-cli ] || return 1
+	return 0
+}
+
+# df_op_linux_sgid_fix [path] — print the rootless-fetcher sudo lines for
+# the resolved binary. Includes groupadd when the group does not exist.
+# Prints to stdout; the caller decides stderr vs the doctor report.
+df_op_linux_sgid_fix() {
+	_op_p=$(df_op_resolve "${1-}") || return 1
+	if ! getent group onepassword-cli >/dev/null 2>&1; then
+		printf '    sudo groupadd -f onepassword-cli\n'
+	fi
+	printf '    sudo chgrp onepassword-cli %s\n' "${_op_p}"
+	printf '    sudo chmod g+s %s\n' "${_op_p}"
+}
+
 # df_delta_gitconfig_reconcile — drop delta's five git keys when delta cannot run.
 #
 # THE ONLY implementation of this rule, deliberately. It has two call sites and
