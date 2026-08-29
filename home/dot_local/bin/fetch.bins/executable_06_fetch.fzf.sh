@@ -13,6 +13,7 @@ set -euo pipefail
 
 BIN_NAME="fzf"
 fb_init
+fb_require_os
 
 OS="$(fb_os)"
 ARCH="$(fb_arch amd64)"  # fzf uses amd64/arm (armv7l->arm)

@@ -26,6 +26,7 @@ set -euo pipefail
 
 BIN_NAME="broot"
 fb_init
+fb_require_os
 
 OS="$(fb_os)"
 ARCH="$(uname -m)"  # broot uses full arch in dir (x86_64, aarch64)

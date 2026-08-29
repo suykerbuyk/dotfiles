@@ -26,6 +26,7 @@ set -euo pipefail
 
 BIN_NAME="herdr"
 fb_init
+fb_require_os
 
 ARCH="$(uname -m)"  # x86_64 | aarch64 — matches herdr's asset names as-is
 

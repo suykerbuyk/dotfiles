@@ -19,6 +19,7 @@ set -euo pipefail
 . "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/_lib.sh"
 
 fb_init
+fb_require_os jq
 
 # Defer to a system-wide jq (the same trap as slot 22/23): fb_init prepends
 # $BIN_DIR, so a bare `command -v jq` would find OUR OWN symlink after the

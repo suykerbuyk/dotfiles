@@ -16,6 +16,7 @@ export NVM_DIR="$APP_DIR/nvm"
 BIN_DIR="$HOME/.local/bin"  # for optional symlink
 
 fb_init
+fb_require_os nvm
 
 # Check if installed (preserved)
 if [[ -f "${NVM_DIR}/nvm.sh" ]]; then

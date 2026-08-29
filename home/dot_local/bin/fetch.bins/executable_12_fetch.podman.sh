@@ -33,6 +33,7 @@ set -euo pipefail
 
 BIN_NAME="podman"
 fb_init
+fb_require_os
 
 ARCH="$(fb_arch amd64)"   # amd64 | arm64
 

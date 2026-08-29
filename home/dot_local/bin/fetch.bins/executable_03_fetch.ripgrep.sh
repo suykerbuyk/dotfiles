@@ -13,6 +13,7 @@ set -euo pipefail
 
 BIN_NAME="rg"
 fb_init
+fb_require_os
 
 OS="$(fb_os)"
 ARCH="$(uname -m)"  # ripgrep uses full arch in dir name (x86_64, aarch64)

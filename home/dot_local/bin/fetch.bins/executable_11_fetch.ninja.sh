@@ -14,6 +14,7 @@ set -euo pipefail
 
 BIN_NAME="ninja"
 fb_init
+fb_require_os
 
 # ninja's release asset is a .zip; fb_unzip (see _lib.sh) extracts it with any
 # no-root tool (unzip/bsdtar/busybox/python3), so no system 'unzip' is required.

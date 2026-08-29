@@ -96,11 +96,160 @@ fb_init() {
 }
 
 # ----------------------------------------------------------------------
+# Per-slot platform support
+# ----------------------------------------------------------------------
+# ONE table, because "does this tool run here" is a property of what UPSTREAM
+# ships, not of anything a fetcher computes. Before this existed each slot
+# discovered its own unavailability in its own way and reported it in its own
+# words: slot 03 said "no matching asset", slot 11 said "unsupported platform",
+# slot 15 and 16 both said "unsupported architecture" for what was really an OS
+# problem, and slots 05 and 12 said nothing at all until they had downloaded
+# tens of megabytes and tried to run a Linux binary. Fifteen ways to say "not
+# here" is fifteen things to read before you know nothing is wrong.
+#
+# Every entry below was VERIFIED against the upstream release list on
+# 2026-08-29, not inferred from the tool being Rust or Go:
+#
+#   freebsd YES  nvm (shell script), go, fzf, chezmoi, age, starship
+#                (starship-x86_64-unknown-freebsd.tar.gz), rust
+#                (static.rust-lang.org/rustup/dist/x86_64-unknown-freebsd → 200)
+#   freebsd NO   jq, rg, broot, nvim, zed, ninja, podman, tree-sitter, ghostty,
+#                herdr, fd, bat, delta, xh, tsh, op
+#
+# There is deliberately NO default arm. An undeclared tool is a hard error, not
+# a guess: a permissive default reproduces exactly the 404-on-FreeBSD behavior
+# this table exists to end, and a restrictive one would silently stop
+# installing a tool on a platform that supports it. The harness asserts every
+# slot is declared, so adding slot 24 without a decision fails the suite rather
+# than shipping a wrong answer.
+fb_supported_os() {
+    case "$1" in
+    # Upstream ships a FreeBSD build, or the tool is a portable script.
+    nvm|go|gofmt|fzf|chezmoi|age|age-keygen|starship|rust|rustc|cargo|rustup)
+        echo "linux darwin freebsd" ;;
+    # No FreeBSD build upstream. jq is listed here rather than as an error
+    # because slot 01 already defers to a system jq, which is how FreeBSD gets
+    # one (pkg install jq) — the fetch is what is unavailable, not the tool.
+    jq|rg|broot|nvim|zed|ninja|podman|tree-sitter|ghostty|herdr|fd|bat|delta|xh|tsh|tctl|op)
+        echo "linux darwin" ;;
+    *)
+        echo "" ;;
+    esac
+}
+
+# fb_require_os [tool] — skip this slot cleanly when the tool has no build for
+# the running OS. Defaults to $BIN_NAME, which every slot sets immediately
+# before fb_init.
+#
+# Exits 0, deliberately. The installer's Phase 5 loop reports a non-zero
+# fetcher as `warning: ... exited non-zero (continuing)`, which is the right
+# noise for a BREAKAGE and the wrong noise for a tool that was never going to
+# be there. A skip is not a degraded success; it is the correct outcome, and it
+# should read like one.
+#
+# Call it from a fetcher SCRIPT, never from one of the fetch_* helper functions
+# below: those are invoked from update-user-home-dir.sh, where `exit 0` would
+# end the installer instead of the slot.
+fb_require_os() {
+    local tool="${1:-${BIN_NAME:-}}" cur list
+    if [[ -z "$tool" ]]; then
+        echo "Error: fb_require_os needs a tool name (BIN_NAME unset)." >&2
+        exit 1
+    fi
+    cur="$(df_os)"
+    list="$(fb_supported_os "$tool")"
+    if [[ -z "$list" ]]; then
+        echo "Error: no platform declaration for '$tool' in fb_supported_os()." >&2
+        echo "       Add one to _lib.sh; there is no default on purpose." >&2
+        exit 1
+    fi
+    case " $list " in
+        *" $cur "*) return 0 ;;
+    esac
+    echo "${tool}: no upstream build for ${cur} (upstream ships: ${list}) — skipping."
+    exit 0
+}
+
+# ----------------------------------------------------------------------
 # Per-tool OS/Arch normalization (avoids the token mismatch bugs)
 # ----------------------------------------------------------------------
+# df_os — the OS name, lowercased: linux, freebsd, darwin, ...
+#
+# Memoized in DF_OS so `uname` is forked at most ONCE per shell, and only when
+# something actually asks. The laziness is not a micro-optimization: this
+# helper is duplicated into the bottom of the env layer, which is sourced by
+# every `zsh -c`, and the standing rule there is that a fork is a tax on every
+# shell in every loop. Defining a function costs nothing; deriving eagerly
+# would bill everyone for an answer most shells never need.
+#
+# DF_OS is deliberately NOT exported, for the same reason DOTFILES_ENV_LOADED
+# is not: a child shell re-derives its own answer rather than trusting an
+# inherited flag.
+#
+# The case arms cover the platforms this repo targets without a second fork;
+# the tr fallback keeps an unlisted OS correct rather than empty.
+df_os_init() {
+    [ -z "${DF_OS:-}" ] || return 0
+    case $(uname -s) in
+    Linux) DF_OS=linux ;;
+    FreeBSD) DF_OS=freebsd ;;
+    Darwin) DF_OS=darwin ;;
+    *) DF_OS=$(uname -s | tr '[:upper:]' '[:lower:]') ;;
+    esac
+}
+
+df_os() { df_os_init; printf '%s\n' "${DF_OS}"; }
+
+# df_is_linux / df_is_freebsd — silent predicates, exit status only.
+#
+# Prefer these to an inline `[ "$(uname -s)" = Linux ]`: that idiom forks on
+# every call, and this repo had spelled the same question three different ways
+# in three files before they were consolidated here.
+df_is_linux() { df_os_init; [ "${DF_OS}" = linux ]; }
+df_is_freebsd() { df_os_init; [ "${DF_OS}" = freebsd ]; }
+
+# fb_os [darwin_label] — the tool-facing name, with Darwin renamed to whatever
+# the upstream project calls it (jq says "macos", age says "darwin"). Signature
+# and output are unchanged; it now derives from df_os so there is ONE place
+# that asks the kernel, and costs zero forks after the first call rather than
+# three on every call.
 fb_os() {
     local darwin_label="${1:-macos}"
-    uname -s | tr '[:upper:]' '[:lower:]' | sed "s/^darwin$/$darwin_label/"
+    df_os_init
+    case "${DF_OS}" in
+    darwin) printf '%s\n' "${darwin_label}" ;;
+    *) printf '%s\n' "${DF_OS}" ;;
+    esac
+}
+
+# fb_rust_triple [linux_libc] — the Rust target triple for this host.
+#
+# Two independent normalizations, and BOTH bite on FreeBSD:
+#   arch — FreeBSD's `uname -m` reports amd64 where Linux reports x86_64. That
+#          single token is why slot 10 failed with "unsupported arch 'amd64'";
+#          it was never an unsupported architecture, just an unmapped name.
+#   os   — linux takes a libc suffix (starship ships musl, rustup ships gnu),
+#          darwin is apple-darwin, freebsd is a bare -unknown-freebsd.
+#
+# SCOPE: this returns a triple; it does not promise upstream BUILT it. The
+# platform table is OS-granular, so one known OS-by-arch gap survives it —
+# starship ships x86_64-unknown-freebsd but no aarch64 variant, so arm64
+# FreeBSD would 404 here. That sits with the existing "slots untested on
+# arm64" thread rather than being modelled as a second table dimension.
+fb_rust_triple() {
+    local libc="${1:-gnu}" arch
+    case "$(uname -m)" in
+    x86_64|amd64) arch=x86_64 ;;
+    aarch64|arm64) arch=aarch64 ;;
+    *) arch="$(uname -m)" ;;
+    esac
+    df_os_init
+    case "${DF_OS}" in
+    linux) printf '%s-unknown-linux-%s\n' "$arch" "$libc" ;;
+    darwin) printf '%s-apple-darwin\n' "$arch" ;;
+    freebsd) printf '%s-unknown-freebsd\n' "$arch" ;;
+    *) printf '%s-unknown-%s\n' "$arch" "${DF_OS}" ;;
+    esac
 }
 
 fb_arch() {
@@ -160,14 +309,15 @@ gh_asset_url() {
     local json asset_url
 
     json="$(curl -fsSL "$url")"
-    # jq_filter is a snippet like 'endswith(".tar.gz") and contains($arch)'
-    # Caller must pass --arg arch "$ARCH" etc. as additional arguments
-    asset_url="$(printf '%s' "$json" | jq -r --arg arch "${3:-}" '
+    # jq_filter is a snippet like 'endswith(".tar.gz") and contains($arch)'.
+    # $arch comes from $3 and $os from $4; both are always bound (empty when
+    # not passed) so a filter may reference either without jq erroring.
+    asset_url="$(printf '%s' "$json" | jq -r --arg arch "${3:-}" --arg os "${4:-}" '
         .assets[] | select(.name | '"$jq_filter"') | .browser_download_url
     ' | head -1)"
 
     if [[ -z "$asset_url" ]]; then
-        echo "Error: no matching asset for filter '$jq_filter' (arch=${3:-})." >&2
+        echo "Error: no matching asset for filter '$jq_filter' (arch=${3:-} os=${4:-})." >&2
         exit 1
     fi
     printf '%s' "$asset_url"
@@ -385,7 +535,20 @@ install_bin() {
     # Never cp onto $final_src in place: Linux refuses to write a running
     # executable (ETXTBSY). Stage beside it and `mv -f` — rename(2) unlinks the
     # old name; any process still running the previous inode keeps it.
-    if [[ "$(realpath -m "$src")" != "$(realpath -m "$final_src")" ]]; then
+    # `realpath -m` (resolve a path whose components need not exist) is a GNU
+    # coreutils extension. BSD realpath rejects it outright, and the failure is
+    # SILENT in the worst way: both sides of the comparison become the empty
+    # string, "" != "" is false, the whole staging block is skipped, and the
+    # very next line chmods a file that was never created. The guard failed
+    # OPEN — measured on FreeBSD 15.1, where it took the chezmoi bootstrap down
+    # with `chmod: .../chezmoi: No such file or directory`.
+    #
+    # bash's -ef compares device and inode, which is what "the same file"
+    # actually means: it is stricter than comparing canonicalized strings
+    # (hardlinks, bind mounts), needs no external binary, and is identical on
+    # every platform. It requires both paths to exist, so test for the target
+    # first — a missing target is trivially "not the same file".
+    if [[ ! -e "$final_src" ]] || ! [[ "$src" -ef "$final_src" ]]; then
         local staging="${final_src}.new.$$"
         if cp -a "$src" "$staging" 2>/dev/null || cp "$src" "$staging"; then
             chmod +x "$staging"
@@ -559,13 +722,16 @@ fetch_jq() {
 # needed). Same gh_* pattern as the other fetchers. Requires fb_init (FB_TMP).
 # ----------------------------------------------------------------------
 fetch_chezmoi() {
-    local arch tag ver url tarball
+    local os arch tag ver url tarball
+    os="$(fb_os darwin)"                          # linux | darwin | freebsd
     arch="$(fb_arch amd64)"                       # amd64 | arm64
     tag="$(gh_latest_tag twpayne/chezmoi)"
     ver="${tag#v}"
-    # Matches e.g. chezmoi_2.71.0_linux_amd64.tar.gz (not the -glibc_/-musl_ or
-    # armv*/i386 variants, which do not contain the exact "_linux_<arch>" token).
-    url="$(gh_asset_url twpayne/chezmoi 'endswith("_linux_" + $arch + ".tar.gz")' "$arch")"
+    # Matches e.g. chezmoi_2.72.0_linux_amd64.tar.gz or _freebsd_amd64.tar.gz.
+    # The underscores around $os are load-bearing: upstream also ships
+    # linux-glibc_ and linux-musl_ builds, and only the exact "_<os>_<arch>"
+    # token excludes them (and the armv*/i386/loong64 variants).
+    url="$(gh_asset_url twpayne/chezmoi 'endswith("_" + $os + "_" + $arch + ".tar.gz")' "$arch" "$os")"
     tarball="${FB_TMP}/chezmoi.tar.gz"
     gh_download "$url" "$tarball"
     tar -xzf "$tarball" -C "$FB_TMP" chezmoi 2>/dev/null || tar -xzf "$tarball" -C "$FB_TMP"

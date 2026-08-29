@@ -32,6 +32,7 @@ set -euo pipefail
 
 BIN_NAME="xh"
 fb_init
+fb_require_os
 
 OS="$(fb_os)"
 ARCH="$(uname -m)"  # x86_64 | aarch64 — matches xh's asset names as-is

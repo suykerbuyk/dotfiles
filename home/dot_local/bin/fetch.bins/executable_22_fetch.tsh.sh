@@ -50,6 +50,7 @@ set -euo pipefail
 
 BIN_NAME="tsh"
 fb_init
+fb_require_os
 
 PROXY="${TSH_FETCH_PROXY:-syketech.com}"
 

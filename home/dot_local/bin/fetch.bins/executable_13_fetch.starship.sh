@@ -17,15 +17,20 @@ set -euo pipefail
 
 BIN_NAME="starship"
 fb_init
+fb_require_os
 
-ARCH="$(uname -m)"  # x86_64 | aarch64 — matches starship's asset names as-is
+# starship names assets by full Rust target triple, so ask for one rather than
+# gluing `uname -m` to a hardcoded "-unknown-linux-musl": on FreeBSD that arch
+# token is amd64 and the OS half is wrong twice over.
+TRIPLE="$(fb_rust_triple musl)"
 
 TAG_NAME="$(gh_latest_tag starship/starship)"
 VERSION="${TAG_NAME#v}"
 
-# Asset: starship-<arch>-unknown-linux-musl.tar.gz
+# Asset: starship-<triple>.tar.gz. Exact equality, not startswith: the release
+# also carries a .tar.gz.sha256 beside every tarball.
 ASSET_URL="$(gh_asset_url starship/starship \
-    'startswith("starship-" + $arch + "-unknown-linux-musl") and endswith(".tar.gz")' "$ARCH")"
+    '. == ("starship-" + $arch + ".tar.gz")' "$TRIPLE")"
 
 TARBALL="${FB_TMP}/starship.tar.gz"
 gh_download "$ASSET_URL" "$TARBALL"

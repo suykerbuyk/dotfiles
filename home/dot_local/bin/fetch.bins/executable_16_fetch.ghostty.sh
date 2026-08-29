@@ -37,6 +37,7 @@ APP_ID="com.mitchellh.ghostty"
 
 require_display_or_skip   # GUI: skip on tty-only and display-less WSL
 fb_init
+fb_require_os
 
 # Asset arch tokens are raw `uname -m` (x86_64 / aarch64), NOT fb_arch's
 # amd64/arm64 mapping. Fail loud on anything else rather than 404 on download.

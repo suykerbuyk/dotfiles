@@ -35,6 +35,7 @@ set -euo pipefail
 
 BIN_NAME="op"
 fb_init
+fb_require_os
 
 # Report (and try to apply) Linux setgid onepassword-cli on a resolved
 # binary. Used for both a system op we deferred to and a user-local

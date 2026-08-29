@@ -16,6 +16,7 @@ INSTALL_DIR="${APP_DIR}/${BIN_NAME}.app"
 
 require_display_or_skip
 fb_init
+fb_require_os
 
 CHANNEL="${ZED_CHANNEL:-stable}"
 OS="$(fb_os)"

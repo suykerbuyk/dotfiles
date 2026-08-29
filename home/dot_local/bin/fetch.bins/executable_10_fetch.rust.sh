@@ -15,6 +15,7 @@ set -euo pipefail
 . "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/_lib.sh"
 
 fb_init
+fb_require_os rust
 
 # Standard rustup layout. Hardcoded to the defaults on purpose: the shell rc
 # (dot_zshrc / dot_bashrc-*) already sources "$HOME/.cargo/env" and adds
@@ -39,11 +40,11 @@ fi
 # rustup publishes a static rustup-init per host triple. Target the gnu triples
 # (glibc) to match the Debian/Arch machines this repo bootstraps.
 ARCH="$(uname -m)"
-case "$ARCH" in
-    x86_64)          TRIPLE="x86_64-unknown-linux-gnu" ;;
-    aarch64|arm64)   TRIPLE="aarch64-unknown-linux-gnu" ;;
-    *) echo "Error: unsupported arch '$ARCH' for rustup-init." >&2; exit 1 ;;
-esac
+# rustup's dist path IS a Rust target triple, and the host token differs by OS:
+# FreeBSD's `uname -m` says amd64 where Linux says x86_64, which is the whole
+# reason this slot used to die with "unsupported arch 'amd64'". rustup ships
+# x86_64-unknown-freebsd (verified 200, 2026-08-29).
+TRIPLE="$(fb_rust_triple gnu)"
 
 INIT_URL="https://static.rust-lang.org/rustup/dist/${TRIPLE}/rustup-init"
 INIT_BIN="${FB_TMP}/rustup-init"

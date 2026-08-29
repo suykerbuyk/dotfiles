@@ -16,6 +16,7 @@ set -euo pipefail
 . "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/_lib.sh"
 
 fb_init
+fb_require_os chezmoi
 
 # Skip if already present and valid (version-agnostic check).
 if fb_check_bin chezmoi && [[ -x "${BIN_DIR}/chezmoi" ]]; then

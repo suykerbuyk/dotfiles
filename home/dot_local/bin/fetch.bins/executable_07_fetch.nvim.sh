@@ -13,6 +13,7 @@ set -euo pipefail
 
 BIN_NAME="nvim"
 fb_init
+fb_require_os
 
 # Per-tool normalization (nvim keeps x86_64, unlike jq's amd64)
 ARCH="$(fb_arch x86_64)"

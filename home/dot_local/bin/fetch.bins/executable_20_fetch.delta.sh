@@ -62,6 +62,7 @@ set -euo pipefail
 
 BIN_NAME="delta"
 fb_init
+fb_require_os
 
 OS="$(fb_os)"
 ARCH="$(uname -m)"  # x86_64 | aarch64 — matches delta's asset names as-is

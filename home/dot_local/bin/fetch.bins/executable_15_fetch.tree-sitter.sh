@@ -18,6 +18,7 @@ set -euo pipefail
 
 BIN_NAME="tree-sitter"
 fb_init
+fb_require_os
 
 case "$(uname -m)" in
     x86_64)  ARCH="x64" ;;

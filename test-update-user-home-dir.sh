@@ -153,11 +153,40 @@ nocomment() { sed 's/#.*//' "$1"; }
 # answer is per-MACHINE, not per-distro: on Debian /bin/sh IS dash and must be
 # accepted, on Arch it is bash and must be rejected. The probe decides; nothing
 # here hardcodes a guess about which box the suite is running on.
+#
+# The version probe alone is NECESSARY BUT NOT SUFFICIENT, and FreeBSD is the
+# proof. Its /bin/sh is a genuine non-bash, non-zsh shell — it prints an empty
+# line and passes the probe above — yet it ACCEPTS `foo-bar() { :; }`, the very
+# construct this section exists to catch. Selecting it satisfied every question
+# discovery asked and still produced a checker with no teeth: the positive
+# control below went red while ~14 sibling `-n` asserts kept reporting green
+# against a shell that cannot fail them. Detected, but not contained.
+#
+# So discovery asks the control question DIRECTLY, of every candidate, before
+# accepting it: a shell qualifies only if it REJECTS the known-bad input. That
+# turns the positive control from a post-hoc alarm into an entry requirement,
+# and it is why the assert further down can never again be the only thing
+# standing between a permissive shell and a suite full of false greens.
+#
+# `-n -c` is used rather than a temp fixture deliberately: no file to create,
+# clean up, or leave behind on a killed run, and nothing for a sandbox to
+# disagree about.
 POSIX_SH=""
+POSIX_SH_STRICT_FNAME=0
 for _cand in dash ash mksh posh yash sh; do
     command -v "$_cand" >/dev/null 2>&1 || continue
     [[ -z "$("$_cand" -c 'echo "${BASH_VERSION:-}${ZSH_VERSION:-}"' 2>/dev/null)" ]] || continue
+    # TEETH: reject a bash array. dash and FreeBSD /bin/sh both reject it;
+    # bash-as-sh accepts it. This is the property that makes the shell a
+    # useful oracle, and unlike the fname check below every POSIX shell
+    # agrees on it.
+    "$_cand" -n -c 'a=(1 2 3)' 2>/dev/null && continue
     POSIX_SH="$(command -v "$_cand")"
+    # CAPABILITY, not a gate: does this shell also reject a hyphenated
+    # function name? dash does; FreeBSD /bin/sh does not. Both are conforming
+    # (see the positive-control block), so record it and let the control
+    # assert below decide whether it can run, rather than rejecting the shell.
+    "$_cand" -n -c 'foo-bar() { :; }' 2>/dev/null || POSIX_SH_STRICT_FNAME=1
     break
 done
 unset _cand
@@ -231,8 +260,31 @@ if [[ -n "$POSIX_SH" ]]; then
     # POSIX-parseable, so a file that fails here may never migrate into it.
     # This assert is what makes that rule enforced rather than merely written.
     assert_file "positive control source present" "home/dot_config/shell/doctor.sh"
-    assert "positive control: doctor.sh FAILS the POSIX parse (hyphenated fn)" \
-        "! \"\$POSIX_SH\" -n home/dot_config/shell/doctor.sh 2>/dev/null"
+
+    # Teeth, asserted everywhere: whatever shell discovery picked, it must
+    # reject a construct bash-as-sh would wave through. Discovery already
+    # enforces this; asserting it here is what catches a future loosening of
+    # discovery itself.
+    assert "checker has teeth: $POSIX_SH rejects a bash array" \
+        "! \"\$POSIX_SH\" -n -c 'a=(1 2 3)' 2>/dev/null"
+
+    # The doctor.sh control is DASH-CLASS ONLY, and that is a statement about
+    # strictness, not about conformance. POSIX requires the APPLICATION to
+    # ensure a function name is a valid `name`; it does not oblige the shell to
+    # reject one that is not. dash rejects `foo-bar()`; FreeBSD's /bin/sh
+    # accepts it as an extension. Both conform.
+    #
+    # So this control pins the DEBIAN risk specifically — /bin/sh there is
+    # dash, and a hyphenated function migrating into the env layer would break
+    # every login on those machines. A shell that permits the extension cannot
+    # test that, and pretending otherwise by disqualifying it would throw away
+    # the ~55 other `-n` and source checks it CAN run.
+    if (( POSIX_SH_STRICT_FNAME )); then
+        assert "positive control: doctor.sh FAILS the POSIX parse (hyphenated fn)" \
+            "! \"\$POSIX_SH\" -n home/dot_config/shell/doctor.sh 2>/dev/null"
+    else
+        skip "positive control: doctor.sh FAILS the POSIX parse — $POSIX_SH permits hyphenated function names (conforming extension); the dash/Debian strictness this pins is UNVERIFIED on this host"
+    fi
 
     # ---- SET A: the declared surface, discovered mechanically ---------------
     # A hardcoded list of filenames is a list that goes stale the day someone
@@ -598,7 +650,7 @@ else
     # POSIX contract at all: every `-n` assert silently degrades to whatever
     # bash-as-sh happens to tolerate. That is the precise state this section
     # exists to eliminate, so it must be RED and stay red until someone
-    # installs one (`pacman -S dash`, `apt install dash`).
+    # installs one (`pacman -S dash`, `apt install dash`, `pkg install dash`).
     bad "no POSIX shell available (tried dash ash mksh posh yash sh) — install dash"
     skip "positive control: doctor.sh must FAIL the POSIX parse (no shell to run it)"
     skip "declared POSIX surface (shebang scan + sourced files) unchecked — no shell to run it"
@@ -1518,6 +1570,80 @@ DELTA_NOTE="$(sh -c '. "$1"; df_doctor_registry' sh "$REPO/lib/doctor-registry.s
 assert "delta carries a non-empty registry note again" \
     "[[ -n \"\${DELTA_NOTE//[[:space:]]/}\" ]]"
 
+# ---------------------------------------------------------------------------
+# df_os — one OS question, three copies that must give one answer.
+#
+# lib/df-common.sh is repo-only, ~/.config/shell/lib.sh and
+# ~/.local/bin/fetch.bins/_lib.sh are APPLIED to $HOME. Three runtime
+# locations, no file reachable from all three, so the helper is duplicated —
+# the same constraint that already forces df_op_linux_sgid_ok into three
+# copies.
+#
+# Duplication is only safe if something notices when the copies drift, and the
+# thing worth checking is that they AGREE, not that they look alike: the files
+# differ in indentation by house style, so a textual diff would report noise
+# forever and be ignored. Source each ALONE, in its own shell, and compare the
+# answer. That catches a copy that drifted in meaning even when it still reads
+# convincingly.
+sec "df_os: one OS predicate, three consumers"
+
+DFOS_DFC="lib/df-common.sh"
+DFOS_SHELL_LIB="home/dot_config/shell/lib.sh"
+DFOS_FB_LIB="home/dot_local/bin/fetch.bins/executable__lib.sh"
+
+for _dfos_f in "$DFOS_SHELL_LIB" "$DFOS_DFC" "$DFOS_FB_LIB"; do
+    assert "df_os defined: $_dfos_f"        "grep -qE '^df_os\\(\\)' $_dfos_f"
+    assert "df_os_init defined: $_dfos_f"   "grep -qE '^df_os_init\\(\\)' $_dfos_f"
+    assert "df_is_linux defined: $_dfos_f"  "grep -qE '^df_is_linux\\(\\)' $_dfos_f"
+    assert "df_is_freebsd defined: $_dfos_f" "grep -qE '^df_is_freebsd\\(\\)' $_dfos_f"
+done
+unset _dfos_f
+
+# The agreement check. Each source runs in its own shell so one copy cannot
+# satisfy the test by inheriting another's definition.
+_dfos_a="$(sh   -c '. "$1" >/dev/null 2>&1; df_os' sh   "$REPO/$DFOS_SHELL_LIB" 2>/dev/null)"
+_dfos_b="$(sh   -c '. "$1" >/dev/null 2>&1; df_os' sh   "$REPO/$DFOS_DFC" 2>/dev/null)"
+_dfos_c="$(bash -c '. "$1" >/dev/null 2>&1; df_os' bash "$REPO/$DFOS_FB_LIB" 2>/dev/null)"
+
+assert "df_os is non-empty" "[[ -n \"\$_dfos_a\" ]]"
+assert_eq "df_os agrees: shell/lib.sh vs df-common.sh"    "$_dfos_a" "$_dfos_b"
+assert_eq "df_os agrees: shell/lib.sh vs fetch.bins/_lib" "$_dfos_a" "$_dfos_c"
+# Pin it to this machine's actual kernel, so all three agreeing on a WRONG
+# answer still fails. Three copies of one bug agree perfectly.
+assert_eq "df_os matches uname -s" "$_dfos_a" "$(uname -s | tr '[:upper:]' '[:lower:]')"
+
+# The predicates must read the memo, not re-derive. Forcing DF_OS is how the
+# non-native branch gets exercised at all on a single-platform runner.
+assert "df_is_freebsd true when DF_OS=freebsd" \
+    "sh -c '. \"\$1\" >/dev/null 2>&1; DF_OS=freebsd; df_is_freebsd' sh '$REPO/$DFOS_DFC'"
+assert "df_is_linux false when DF_OS=freebsd" \
+    "! sh -c '. \"\$1\" >/dev/null 2>&1; DF_OS=freebsd; df_is_linux' sh '$REPO/$DFOS_DFC'"
+
+# Not exported, for the same reason DOTFILES_ENV_LOADED is not: a child shell
+# re-derives rather than trusting an inherited answer.
+assert_eq "DF_OS is not exported to children" \
+    "$(sh -c '. "$1" >/dev/null 2>&1; df_os >/dev/null; sh -c "echo \${DF_OS:-UNSET}"' sh "$REPO/$DFOS_DFC" 2>/dev/null)" \
+    "UNSET"
+
+# fb_os keeps its signature: Darwin renamed to the caller's label, every other
+# OS returned untouched regardless of what label was passed.
+assert_eq "fb_os maps darwin to the caller label" \
+    "$(bash -c '. "$1" >/dev/null 2>&1; DF_OS=darwin; printf "%s,%s,%s" "$(fb_os)" "$(fb_os darwin)" "$(fb_os macos)"' bash "$REPO/$DFOS_FB_LIB" 2>/dev/null)" \
+    "macos,darwin,macos"
+assert_eq "fb_os leaves a non-darwin OS alone" \
+    "$(bash -c '. "$1" >/dev/null 2>&1; DF_OS=freebsd; printf "%s,%s" "$(fb_os)" "$(fb_os darwin)"' bash "$REPO/$DFOS_FB_LIB" 2>/dev/null)" \
+    "freebsd,freebsd"
+
+# ANTI-REGRESSION: the scattered idiom must not come back. Comment-stripped,
+# because the replacement's own comment quotes the idiom it replaced — reading
+# raw source here would match that comment and pass forever (iter 44).
+assert "df-common.sh has no inline uname Linux test" \
+    "[[ -z \$(nocomment $DFOS_DFC | grep -F '\"\$(uname -s)\" = Linux') ]]"
+assert "doctor-report.sh has no inline uname Linux test" \
+    "[[ -z \$(nocomment lib/doctor-report.sh | grep -F '\"\$(uname -s)\" = Linux') ]]"
+
+unset _dfos_a _dfos_b _dfos_c
+
 # op: presence is not operability on Linux. A user-owned 0755 binary is what
 # fetch.bins install_bin leaves behind, and the 1Password app resets the
 # socket until it is setgid onepassword-cli. Doctor must report NEED (with
@@ -1545,6 +1671,23 @@ assert "doctor-report keys op health on setgid" \
 assert "doctor-report never invokes sudo" \
     "[[ -z \$(nocomment lib/doctor-report.sh | grep -E '^[[:space:]]*sudo[[:space:]]') ]]"
 
+# Everything above is a source grep and is platform-independent. Everything
+# BELOW executes the predicate, and it is Linux-only in meaning: the predicate
+# short-circuits on `uname -s` (df-common.sh) and doctor-report re-checks it
+# independently (doctor-report.sh:68), so off Linux the else-branch prints
+# `op ok` no matter what the stub binary's permissions are.
+#
+# That makes an ungated run WORSE than a failing one. Four of these seven go
+# red off Linux, which is visible — but three go GREEN for a reason that has
+# nothing to do with what they claim to test: two "rejects ..." asserts pass
+# because the guard returned 1 before looking at any permission, and the
+# "predicate passing is ok" assert passes because the guard reached the else
+# branch, not because the stubbed predicate was consulted. A false green is
+# indistinguishable from coverage.
+#
+# So gate the behavioural half and NAME every skip. Declared-absent coverage
+# can be counted and missed; silently-green coverage cannot.
+if [[ "$(uname -s)" == Linux ]]; then
 PATH="$OPD/bin:$PATH" sh -c '. "$1"; df_op_linux_sgid_ok' sh "$REPO/lib/df-common.sh"
 _sgid_rc=$?
 assert "df_op_linux_sgid_ok rejects a user-owned 0755 op" "[[ $_sgid_rc -ne 0 ]]"
@@ -1579,11 +1722,93 @@ DR_OP_OK="$(PATH="$OPD/bin:$PATH" HOME="$OPD" DF_ROOT="" sh -c '
     df_doctor_report
 ' sh "$REPO" 2>/dev/null)"
 assert_re "doctor: op with setgid predicate passing is ok" "$DR_OP_OK" 'op[[:space:]]+ok'
+else
+    _op_why="Linux-only: 1Password desktop IPC setgid (this is $(uname -s))"
+    skip "df_op_linux_sgid_ok rejects a user-owned 0755 op — $_op_why"
+    skip "df_op_linux_sgid_ok rejects setgid with the wrong group — $_op_why"
+    skip "doctor: op without setgid is NEED — $_op_why"
+    skip "doctor NEED row names sudo chgrp — $_op_why"
+    skip "doctor NEED row names sudo chmod g+s — $_op_why"
+    skip "doctor NEED row does not also say ok for op — $_op_why"
+    skip "doctor: op with setgid predicate passing is ok — $_op_why"
+    unset _op_why
+fi
 
 # ===========================================================================
 # Structural checks for the podman fetcher — source-only (grep/bash -n), so they
 # run in every group. The real fetch is 32 MB and network-gated behind --podman
 # (below), and MUST NOT run in the default group.
+# ---------------------------------------------------------------------------
+# Per-slot platform support.
+#
+# The mechanism has to hold three properties, and only the first is obvious:
+#   1. an unsupported slot SKIPS (exit 0), rather than erroring;
+#   2. a supported slot is not skipped — a guard that skipped everything would
+#      satisfy (1) perfectly and install nothing;
+#   3. an UNDECLARED tool is a hard error. There is no default arm in the
+#      table, because a permissive default silently restores the 404s this
+#      replaced and a restrictive one silently stops installing a tool that
+#      works. Slot 24 must not be able to appear without a decision.
+sec "fetch.bins: per-slot platform support"
+
+FBLIB="home/dot_local/bin/fetch.bins/executable__lib.sh"
+fbreq() { bash -c '. "$1" >/dev/null 2>&1; shift; eval "$@"' bash "$REPO/$FBLIB" "$@" 2>/dev/null; }
+
+assert "_lib.sh declares fb_supported_os" "grep -qE '^fb_supported_os\\(\\)' $FBLIB"
+assert "_lib.sh declares fb_require_os"   "grep -qE '^fb_require_os\\(\\)' $FBLIB"
+assert "_lib.sh declares fb_rust_triple"  "grep -qE '^fb_rust_triple\\(\\)' $FBLIB"
+
+# Coverage: every slot is guarded, and every guarded tool is declared. Read
+# comment-stripped — several fetchers DISCUSS the platform table in prose.
+for _fbf in home/dot_local/bin/fetch.bins/executable_[0-9]*.sh; do
+    _fbn="$(basename "$_fbf" | sed 's/^executable_//')"
+    assert "slot calls fb_require_os: $_fbn" \
+        "[[ -n \$(nocomment '$_fbf' | grep -E '^fb_require_os') ]]"
+    # Resolve the tool the guard will actually use: explicit arg, else BIN_NAME.
+    _fbtool="$(nocomment "$_fbf" | grep -E '^fb_require_os' | head -1 | awk '{print $2}')"
+    [[ -n "$_fbtool" ]] || _fbtool="$(grep -m1 '^BIN_NAME=' "$_fbf" | sed 's/^BIN_NAME=//; s/"//g')"
+    assert "declared in fb_supported_os: $_fbn ($_fbtool)" \
+        "[[ -n \"\$(fbreq 'fb_supported_os '$_fbtool)\" ]]"
+    # A typo'd OS token would read as a plausible declaration and silently
+    # never match df_os. Pin the vocabulary.
+    assert "declares only known OS tokens: $_fbn" \
+        "[[ -z \"\$(fbreq 'fb_supported_os '$_fbtool | tr ' ' '\\n' | grep -vxE 'linux|darwin|freebsd|')\" ]]"
+done
+unset _fbf _fbn _fbtool
+
+# Behaviour, forced through DF_OS so both branches run on a single-platform box.
+fbreq 'BIN_NAME=rg; DF_OS=freebsd; fb_require_os' >/dev/null 2>&1
+_fb_rc=$?
+assert "unsupported slot exits 0 (a skip is not a failure)" "[[ $_fb_rc -eq 0 ]]"
+
+_fb_out="$(fbreq 'BIN_NAME=rg; DF_OS=freebsd; fb_require_os')"
+assert_re "unsupported slot names the tool and the OS" "$_fb_out" 'rg: no upstream build for freebsd'
+
+_fb_out="$(fbreq 'BIN_NAME=go; DF_OS=freebsd; fb_require_os; echo REACHED')"
+assert_eq "supported slot is NOT skipped" "$_fb_out" "REACHED"
+
+_fb_out="$(fbreq 'BIN_NAME=rg; DF_OS=linux; fb_require_os; echo REACHED')"
+assert_eq "supported-on-linux slot is NOT skipped" "$_fb_out" "REACHED"
+
+fbreq 'BIN_NAME=nosuchtool; DF_OS=linux; fb_require_os' >/dev/null 2>&1
+_fb_rc=$?
+assert "UNDECLARED tool fails loudly, never defaults" "[[ $_fb_rc -ne 0 ]]"
+
+fbreq 'unset BIN_NAME; DF_OS=linux; fb_require_os' >/dev/null 2>&1
+_fb_rc=$?
+assert "missing tool name fails loudly" "[[ $_fb_rc -ne 0 ]]"
+
+# fb_rust_triple: the arch half is the FreeBSD trap (uname -m is amd64 there,
+# x86_64 on Linux), so assert the OS half against a forced DF_OS and let the
+# arch half come from this machine.
+assert_re "rust triple: linux takes the libc suffix" \
+    "$(fbreq 'DF_OS=linux; fb_rust_triple musl')" '^(x86_64|aarch64)-unknown-linux-musl$'
+assert_re "rust triple: freebsd takes no libc suffix" \
+    "$(fbreq 'DF_OS=freebsd; fb_rust_triple gnu')" '^(x86_64|aarch64)-unknown-freebsd$'
+assert_re "rust triple: darwin is apple-darwin" \
+    "$(fbreq 'DF_OS=darwin; fb_rust_triple gnu')" '^(x86_64|aarch64)-apple-darwin$'
+unset _fb_rc _fb_out
+
 sec "structural: podman fetcher wiring (no network)"
 PODMAN_FETCHER="home/dot_local/bin/fetch.bins/executable_12_fetch.podman.sh"
 assert "podman fetcher present"                     "[[ -f $PODMAN_FETCHER ]]"

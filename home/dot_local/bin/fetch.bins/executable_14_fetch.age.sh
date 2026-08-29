@@ -16,6 +16,7 @@ set -euo pipefail
 . "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/_lib.sh"
 
 fb_init
+fb_require_os age
 
 # Skip if both binaries are already present and valid (version-agnostic check).
 if fb_check_bin age && [[ -x "${BIN_DIR}/age" ]] && fb_check_bin age-keygen; then

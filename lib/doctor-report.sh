@@ -65,7 +65,7 @@ df_doctor_report() {
 			# a user-owned 0755 binary gets ECONNRESET. Report NEED
 			# (and the two sudo lines) instead of a green ok.
 			# Requires df_op_linux_sgid_ok from lib/df-common.sh.
-			if [ "${_cmd}" = op ] && [ "$(uname -s)" = Linux ] && ! df_op_linux_sgid_ok; then
+			if [ "${_cmd}" = op ] && df_is_linux && ! df_op_linux_sgid_ok; then
 				_op_real=$(df_op_resolve) || _op_real=$(command -v op)
 				printf '  %-9s %-5s %s\n' "${_cmd}" 'NEED' \
 					"${_op_real} is not setgid onepassword-cli (desktop IPC will reset)"

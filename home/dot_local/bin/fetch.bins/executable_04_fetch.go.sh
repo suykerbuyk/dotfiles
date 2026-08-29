@@ -13,6 +13,7 @@ set -euo pipefail
 
 BIN_NAME="go"
 fb_init
+fb_require_os
 
 OS="$(fb_os linux)"  # go uses "linux", not "linux" change but consistent
 ARCH="$(fb_arch amd64)"

@@ -7,6 +7,41 @@
 # Not a user command. Bootstrap (update-user-home-dir.sh) keeps its own fetch.bins
 # lib; this is for day-2 tools that run from an already-cloned checkout.
 
+# df_os — the OS name, lowercased: linux, freebsd, darwin, ...
+#
+# Memoized in DF_OS so `uname` is forked at most ONCE per shell, and only when
+# something actually asks. The laziness is not a micro-optimization: this
+# helper is duplicated into the bottom of the env layer, which is sourced by
+# every `zsh -c`, and the standing rule there is that a fork is a tax on every
+# shell in every loop. Defining a function costs nothing; deriving eagerly
+# would bill everyone for an answer most shells never need.
+#
+# DF_OS is deliberately NOT exported, for the same reason DOTFILES_ENV_LOADED
+# is not: a child shell re-derives its own answer rather than trusting an
+# inherited flag.
+#
+# The case arms cover the platforms this repo targets without a second fork;
+# the tr fallback keeps an unlisted OS correct rather than empty.
+df_os_init() {
+	[ -z "${DF_OS:-}" ] || return 0
+	case $(uname -s) in
+	Linux) DF_OS=linux ;;
+	FreeBSD) DF_OS=freebsd ;;
+	Darwin) DF_OS=darwin ;;
+	*) DF_OS=$(uname -s | tr '[:upper:]' '[:lower:]') ;;
+	esac
+}
+
+df_os() { df_os_init; printf '%s\n' "${DF_OS}"; }
+
+# df_is_linux / df_is_freebsd — silent predicates, exit status only.
+#
+# Prefer these to an inline `[ "$(uname -s)" = Linux ]`: that idiom forks on
+# every call, and this repo had spelled the same question three different ways
+# in three files before they were consolidated here.
+df_is_linux() { df_os_init; [ "${DF_OS}" = linux ]; }
+df_is_freebsd() { df_os_init; [ "${DF_OS}" = freebsd ]; }
+
 # df_init <path-to-invoking-script>
 # Sets DF_ROOT (checkout root) and DF_SRC (chezmoi source tree = $DF_ROOT/home).
 df_init() {
@@ -61,7 +96,7 @@ df_op_resolve() {
 # is Linux-only. Canonical predicate; the login helper and slot 23
 # duplicate a short copy because those files cannot source this one.
 df_op_linux_sgid_ok() {
-	[ "$(uname -s)" = Linux ] || return 1
+	df_is_linux || return 1
 	_op_p=$(df_op_resolve "${1-}") || return 1
 	[ -f "${_op_p}" ] || return 1
 	[ -g "${_op_p}" ] || return 1
