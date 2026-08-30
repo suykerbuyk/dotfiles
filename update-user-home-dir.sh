@@ -358,7 +358,7 @@ echo
 
 echo "=== Secrets (~/.keys) ==="
 if [[ -r "$HOME/.keys" && -r "${AGE_KEY:-}" ]]; then
-    echo "  ✓ age key present · ~/.keys decrypted (mode $(stat -c %a "$HOME/.keys" 2>/dev/null))"
+    echo "  ✓ age key present · ~/.keys decrypted (mode $(df_stat_mode "$HOME/.keys"))"
     echo "  Change a key later:   dotfiles-keys       (edits, re-encrypts, re-applies)"
     echo "  Then publish:         (cd \"$PWD\" && git add -A && git commit -m 'update keys' && git push)"
 elif [[ -r "${AGE_KEY:-}" ]]; then

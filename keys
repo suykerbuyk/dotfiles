@@ -46,7 +46,7 @@ cmd_status() {
 	else echo "age key:  MISSING — restore it:  ./keys get-key  (or: dotfiles-keys get-key)"; fi
 	if [ -r "$KEYS" ]; then
 		printf '~/.keys:  present, mode %s, %s entries\n' \
-			"$(stat -c %a "$KEYS" 2>/dev/null)" \
+			"$(df_stat_mode "$KEYS")" \
 			"$(grep -cE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=' "$KEYS" 2>/dev/null || echo 0)"
 	else echo "~/.keys:  absent (not decrypted — run: ./keys get-key, then ./apply)"; fi
 }

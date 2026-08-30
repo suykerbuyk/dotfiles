@@ -135,6 +135,65 @@ assert_empty() { if [[ -z "$2"      ]]; then ok "$1"; else bad "$1" "got [$2]  w
 # this is not used for positive exact-match asserts.
 nocomment() { sed 's/#.*//' "$1"; }
 
+# ---- portable file mode ------------------------------------------------------
+# GNU and BSD stat share a NAME and nothing else: the format languages are
+# unrelated (%a vs %Lp, %G vs %Sg, %Y vs %m) and each rejects the other's flag.
+# Every mode assert here suppressed stderr, so on FreeBSD `stat -c` produced an
+# EMPTY string and `"" == 700` simply failed — an assert that reports a
+# permissions defect where there is only a userland difference.
+#
+# The harness probes for itself rather than calling the shipped df_stat_* helpers
+# (lib/df-common.sh): a test must not measure with the instrument it is testing.
+# The duplication is the point.
+if stat -c %a . >/dev/null 2>&1; then
+    stat_mode() { stat -c %a "$1" 2>/dev/null; }
+else
+    stat_mode() { stat -f %Lp "$1" 2>/dev/null; }
+fi
+
+# ---- the system PATH every `env -i` probe runs with -----------------------------
+# Hardcoding /usr/bin:/bin is a LINUX assumption. On FreeBSD bash and zsh live in
+# /usr/local/bin, so `env -i PATH="$PROBE_PATH" bash -lc ...` dies with
+# "env: bash: No such file or directory" and every probe built on it reports a
+# broken shell layer. It measured 36 failures that way while the env layer was in
+# fact working perfectly — the harness FABRICATING failures is the same disease as
+# the harness hiding them, and the same fix applies: ask, do not assume.
+#
+# Deliberately does NOT include ~/.local/bin: several asserts below exist to prove
+# the env layer is what puts it there.
+#
+# On Linux this resolves to exactly the old "/usr/bin:/bin" (bash, zsh and sh all
+# live in /usr/bin), so it is a no-op there by construction.
+PROBE_PATH="/usr/bin:/bin"
+for _pp in bash zsh sh; do
+    _pd=$(command -v "$_pp" 2>/dev/null) || continue
+    _pd=$(dirname "$_pd")
+    case ":$PROBE_PATH:" in
+        *":$_pd:"*) ;;
+        *) PROBE_PATH="$PROBE_PATH:$_pd" ;;
+    esac
+done
+unset _pp _pd
+
+# ---- a pty, portably -----------------------------------------------------------
+# Interactive startup silence can only be measured on a real terminal, and the two
+# `script` implementations do not share a command line:
+#
+#   util-linux  script -qec "CMD" FILE
+#   BSD         script -q FILE CMD ...      (rejects -c: "script: illegal option")
+#
+# Handed the GNU form, BSD script printed its own usage message — which the caller
+# then measured as SHELL STARTUP NOISE and reported as three silence failures. The
+# third GNU-userland assumption in this harness, after `stat -c` and the hardcoded
+# interpreter path; all three failed the same way, by making the instrument lie.
+if script -qec true /dev/null >/dev/null 2>&1; then
+    pty_run() { script -qec "$1" /dev/null 2>&1; }
+else
+    # BSD script emits an EOT (^D) when the session closes. Strip it here so the
+    # caller measures the shell's output rather than script's own terminator.
+    pty_run() { script -q /dev/null /bin/sh -c "$1" 2>&1 | tr -d '\004'; }
+fi
+
 # ---- discover a real POSIX shell -------------------------------------------
 # `sh -n` is NOT a POSIX syntax check. Wherever /bin/sh is a symlink to bash
 # (Arch, Fedora, most rpm distros) `sh` is just bash wearing a thin hat: it
@@ -738,7 +797,7 @@ if [[ -n "$CHEZMOI" ]]; then
     echo "    ($okc entries verified)"
 
     sec "attributes: private + empty encodings"
-    assert ".ssh is 0700 (private_)"            "[[ \"\$(stat -c '%a' \"$SB/.ssh\" 2>/dev/null)\" == 700 ]]"
+    assert ".ssh is 0700 (private_)"            "[[ \"\$(stat_mode \"$SB/.ssh\")\" == 700 ]]"
     assert_file "empty_ file created (.ssh/hosts/keep.me)" "$SB/.ssh/hosts/keep.me"
     assert "empty_ file is actually empty"      "[[ ! -s \"$SB/.ssh/hosts/keep.me\" ]]"
     assert "broot 'br' launcher excluded"       "[[ ! -e \"$SB/.config/broot/launcher/bash/br\" ]]"
@@ -804,7 +863,7 @@ if [[ -n "$CHEZMOI" ]]; then
         } >>"$EVID_LOG"
     }
     probe() {
-        ( cd /tmp && env -i HOME="$SB" TERM=xterm PATH=/usr/bin:/bin "$1" "$2" "$3" ) \
+        ( cd /tmp && env -i HOME="$SB" TERM=xterm PATH="$PROBE_PATH" "$1" "$2" "$3" ) \
             >"$EVID/probe.out" 2>"$EVID/probe.err"
         _probe_evid "$@"
         tr -d '\r' <"$EVID/probe.out" | tail -1
@@ -852,7 +911,7 @@ if [[ -n "$CHEZMOI" ]]; then
     # Pin stdin, then assert the PAIR. NOPATH deliberately omits ~/.local/bin: the
     # old assertion passed a PATH that already contained it, which makes every
     # reading HAS and measures nothing.
-    NOPATH="/usr/bin:/bin"
+    NOPATH="$PROBE_PATH"
 
     # NEGATIVE — the residual itself, and the assertion with the teeth. No startup
     # file ran, so nothing added ~/.local/bin and the shell must report it MISSING.
@@ -863,7 +922,7 @@ if [[ -n "$CHEZMOI" ]]; then
 
     # POSITIVE — the original claim, with its precondition now established rather
     # than assumed.
-    p="$( cd /tmp && env -i HOME="$SB" PATH="$SB/.local/bin:/usr/bin:/bin" bash -c "$HAS_LOCALBIN" </dev/null 2>/dev/null )"
+    p="$( cd /tmp && env -i HOME="$SB" PATH="$SB/.local/bin:$PROBE_PATH" bash -c "$HAS_LOCALBIN" </dev/null 2>/dev/null )"
     assert_eq "bash -c (non-interactive): inherits PATH from its parent" "$p" HAS
 
     # The `ssh host cmd` path -- ~/.bashrc sourcing env.sh above the interactivity
@@ -913,7 +972,7 @@ if [[ -n "$CHEZMOI" ]]; then
     sec "shell: startup is silent"
     for s in bash zsh; do
         command -v "$s" >/dev/null 2>&1 || continue
-        noise="$( cd /tmp && env -i HOME="$SB" PATH=/usr/bin:/bin "$s" -c true 2>&1 | tr -d '\r\n \t' )"
+        noise="$( cd /tmp && env -i HOME="$SB" PATH="$PROBE_PATH" "$s" -c true 2>&1 | tr -d '\r\n \t' )"
         assert_empty "$s -c: non-interactive startup emits nothing (scp/rsync safe)" "$noise"
     done
 
@@ -923,7 +982,7 @@ if [[ -n "$CHEZMOI" ]]; then
     if command -v script >/dev/null 2>&1; then
         for s in bash zsh; do
             command -v "$s" >/dev/null 2>&1 || continue
-            noise="$(cd /tmp && script -qec "env -i HOME=$SB TERM=xterm PATH=/usr/bin:/bin $s -ic true" /dev/null 2>&1 | tr -d '\r\n \t')"
+            noise="$(cd /tmp && pty_run "env -i HOME=$SB TERM=xterm PATH=$PROBE_PATH $s -ic true" | tr -d '\r\n \t')"
             assert_empty "$s: interactive startup is silent" "$noise"
         done
     else
@@ -946,7 +1005,7 @@ if [[ -n "$CHEZMOI" ]]; then
             printf '[ "$1" = init ] && printf "%%s\\n" "#compdef tv" "_tv() { :; }" "compdef _tv tv"\n'
         } > "$faketv"
         chmod +x "$faketv"
-        err="$( cd /tmp && env -i HOME="$SB" TERM=xterm PATH=/usr/bin:/bin zsh -ic true 2>&1 >/dev/null | tr -d '\r' )"
+        err="$( cd /tmp && env -i HOME="$SB" TERM=xterm PATH="$PROBE_PATH" zsh -ic true 2>&1 >/dev/null | tr -d '\r' )"
         assert "tv init (unguarded compdef) raises no 'command not found'" \
             "! grep -q 'command not found: compdef' <<<\"\$err\""
         rm -f "$faketv"
@@ -1007,7 +1066,7 @@ if [[ -n "$CHEZMOI" ]]; then
         } > "$fakebroot"
         chmod +x "$fakeherdr" "$fakebroot"
 
-        err="$( cd /tmp && env -i HOME="$SB" TERM=xterm PATH=/usr/bin:/bin zsh -ic true 2>&1 >/dev/null | tr -d '\r' )"
+        err="$( cd /tmp && env -i HOME="$SB" TERM=xterm PATH="$PROBE_PATH" zsh -ic true 2>&1 >/dev/null | tr -d '\r' )"
         assert "herdr completion (unguarded compdef) raises no 'command not found'" \
             "! grep -q 'command not found: compdef' <<<\"\$err\""
 
@@ -1023,7 +1082,7 @@ if [[ -n "$CHEZMOI" ]]; then
 
         # Neither eval may break the silence contract (both are 2>/dev/null).
         if command -v script >/dev/null 2>&1; then
-            noise="$(cd /tmp && script -qec "env -i HOME=$SB TERM=xterm PATH=/usr/bin:/bin zsh -ic true" /dev/null 2>&1 | tr -d '\r\n \t')"
+            noise="$(cd /tmp && pty_run "env -i HOME=$SB TERM=xterm PATH=$PROBE_PATH zsh -ic true" | tr -d '\r\n \t')"
             assert_empty "startup stays silent with herdr+broot wired" "$noise"
         fi
 
@@ -1175,10 +1234,11 @@ TVSTUB
     sec "doctor: tool-init staleness"
     TID="$SB/tool-init-probe"; mkdir -p "$TID"; : > "$TID/fzf"; chmod +x "$TID/fzf"
     ti_row() {
-        env -i HOME="$SB" PATH="$TID:/usr/bin:/bin" \
+        env -i HOME="$SB" PATH="$TID:$PROBE_PATH" \
             ${1:+DOTFILES_TOOL_INIT_EPOCH="$1"} \
-            sh -c '. "$1"; df_doctor_registry() { :; }; df_doctor_report' sh \
-            "$REPO/lib/doctor-report.sh" 2>/dev/null | grep '^  tool-init'
+            sh -c '. "$1/lib/df-common.sh"; . "$1/lib/doctor-report.sh"
+                   df_doctor_registry() { :; }; df_doctor_report' sh \
+            "$REPO" 2>/dev/null | grep '^  tool-init'
     }
     assert "no stamp => n/a (a non-interactive shell has nothing to be stale)" \
         "[[ \"\$(ti_row)\" == *'n/a'* ]]"
@@ -1192,8 +1252,17 @@ TVSTUB
     # neither the tool nor the upgrade — measured on this box, fzf's link was four
     # months OLDER than its binary while starship's was NEWER than its own. A
     # check without -L reports ok forever and greps perfectly clean.
-    assert "the staleness check dereferences symlinks (stat -L)" \
-        "grep -q 'stat -Lc' lib/doctor-report.sh"
+    # -L moved into df_stat_mtime (lib/df-common.sh) when the stat calls were made
+    # portable. Assert it where it now lives, on BOTH format languages: a BSD arm
+    # that quietly lost -L would report `ok` forever exactly as a GNU one would.
+    assert "the staleness check calls the dereferencing helper" \
+        "grep -q 'df_stat_mtime' lib/doctor-report.sh"
+    assert "df_stat_mtime dereferences under GNU stat" \
+        "grep -q 'stat -Lc %Y' lib/df-common.sh"
+    assert "df_stat_mtime dereferences under BSD stat" \
+        "grep -q 'stat -L -f %m' lib/df-common.sh"
+    assert "no call site re-implements stat: doctor-report is helper-only" \
+        "[[ -z \$(nocomment lib/doctor-report.sh | grep -E 'stat +-') ]]"
     rm -rf "$TID"
 
     # --- herdr adopted at parity with tmux -----------------------------------
@@ -1398,15 +1467,56 @@ TVSTUB
     if command -v zsh >/dev/null 2>&1; then
         sec "shell: dotfiles-doctor greets once per login session era"
         rt="$SB/run.greet"; rm -rf "$rt"; mkdir -p "$rt"
-        greet() { ( cd /tmp && env -i HOME="$SB" TERM=xterm XDG_RUNTIME_DIR="$rt" PATH=/usr/bin:/bin zsh -ic true 2>/dev/null | tr -d '\r' ); }
+        greet() { ( cd /tmp && env -i HOME="$SB" TERM=xterm XDG_RUNTIME_DIR="$rt" PATH="$PROBE_PATH" zsh -ic true 2>/dev/null | tr -d '\r' ); }
         first="$(greet)"; second="$(greet)"
         assert "first interactive shell runs dotfiles-doctor"        "grep -q '^env:' <<<\"\$first\""
         assert "greet stamp created in \$XDG_RUNTIME_DIR"            "[[ -e '$rt/dotfiles-shell.greeted' ]]"
         assert "second interactive shell is quiet (one-shot spent)"  "[[ -z \"\$(tr -d '\r\n \t' <<<\"\$second\")\" ]]"
-        v="$( cd /tmp && env -i HOME="$SB" TERM=xterm XDG_RUNTIME_DIR="$rt" DOTFILES_SHELL_VERBOSE=1 PATH=/usr/bin:/bin zsh -ic true 2>/dev/null | tr -d '\r' )"
+        v="$( cd /tmp && env -i HOME="$SB" TERM=xterm XDG_RUNTIME_DIR="$rt" DOTFILES_SHELL_VERBOSE=1 PATH="$PROBE_PATH" zsh -ic true 2>/dev/null | tr -d '\r' )"
         assert "DOTFILES_SHELL_VERBOSE forces the report despite the stamp" "grep -q '^env:' <<<\"\$v\""
         rm -rf "$rt"
     fi
+
+    # --- the shell row names the INTERACTIVE shell, not doctor's interpreter --
+    # ./doctor is ALWAYS a child process: home/dot_config/shell/doctor.sh runs the
+    # ~/.local/bin trampoline or the checkout copy, never a function in this shell.
+    # So DOTFILES_SHELL — set by rc.sh — reaches df_doctor_report only if it is
+    # EXPORTED. Without the export the row falls through to $ZSH_VERSION /
+    # $BASH_VERSION of the doctor script itself, whose shebang is `#!/usr/bin/env sh`:
+    #
+    #   Arch     /bin/sh is bash -> prints `bash` for a ZSH user. Wrong, and silent.
+    #   FreeBSD  /bin/sh is ash  -> prints `unknown`. Wrong, and visible.
+    #
+    # Same defect, two symptoms; only the second one ever got reported. The zsh
+    # rows below are the ones with teeth — bash-under-bash passes either way, which
+    # is exactly why this went unnoticed on Linux.
+    sec "doctor: the shell row names the interactive shell, not doctor's interpreter"
+    cat > "$SB/shell-row-probe.sh" <<PROBE
+#!/bin/sh
+# Runs df_doctor_report in a GRANDCHILD of the interactive shell, which is what
+# invoking ./doctor actually does. An unexported DOTFILES_SHELL cannot reach here.
+sh -c '. "\$1/lib/df-common.sh"; . "\$1/lib/doctor-report.sh"
+       df_doctor_registry() { :; }; df_doctor_report' sh \\
+    "$REPO" 2>/dev/null | grep '^shell:'
+PROBE
+    chmod +x "$SB/shell-row-probe.sh"
+    shell_row() {
+        ( cd /tmp && env -i HOME="$SB" TERM=xterm PATH="$PROBE_PATH" \
+            "$1" -ic "$SB/shell-row-probe.sh" 2>/dev/null | tr -d '\r' )
+    }
+    assert "shell row: a bash login reports bash" "[[ \"\$(shell_row bash)\" == *bash* ]]"
+    if command -v zsh >/dev/null 2>&1; then
+        assert "shell row: a zsh login reports zsh"           "[[ \"\$(shell_row zsh)\" == *zsh* ]]"
+        assert "shell row: a zsh login NEVER reports bash"    "[[ \"\$(shell_row zsh)\" != *bash* ]]"
+        assert "shell row from an rc shell is never 'unknown'" "[[ \"\$(shell_row zsh)\" != *unknown* ]]"
+    else
+        skip "shell row under zsh (no zsh on PATH)"
+    fi
+    # The mechanism, asserted separately from the outcome: a row that is right by
+    # accident (because /bin/sh happens to be bash) is not the same as a row that
+    # is right because the value was carried. This is what fails on FreeBSD.
+    assert "DOTFILES_SHELL is exported so a CHILD process sees it" \
+        "grep -qE '^[[:space:]]*export DOTFILES_SHELL$' home/dot_config/shell/rc.sh"
 else
     skip "apply/parity/idempotency (no chezmoi binary)"
 fi
@@ -1456,7 +1566,7 @@ assert "gh_latest_tag_nojq parses tag_name from minified JSON" "[[ \"\$nojq_tag\
 assert "gh_latest_tag_nojq does not return the url field"      "[[ \"\$nojq_tag\" != *api.github.com* ]]"
 # fb_init must put ~/.local/bin on PATH, or a just-fetched jq is invisible to the
 # bare \`jq\` calls in every later fetcher within the same installer run.
-pth="$( . "$LIB" >/dev/null 2>&1; PATH=/usr/bin:/bin; fb_init >/dev/null 2>&1; printf '%s' "$PATH" )"
+pth="$( . "$LIB" >/dev/null 2>&1; PATH="$PROBE_PATH"; fb_init >/dev/null 2>&1; printf '%s' "$PATH" )"
 assert "fb_init prepends \$BIN_DIR to PATH"        "case \":\$pth:\" in *\":$BIN_DIR:\"*) true ;; *) false ;; esac"
 # The installer bootstraps jq in Phase 1 and skips 01_fetch.jq.sh in the loop.
 assert "installer skips 01_fetch.jq.sh in fetcher loop" "grep -q '01_fetch.jq.sh ]] && continue' update-user-home-dir.sh"
@@ -1534,7 +1644,8 @@ DRT="$SB/doctor-report-test"
 mkdir -p "$DRT/.local/bin/fetch.bins"
 : > "$DRT/.local/bin/fetch.bins/99_fetch.zzstub.sh"
 DR_OUT="$(HOME="$DRT" DF_ROOT="" sh -c '
-    . "$1"
+    . "$1/lib/df-common.sh"
+    . "$1/lib/doctor-report.sh"
     df_doctor_registry() {
         printf "%s\n" \
             "zzprov|zzstub| provisioned with a note" \
@@ -1542,7 +1653,7 @@ DR_OUT="$(HOME="$DRT" DF_ROOT="" sh -c '
             "zznone|| not provisioned by fetch.bins" \
             "zznoinst|zzmissing| provisioned, no fetcher on disk"
     }
-    df_doctor_report' sh "$REPO/lib/doctor-report.sh" 2>/dev/null)"
+    df_doctor_report' sh "$REPO" 2>/dev/null)"
 
 # THE regression assert: against the old `[ -n "${_note}" ]` this row printed
 # `n/a  provisioned with a note` and the fetcher path never appeared at all.
@@ -1649,6 +1760,70 @@ unset _dfos_a _dfos_b _dfos_c
 # socket until it is setgid onepassword-cli. Doctor must report NEED (with
 # the two sudo lines) instead of a green ok. Driven against a STUB op on
 # PATH so this machine's real perms cannot satisfy the check.
+# ---------------------------------------------------------------------------
+# GNU and BSD stat share a name and nothing else — unrelated format languages,
+# each rejecting the other's flag. Every call site suppressed stderr, so on
+# FreeBSD `stat -c` yielded the EMPTY STRING and `"" == 700` merely failed: a
+# userland difference reported as a permissions defect. df_stat_* centralises
+# the split, and -L lives inside df_stat_mtime rather than at six call sites.
+sec "df_stat_*: one portable stat, and -L kept where it cannot be dropped"
+
+DFST="lib/df-common.sh"
+for _fn in df_stat_init df_stat_mode df_stat_group df_stat_mtime; do
+    assert "$_fn defined: $DFST" "grep -qE '^${_fn}\\(\\)' $DFST"
+done
+unset _fn
+
+# Behavioural, against a file this test owns, so the expected values are facts
+# rather than assumptions about the runner.
+DFST_D="$SB/statprobe"; rm -rf "$DFST_D"; mkdir -p "$DFST_D"
+: > "$DFST_D/f"; chmod 640 "$DFST_D/f"
+assert_eq "df_stat_mode reads the mode" \
+    "$(sh -c '. "$1" >/dev/null 2>&1; df_stat_mode "$2"' sh "$REPO/$DFST" "$DFST_D/f" 2>/dev/null)" \
+    "640"
+# The oracle is `ls -ld`, NOT `id -gn`. A new file's group is the process egid on
+# Linux but is INHERITED FROM THE PARENT DIRECTORY on BSD — measured on FreeBSD
+# 15.1, where this file lands in `wheel` while `id -gn` says `johns`. Asserting
+# against id -gn tests the platform's group-inheritance rule, not the helper.
+assert_eq "df_stat_group reads the group" \
+    "$(sh -c '. "$1" >/dev/null 2>&1; df_stat_group "$2"' sh "$REPO/$DFST" "$DFST_D/f" 2>/dev/null)" \
+    "$(ls -ld "$DFST_D/f" | awk '{print $4}')"
+
+# THE -L assert, behavioural rather than a grep. A symlink two seconds newer
+# than its target: without dereference the helper returns the LINK's mtime and
+# doctor's staleness row reports ok forever (iter 44). Measured on FreeBSD 15.1
+# as well — `stat -L -f %m` dereferences, `stat -f %m` does not.
+sleep 2; ln -sfn "$DFST_D/f" "$DFST_D/l"; touch -h "$DFST_D/l" 2>/dev/null || true
+_dfst_t="$(sh -c '. "$1" >/dev/null 2>&1; df_stat_mtime "$2"' sh "$REPO/$DFST" "$DFST_D/f" 2>/dev/null)"
+_dfst_l="$(sh -c '. "$1" >/dev/null 2>&1; df_stat_mtime "$2"' sh "$REPO/$DFST" "$DFST_D/l" 2>/dev/null)"
+assert_eq "df_stat_mtime dereferences (link reports the TARGET's mtime)" "$_dfst_l" "$_dfst_t"
+# The mutation guard for the assert above: if the link and the target share an
+# mtime anyway, the equality proves nothing. Prove they differ without -L.
+if stat -c %Y . >/dev/null 2>&1; then _dfst_raw="$(stat -c %Y "$DFST_D/l" 2>/dev/null)"
+else _dfst_raw="$(stat -f %m "$DFST_D/l" 2>/dev/null)"; fi
+assert "the link's OWN mtime really does differ (so -L is load-bearing here)" \
+    "[[ \"\$_dfst_raw\" != \"\$_dfst_t\" ]]"
+
+# A failing stat must stay failing. The short `[ gnu ] && a || b` idiom would run
+# the BSD arm whenever the GNU arm exited non-zero, e.g. for a missing file.
+assert "df_stat_mode on a missing file returns non-zero" \
+    "! sh -c '. \"\$1\" >/dev/null 2>&1; df_stat_mode \"\$2\"' sh '$REPO/$DFST' '$DFST_D/nope' >/dev/null 2>&1"
+
+# DF_STAT_KIND follows DF_OS: memoized, and deliberately not exported.
+assert_eq "DF_STAT_KIND is not exported to children" \
+    "$(sh -c '. "$1" >/dev/null 2>&1; df_stat_mode . >/dev/null; sh -c "echo \${DF_STAT_KIND:-UNSET}"' sh "$REPO/$DFST" 2>/dev/null)" \
+    "UNSET"
+
+# Anti-regression, comment-stripped because the helper's OWN comments quote the
+# `stat -c` idiom they replaced — a raw grep matches the explanation and passes
+# forever (the iter-44 trap). Every shipped stat call must be inside df-common.sh.
+for _f in keys doctor apply status update-user-home-dir.sh lib/doctor-report.sh lib/doctor-registry.sh; do
+    assert "no raw stat outside the helper: $_f" \
+        "[[ -z \$(nocomment $_f | grep -E 'stat +-[a-zA-Z]') ]]"
+done
+unset _f
+rm -rf "$DFST_D"
+
 sec "doctor: op without Linux setgid is NEED, not ok"
 OPD="$SB/op-sgid-test"
 mkdir -p "$OPD/bin" "$OPD/.local/bin/fetch.bins"
@@ -2844,7 +3019,7 @@ if [[ $NET == 1 ]]; then
         rm -f "$RT/dst/.keys"
         cz apply --force "$RT/dst/.keys" >/dev/null 2>&1
         assert "round-trip: apply re-materialized ~/.keys" "[[ -r \"$RT/dst/.keys\" ]]"
-        assert "round-trip: applied secret is mode 0600"   "[[ \"\$(stat -c %a \"$RT/dst/.keys\" 2>/dev/null)\" == 600 ]]"
+        assert "round-trip: applied secret is mode 0600"   "[[ \"\$(stat_mode \"$RT/dst/.keys\")\" == 600 ]]"
         assert "round-trip: decrypted content is correct"  "grep -q 'RT_SECRET=hunter2' \"$RT/dst/.keys\""
         rm -rf "$RT"
     else

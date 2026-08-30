@@ -49,6 +49,16 @@ else
     return 0 2>/dev/null || exit 0
 fi
 
+# EXPORTED, deliberately — and this is the opposite call from DOTFILES_ENV_LOADED
+# and DF_OS, which are deliberately NOT exported so a child re-derives its own
+# answer. The difference is that those two are cheap to re-derive and this one is
+# impossible to: `./doctor` is always a CHILD process (see doctor.sh), its shebang
+# is `#!/usr/bin/env sh`, and a child sh cannot tell which interactive shell
+# launched it. Unexported, doctor's `shell:` row silently reports its own
+# interpreter — `bash` for a zsh user wherever /bin/sh is bash, `unknown` where it
+# is not. Same precedent as DOTFILES_TOOL_INIT_EPOCH, exported for the same reason.
+export DOTFILES_SHELL
+
 DOTFILES_SHELL_DIR="$HOME/.config/shell"
 
 . "$DOTFILES_SHELL_DIR/env.sh"

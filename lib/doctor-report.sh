@@ -120,7 +120,7 @@ df_doctor_report() {
 	if [ -n "${DOTFILES_TOOL_INIT_EPOCH:-}" ]; then
 		for _t in starship fzf tv herdr broot; do
 			_p=$(command -v "${_t}" 2>/dev/null) || continue
-			_m=$(stat -Lc %Y "${_p}" 2>/dev/null) || continue
+			_m=$(df_stat_mtime "${_p}") || continue
 			[ "${_m}" -gt "${DOTFILES_TOOL_INIT_EPOCH}" ] && _stale="${_stale}${_stale:+, }${_t}"
 		done
 		if [ -n "${_stale}" ]; then
@@ -139,7 +139,7 @@ df_doctor_report() {
 	# Secrets triad (see ./keys or dotfiles-keys).
 	if [ -r "${HOME}/.keys" ]; then
 		printf '  %-9s %-5s %s\n' 'keys' 'ok' \
-			"${HOME}/.keys (mode $(stat -c %a "${HOME}/.keys" 2>/dev/null), $(grep -cE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=' "${HOME}/.keys" 2>/dev/null || echo 0) entries) — edit: keys / dotfiles-keys"
+			"${HOME}/.keys (mode $(df_stat_mode "${HOME}/.keys"), $(grep -cE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=' "${HOME}/.keys" 2>/dev/null || echo 0) entries) — edit: keys / dotfiles-keys"
 	elif [ -r "${HOME}/.config/chezmoi/key.txt" ]; then
 		printf '  %-9s %-5s %s\n' 'keys' 'MISS' 'age key present but ~/.keys not applied — run: ./keys status'
 	else

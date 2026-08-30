@@ -42,6 +42,80 @@ df_os() { df_os_init; printf '%s\n' "${DF_OS}"; }
 df_is_linux() { df_os_init; [ "${DF_OS}" = linux ]; }
 df_is_freebsd() { df_os_init; [ "${DF_OS}" = freebsd ]; }
 
+# df_stat_mode / df_stat_group / df_stat_mtime — portable file metadata.
+#
+# GNU and BSD stat share a NAME and nothing else. The format languages are
+# unrelated and each implementation rejects the other's flag outright:
+#
+#     meaning   GNU       BSD
+#     mode      -c %a     -f %Lp
+#     group     -c %G     -f %Sg
+#     mtime     -c %Y     -f %m
+#
+# Every call site in this repo suppressed stderr, so on FreeBSD `stat -c` never
+# failed visibly — it produced the EMPTY STRING, and `"" = 700` is simply false.
+# That is the failure mode these helpers exist to delete: a userland difference
+# surfacing as a permissions defect.
+#
+# Unlike df_os, these are NOT duplicated into the applied libs. Every live caller
+# — keys, doctor via doctor-report.sh, and update-user-home-dir.sh — already
+# sources this file, so the constraint that forced df_os into three copies does
+# not exist here. The two remaining `stat -c` sites in home/ (the tsh login helper
+# and slot 23) are Linux-gated by df_is_linux and fb_require_os respectively, so
+# they are unreachable on FreeBSD; duplicating for them would buy nothing.
+#
+# 🔴 -L is LOAD-BEARING, and it lives HERE rather than at the call sites. The
+# binaries under ~/.local/bin are symlinks whose own mtime tracks neither the tool
+# nor the upgrade (iter 44), so a staleness check that does not dereference
+# reports `ok` forever and greps perfectly clean. Measured on FreeBSD 15.1:
+# `stat -L -f %m` dereferences and `stat -f %m` does not — identical semantics to
+# GNU's -L. Centralising it is the point; six call sites were six chances to drop
+# it again.
+#
+# Memoized in DF_STAT_KIND on exactly the terms DF_OS uses: probed at most once
+# per shell, only when something asks, and deliberately not exported. The probe
+# targets `.` so it never depends on the caller's argument existing.
+df_stat_init() {
+	[ -z "${DF_STAT_KIND:-}" ] || return 0
+	if stat -c %a . >/dev/null 2>&1; then
+		DF_STAT_KIND=gnu
+	else
+		DF_STAT_KIND=bsd
+	fi
+}
+
+# Each helper spells the branch out with if/else rather than the shorter
+# `[ ... ] && gnu || bsd`: in that idiom a GNU stat that legitimately FAILS
+# (missing file) falls through and runs the BSD arm too.
+df_stat_mode() {
+	df_stat_init
+	if [ "${DF_STAT_KIND}" = gnu ]; then
+		stat -c %a "$1" 2>/dev/null
+	else
+		stat -f %Lp "$1" 2>/dev/null
+	fi
+}
+
+df_stat_group() {
+	df_stat_init
+	if [ "${DF_STAT_KIND}" = gnu ]; then
+		stat -c %G "$1" 2>/dev/null
+	else
+		stat -f %Sg "$1" 2>/dev/null
+	fi
+}
+
+# Dereferences. See the -L note above; do not add a non-dereferencing variant
+# without a call site that genuinely wants the link's own mtime.
+df_stat_mtime() {
+	df_stat_init
+	if [ "${DF_STAT_KIND}" = gnu ]; then
+		stat -Lc %Y "$1" 2>/dev/null
+	else
+		stat -L -f %m "$1" 2>/dev/null
+	fi
+}
+
 # df_init <path-to-invoking-script>
 # Sets DF_ROOT (checkout root) and DF_SRC (chezmoi source tree = $DF_ROOT/home).
 df_init() {
@@ -100,7 +174,7 @@ df_op_linux_sgid_ok() {
 	_op_p=$(df_op_resolve "${1-}") || return 1
 	[ -f "${_op_p}" ] || return 1
 	[ -g "${_op_p}" ] || return 1
-	[ "$(stat -c '%G' "${_op_p}" 2>/dev/null)" = onepassword-cli ] || return 1
+	[ "$(df_stat_group "${_op_p}")" = onepassword-cli ] || return 1
 	return 0
 }
 
