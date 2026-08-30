@@ -189,9 +189,22 @@ unset _pp _pd
 if script -qec true /dev/null >/dev/null 2>&1; then
     pty_run() { script -qec "$1" /dev/null 2>&1; }
 else
-    # BSD script emits an EOT (^D) when the session closes. Strip it here so the
-    # caller measures the shell's output rather than script's own terminator.
-    pty_run() { script -q /dev/null /bin/sh -c "$1" 2>&1 | tr -d '\004'; }
+    # BSD script runs the command on a pty with ECHO ON, so the EOF that closes the
+    # session is echoed back and then erased. Measured on FreeBSD 15.1, the residue
+    # is one of THREE states and which one you get is a race:
+    #
+    #   "^D"     the literal two-character echo (not a 0x04 byte)
+    #   "\b\b"   the erasure of that echo   <- the common case
+    #   ""       neither, if the close wins the race
+    #
+    # None of them is program output; all are the terminal echoing at itself. That
+    # race is why chasing one form at a time made these asserts FLAKY rather than
+    # red, and a lucky run reported the suite green. Strip the whole class.
+    #
+    # Deliberately NOT a blanket control-character strip: ANSI escape sequences are
+    # mostly printable ([, ?, digits, letters) and must still fail this assert, as a
+    # prompt escaping into a non-interactive startup is exactly the bug it guards.
+    pty_run() { script -q /dev/null /bin/sh -c "$1" 2>&1 | sed -e 's/\^D//g' | tr -d '\004\010'; }
 fi
 
 # ---- discover a real POSIX shell -------------------------------------------
