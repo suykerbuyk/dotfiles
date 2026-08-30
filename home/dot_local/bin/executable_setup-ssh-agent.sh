@@ -56,6 +56,16 @@ setup_safety_check() {
         echo ""
     fi
 
+    # systemd itself. The dbus/XDG guard below cannot stand in for this: a
+    # systemd-less Linux box (musl container, WSL1) can still have XDG_RUNTIME_DIR
+    # set, pass that guard, and then fail on the first systemctl call. FreeBSD has
+    # neither, so it was caught by accident rather than on purpose.
+    if ! command -v systemctl >/dev/null 2>&1; then
+        echo "No systemctl on PATH. Skipping systemd --user operations."
+        echo "This is normal on FreeBSD, macOS, and non-systemd Linux."
+        return 1  # signal to caller to skip
+    fi
+
     # Stronger dbus/user bus guard to prevent "Failed to connect to user scope bus" error
     if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]] && [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
         echo "No user dbus session (DBUS_SESSION_BUS_ADDRESS or XDG_RUNTIME_DIR not set). Skipping systemd --user operations."
@@ -67,7 +77,16 @@ setup_safety_check() {
 
 # fb_init style — clear output, ensure dirs, idempotent
 setup_init() {
-    setup_safety_check
+    # A deliberate, NAMED skip is not a failure. Under `set -e` the bare call here
+    # meant setup_safety_check's `return 1` killed the script with exit 1 while
+    # printing "This is normal" — a script announcing a normal condition and then
+    # reporting breakage. Phase 3 settled this shape for the fetchers
+    # (fb_require_os exits 0 so Phase 5 does not log "exited non-zero" for a tool
+    # that was never going to be there); the same reasoning applies to a
+    # systemd-only setup script on a machine with no systemd.
+    if ! setup_safety_check; then
+        exit 0
+    fi
     echo "=== setup-ssh-agent.sh ==="
     echo "Setting up systemd user ssh-agent (Phase 4)"
     echo ""

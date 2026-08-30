@@ -5,3 +5,30 @@ doc
 {{- if not (lstat (joinPath .chezmoi.homeDir ".config/chezmoi/key.txt")) }}
 .keys
 {{- end }}
+
+{{- /* Desktop config is gated on HEADLESS, not on OS — a headless Linux box
+       deserves the same treatment as FreeBSD.
+
+       The signal is INSTALLED-COMPOSITOR PRESENCE, never a live $DISPLAY or
+       $WAYLAND_DISPLAY. `chezmoi apply` run over ssh on a DESKTOP machine has no
+       DISPLAY, and administering a desktop remotely is routine here, so a
+       DISPLAY-keyed rule would decide that box is headless and stop managing its
+       entire desktop config. Installed-compositor presence does not change between
+       an ssh session and a local one on the same host, which is the property that
+       makes it safe.
+
+       This only stops files being APPLIED. chezmoi does NOT remove an already
+       applied target for being ignored, so a box that later loses its compositor
+       keeps its existing config, unmanaged. That is the accepted outcome: the
+       alternative, listing these in .chezmoiremove, makes `chezmoi apply` fail
+       outright with "inconsistent state" while the sources still exist. */}}
+{{- if not (or (lookPath "Hyprland") (lookPath "sway") (lookPath "Xorg")) }}
+.config/hypr
+.config/sway
+.config/waybar
+.config/rofi
+.config/wofi
+.config/mako
+.config/kitty
+.config/ghostty
+{{- end }}

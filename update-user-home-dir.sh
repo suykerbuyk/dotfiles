@@ -299,6 +299,19 @@ echo
 # 4. Apply dotfiles + tooling into ~   (--force => never blocks on prompts)
 # ---------------------------------------------------------------------------
 echo "=== Phase 4: chezmoi apply ==="
+# 🔴 Pin the umask across apply. chezmoi derives each target's mode from the umask
+# AT APPLY TIME, so the same source tree lands with different permissions depending
+# on which shell happened to invoke the installer. Iter 39 measured a umask of 002
+# and a bare apply rewriting ~178 files from 0644 to 0664; iters 42 and 44 both
+# measured 022 with zero chmod operations. The hazard is not firing today — which
+# is precisely why it is pinned now, while this phase is being touched, rather than
+# left for the next shell that differs.
+#
+# Saved and RESTORED rather than set globally: Phase 5 runs the fetchers, which
+# create their own files, and silently changing their modes would smuggle a second,
+# unrelated behaviour change in behind a fix for this one.
+_prev_umask=$(umask)
+umask 022
 if $DRY_RUN; then
     if [[ -x "$CHEZMOI" ]]; then
         chezmoi_cmd apply --dry-run --force || true
@@ -307,8 +320,10 @@ if $DRY_RUN; then
     fi
 else
     chezmoi_cmd apply --force
-    echo "Applied dotfiles from $SRC into $HOME"
+    echo "Applied dotfiles from $SRC into $HOME (umask 022)"
 fi
+umask "$_prev_umask"
+unset _prev_umask
 echo
 
 # ---------------------------------------------------------------------------

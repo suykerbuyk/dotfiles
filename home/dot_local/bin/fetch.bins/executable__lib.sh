@@ -779,13 +779,32 @@ is_wsl() {
 }
 
 require_display_or_skip() {
+    # WSL keeps a LIVE-display check: WSLg provides a working display without ever
+    # putting a compositor binary on PATH, so "is a compositor installed" is the
+    # wrong question there and would skip GUI installs that work fine.
     if is_wsl && [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
         echo "WSL without a display server, skipping GUI install" >&2
         exit 0
     fi
-    if [ "${XDG_SESSION_TYPE:-}" = "tty" ]; then
-        echo "No windowing session detected (tty), skipping GUI install" >&2
-        exit 0
+    # Everywhere else on Linux: INSTALLED-COMPOSITOR PRESENCE, the same signal
+    # home/.chezmoiignore uses to gate desktop config.
+    #
+    # The old test was `XDG_SESSION_TYPE = tty`. Over ssh that variable is typically
+    # UNSET rather than "tty", so on a genuinely headless box this gate PASSED and a
+    # GUI app was installed anyway — while .chezmoiignore called the very same box
+    # headless. Two predicates disagreeing about one question is how the standing
+    # "doctor disagrees with itself" thread started; this makes it one question.
+    #
+    # Scoped to Linux deliberately: macOS ships no Hyprland, sway or Xorg binary and
+    # is never headless in the sense that matters here, so an unscoped check would
+    # stop installing GUI tools on every Mac.
+    if df_is_linux && ! is_wsl; then
+        if ! command -v Hyprland >/dev/null 2>&1 \
+            && ! command -v sway >/dev/null 2>&1 \
+            && ! command -v Xorg >/dev/null 2>&1; then
+            echo "No compositor installed (headless), skipping GUI install" >&2
+            exit 0
+        fi
     fi
 }
 

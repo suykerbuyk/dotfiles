@@ -273,7 +273,25 @@ SB="$(mktemp -d)"
 EVID="$(mktemp -d)"
 EVID_LOG="$EVID/probe-transcript.txt"
 KEEP_EVID=0
-trap 'rm -rf "$SB"; [[ $KEEP_EVID == 1 ]] || rm -rf "$EVID"' EXIT
+# Reap any ssh-agent this run started inside its OWN sandbox before removing it.
+# The rc layer now starts a real agent on a predictable socket wherever there is no
+# systemd unit, so every sandboxed INTERACTIVE-shell probe (the greet test, the
+# tool-init tests) leaves a daemon behind on FreeBSD. Two reasons this matters more
+# than tidiness: a leaked daemon holding this self-capturing suite's output open
+# makes the suite hang after its last assert, and an unreaped agent per run is a
+# process leak on the developer's box.
+#
+# Matched on the SANDBOX PATH, so it can only ever match agents this run created —
+# never the user's real agent. By PID rather than `pkill -f`, because that pattern
+# can match the command line of the shell running it.
+reap_sandbox_agents() {
+    local _p
+    for _p in $(pgrep -f "ssh-agent -a $SB" 2>/dev/null); do
+        [[ "$_p" == "$$" || "$_p" == "$PPID" ]] && continue
+        kill "$_p" 2>/dev/null || true
+    done
+}
+trap 'reap_sandbox_agents; rm -rf "$SB"; [[ $KEEP_EVID == 1 ]] || rm -rf "$EVID"' EXIT
 export HOME="$SB"
 export XDG_CONFIG_HOME="$SB/.config" XDG_CACHE_HOME="$SB/.cache" XDG_DATA_HOME="$SB/.local/share"
 # The delta fetcher (slot 20) wires itself into git with `git config --global`.
@@ -473,7 +491,7 @@ if [[ -n "$POSIX_SH" ]]; then
     #
     # The EXIT trap is EXTENDED, not replaced: $SB still has to be removed.
     POSIX_TMP="$(mktemp -d)"
-    trap 'rm -rf "$SB" "$POSIX_TMP"' EXIT
+    trap 'reap_sandbox_agents; rm -rf "$SB" "$POSIX_TMP"' EXIT
     POSIX_HOME="$POSIX_TMP/home"
 
     # env.sh:36 sources lib.sh from "$HOME/.config/shell/lib.sh" — the APPLIED
@@ -771,6 +789,24 @@ if [[ -n "$CHEZMOI" ]]; then
     if chz apply --force; then ok "chezmoi apply --force succeeded"; else bad "chezmoi apply failed"; fi
 
     sec "parity: every tracked source entry reproduced in ~"
+    # Ask chezmoi what it IGNORES rather than hardcoding one rule. .chezmoiignore is
+    # a TEMPLATE and its rules are conditional: doc/ always, ~/.keys when there is
+    # no age key, and — since the headless gate — the whole desktop config on a
+    # machine with no compositor installed. The old hardcoded `doc/*` arm would
+    # report every other ignored entry as MISSING on exactly the platforms whose
+    # rules produced them, i.e. it failed precisely where it was needed.
+    #
+    # The LEAK check is kept and now applies to EVERY ignored entry, not just doc/:
+    # an ignored source that materialises in ~ is the more dangerous direction.
+    mapfile -t _ign < <(chz ignored 2>/dev/null)
+    is_ignored() {
+        local _t="$1" _i
+        for _i in "${_ign[@]}"; do
+            [[ -z "$_i" ]] && continue
+            [[ "$_t" == "$_i" || "$_t" == "$_i"/* ]] && return 0
+        done
+        return 1
+    }
     miss=0; diffc=0; modec=0; symc=0; excl=0; okc=0; leak=0
     while IFS=$'\t' read -r meta path; do
         mode="${meta%% *}"; rel="${path#home/}"
@@ -784,8 +820,8 @@ if [[ -n "$CHEZMOI" ]]; then
             continue
         fi
         target="$(decode_path "$rel")"; tgt="$SB/$target"
-        # exclusions: doc/ is .chezmoiignore'd
-        if [[ "$target" == doc/* ]]; then
+        # exclusions: whatever chezmoi says it ignores, on THIS machine
+        if is_ignored "$target"; then
             [[ -e "$tgt" ]] && { echo "    LEAK $target"; excl=$((excl+1)); } ; continue
         fi
         if [[ "$base" == symlink_* ]]; then
@@ -808,6 +844,80 @@ if [[ -n "$CHEZMOI" ]]; then
     assert "parity: doc/ excluded from ~"      "[[ $excl  -eq 0 ]]"
     assert "parity: no plaintext secret leak"  "[[ $leak  -eq 0 ]]"
     echo "    ($okc entries verified)"
+
+    # -----------------------------------------------------------------------
+    # Desktop config is gated on HEADLESS, not on OS. The signal is ruled:
+    # installed-compositor presence, never a live $DISPLAY/$WAYLAND_DISPLAY.
+    # `chezmoi apply` over ssh on a DESKTOP box has no DISPLAY, and administering a
+    # desktop remotely is routine here, so a DISPLAY-keyed rule would call that box
+    # headless and stop managing its whole desktop config.
+    sec "headless: desktop config gated on an installed compositor"
+
+    HLD="$SB/hlprobe"; rm -rf "$HLD"; mkdir -p "$HLD/empty" "$HLD/withcomp"
+    printf '#!/bin/sh\n' > "$HLD/withcomp/Hyprland"; chmod +x "$HLD/withcomp/Hyprland"
+    # lookPath consults PATH, so PATH is how both sides get exercised on ONE machine.
+    # chezmoi itself is invoked by absolute path by chz(), so emptying PATH does not
+    # stop it running — it only removes the compositors from view.
+    _ign_headless="$(PATH="$HLD/empty" chz ignored 2>/dev/null)"
+    _ign_desktop="$(PATH="$HLD/withcomp" chz ignored 2>/dev/null)"
+    for _d in hypr sway waybar rofi kitty ghostty; do
+        assert "headless => .config/$_d ignored" \
+            "grep -qx '.config/$_d' <<<\"\$_ign_headless\""
+        assert "compositor present => .config/$_d NOT ignored" \
+            "! grep -qx '.config/$_d' <<<\"\$_ign_desktop\""
+    done
+    unset _d
+    # doc/ is unconditional; it must not become collateral of the gate either way.
+    assert "doc/ stays ignored regardless of compositor" \
+        "grep -qx 'doc' <<<\"\$_ign_desktop\" && grep -qx 'doc' <<<\"\$_ign_headless\""
+    rm -rf "$HLD"
+
+    # Go-template block comments span LINES, so this needs a real stripper rather
+    # than a line-wise one: the template documents at length why DISPLAY was
+    # rejected, and a naive grep matches that rationale. This is the iter-44 trap
+    # reached from the opposite direction -- the comment makes a NEGATIVE assert
+    # FAIL forever rather than pass forever.
+    assert "the gate never keys on a live DISPLAY/WAYLAND_DISPLAY" \
+        "[[ -z \$(awk '/\\/\\*/{c=1} !c{print} /\\*\\//{c=0}' home/.chezmoiignore | grep -E 'DISPLAY') ]]"
+
+    # 🔴 The trap this gate must never be 'fixed' with. A path listed in
+    # .chezmoiremove while its SOURCE still exists makes `chezmoi apply` fail
+    # outright with "inconsistent state" — measured, not theorised — which would
+    # break Phase 4 on exactly the headless machines the gate serves. Ignoring does
+    # not delete; that is the accepted behaviour, not a gap to close here.
+    _rm_conflicts=0
+    while IFS= read -r _rm; do
+        _rm="${_rm%%#*}"; _rm="${_rm#"${_rm%%[![:space:]]*}"}"; _rm="${_rm%"${_rm##*[![:space:]]}"}"
+        [[ -z "$_rm" ]] && continue
+        while IFS= read -r _srcpath; do
+            _t="$(decode_path "${_srcpath#home/}")"
+            if [[ "$_t" == "$_rm" || "$_t" == "$_rm"/* ]]; then
+                echo "    CONFLICT .chezmoiremove '$_rm' still has source $_srcpath"
+                _rm_conflicts=$((_rm_conflicts+1))
+            fi
+        done < <(git ls-tree -r HEAD --name-only -- home/)
+    done < home/.chezmoiremove
+    assert "no .chezmoiremove entry still has a live source (apply would abort)" \
+        "[[ $_rm_conflicts -eq 0 ]]"
+    unset _rm _srcpath _t _rm_conflicts
+
+    # ONE headless predicate, not two. require_display_or_skip (fetch.bins/_lib.sh,
+    # used by the zed and ghostty slots) keyed on XDG_SESSION_TYPE = tty, which over
+    # ssh is typically UNSET rather than "tty" — so a genuinely headless box PASSED
+    # that gate and installed a GUI app, while .chezmoiignore called the same box
+    # headless. Comment-stripped: the function now explains the rejected signal.
+    FBLIB_SRC="home/dot_local/bin/fetch.bins/executable__lib.sh"
+    assert "GUI gate uses installed-compositor presence" \
+        "nocomment $FBLIB_SRC | grep -qE 'command -v (Hyprland|sway|Xorg)'"
+    assert "GUI gate no longer keys on XDG_SESSION_TYPE" \
+        "[[ -z \$(nocomment $FBLIB_SRC | grep -F 'XDG_SESSION_TYPE') ]]"
+    # Scoped to Linux on purpose: macOS ships none of those three binaries, so an
+    # unscoped compositor check would stop installing GUI tools on every Mac.
+    assert "GUI gate is scoped to Linux, so macOS is not called headless" \
+        "nocomment $FBLIB_SRC | grep -qE 'df_is_linux && ! is_wsl'"
+    # WSL keeps the live-display test: WSLg gives a display with no compositor binary.
+    assert "GUI gate keeps the WSL live-display arm" \
+        "nocomment $FBLIB_SRC | grep -qE 'is_wsl && \\[ -z .\\$\\{WAYLAND_DISPLAY'"
 
     sec "attributes: private + empty encodings"
     assert ".ssh is 0700 (private_)"            "[[ \"\$(stat_mode \"$SB/.ssh\")\" == 700 ]]"
@@ -1546,6 +1656,31 @@ assert "dry-run reaches Phase 3 (secrets)"   "grep -q 'Phase 3: secrets bootstra
 assert "dry-run reaches Phase 4 (apply)"     "grep -q 'Phase 4: chezmoi apply' <<<\"\$out\""
 assert "dry-run reaches Phase 5 (fetchers)"  "grep -q 'Phase 5: tool fetchers' <<<\"\$out\""
 assert "dry-run reaches Phase 6 (ssh-agent)" "grep -q 'Phase 6: ssh-agent' <<<\"\$out\""
+
+# Phase 4 pins the umask across apply. chezmoi derives each target's mode from the
+# umask AT APPLY TIME, so the same source tree lands with different permissions
+# depending on which shell invoked the installer -- iter 39 measured umask 002 and
+# a bare apply rewriting ~178 files 0644 -> 0664, while iters 42 and 44 measured
+# 022 with zero chmod ops. The hazard is intermittent, which is why it needs a pin
+# and an assert rather than a re-measurement each time somebody wonders.
+assert "installer pins umask 022 for the apply phase" \
+    "nocomment update-user-home-dir.sh | grep -qE '^[[:space:]]*umask 022'"
+assert "installer RESTORES the umask (Phase 5 fetchers keep their own modes)" \
+    "nocomment update-user-home-dir.sh | grep -qE 'umask \"\\\$_prev_umask\"'"
+# The PREMISE, measured rather than asserted: chezmoi really is umask-sensitive.
+# If that ever stops being true the pin becomes harmless rather than wrong, but the
+# reason it exists should be a recorded fact and not folklore.
+if [[ -n "$CHEZMOI" ]]; then
+    UMK="$SB/umaskprobe"; rm -rf "$UMK"; mkdir -p "$UMK/src" "$UMK/loose" "$UMK/tight"
+    printf 'x\n' > "$UMK/src/dot_umaskprobe"
+    ( umask 002; "$CHEZMOI" --source "$UMK/src" --destination "$UMK/loose" --no-tty apply --force >/dev/null 2>&1 )
+    ( umask 022; "$CHEZMOI" --source "$UMK/src" --destination "$UMK/tight" --no-tty apply --force >/dev/null 2>&1 )
+    _m_loose="$(stat_mode "$UMK/loose/.umaskprobe")"; _m_tight="$(stat_mode "$UMK/tight/.umaskprobe")"
+    assert "premise: chezmoi target mode really does follow the invoking umask" \
+        "[[ \"\$_m_loose\" != \"\$_m_tight\" ]]"
+    assert "premise: umask 022 yields 0644" "[[ \"\$_m_tight\" == 644 ]]"
+    unset _m_loose _m_tight; rm -rf "$UMK"
+fi
 assert "dry-run shows the secrets nudge"     "grep -q 'Secrets (~/.keys)' <<<\"\$out\""
 # jq before chezmoi, and secrets (age) before apply — the two bootstrap orderings
 # the fresh-machine fixes depend on. Compare line positions in the ordered output.
@@ -1709,6 +1844,115 @@ assert "delta carries a non-empty registry note again" \
 # forever and be ignored. Source each ALONE, in its own shell, and compare the
 # answer. That catches a copy that drifted in meaning even when it still reads
 # convincingly.
+# ---------------------------------------------------------------------------
+# 10-ssh-agent.sh had NO coverage at all, which is how it shipped a fallback that
+# could not fire. Its guard was `! pgrep -u "$UID" ssh-agent` — start an agent
+# only if none is running — but knowing a PROCESS exists says nothing about where
+# its socket is, and by that line the script has already established it has no
+# usable SSH_AUTH_SOCK. On FreeBSD a detached agent from an earlier session made
+# pgrep succeed, so the branch was skipped and the shell got NO agent. systemd
+# hides the same hole on Linux by returning before the fallback is reached.
+sec "ssh-agent: a working agent without systemd, on a predictable socket"
+
+AGT="$SB/agentprobe"; rm -rf "$AGT"; mkdir -p "$AGT/bin"
+# A PATH holding ONLY what the drop-in legitimately needs. No systemctl, which is
+# both the systemd-less simulation and the reason this section cannot touch the
+# developer's real user units: `systemctl --user start ssh-agent.socket` against
+# the live session is exactly the side effect a naive probe would cause.
+for _b in bash ssh-agent ssh-add id rm; do
+    _src=$(command -v "$_b" 2>/dev/null) && ln -sf "$_src" "$AGT/bin/$_b"
+done
+unset _b _src
+
+if [[ -x "$AGT/bin/ssh-agent" && -x "$AGT/bin/bash" ]]; then
+    agent_probe() {
+        env -i HOME="$AGT" XDG_RUNTIME_DIR="$AGT" PATH="$AGT/bin" \
+            "$AGT/bin/bash" -c '. "$1" >/dev/null 2>&1; printf "%s" "${SSH_AUTH_SOCK:-UNSET}"' \
+            bash "$REPO/home/dot_config/bashrc.d/10-ssh-agent.sh" 2>/dev/null </dev/null
+    }
+    sock1="$(agent_probe)"
+    assert "sets SSH_AUTH_SOCK with no systemd on PATH"  "[[ \"\$sock1\" != UNSET && -n \"\$sock1\" ]]"
+    assert "the socket it names actually exists"         "[[ -S \"\$sock1\" ]]"
+    # `ssh-agent -s` let the agent choose a random /tmp path, reachable only by the
+    # one shell that ran it. A predictable path is what makes reuse possible at all.
+    assert "the socket path is predictable, not a random /tmp dir" \
+        "[[ \"\$sock1\" == \"$AGT/ssh-agent-\"* ]]"
+    # THE regression assert. A second interactive shell must adopt the first
+    # shell's agent rather than spawn a parallel keyless one.
+    sock2="$(agent_probe)"
+    assert_eq "a second shell REUSES the first shell's agent" "$sock2" "$sock1"
+    # NO silence probe here, deliberately. Capturing this file's output through a
+    # PIPE is unsafe: it spawns a daemon, the daemon survives the command
+    # substitution, and this suite is self-capturing — a daemon holding the capture
+    # open means the suite finishes every assert and then never exits. That is what
+    # it did, and a hang reads as a broken machine rather than a broken test.
+    # The rc layer sources bashrc.d/, so "shell: startup is silent" above already
+    # covers this file's silence, on a pty, without spawning anything into a pipe.
+    #
+    # Reap what this section started: a test that leaks daemons degrades the machine
+    # it runs on. By PID, never `pkill -f`: that pattern can match the command line
+    # of the very shell running it, which is a self-terminating test.
+    for _ap in $(pgrep -f "ssh-agent -a $AGT" 2>/dev/null); do
+        [[ "$_ap" == "$$" || "$_ap" == "$PPID" ]] && continue
+        kill "$_ap" 2>/dev/null || true
+    done
+    unset _ap
+else
+    skip "ssh-agent drop-in behaviour (no ssh-agent on PATH)"
+fi
+rm -rf "$AGT"
+
+# Structural guards for the two userland assumptions removed above. Both read
+# COMMENT-STRIPPED source: this file now documents at length why pgrep and the
+# random-path form were wrong, so a raw grep matches the rationale and passes
+# forever (the iter-44 trap).
+SSHAGT="home/dot_config/bashrc.d/10-ssh-agent.sh"
+assert "no pgrep dependency survives" \
+    "[[ -z \$(nocomment $SSHAGT | grep -F 'pgrep') ]]"
+assert "no random-path 'ssh-agent -s' survives" \
+    "[[ -z \$(nocomment $SSHAGT | grep -E 'ssh-agent +-s') ]]"
+assert "the agent socket is bound with -a" \
+    "nocomment $SSHAGT | grep -qE 'ssh-agent +-a'"
+# systemd is Linux-only and `command -v` is a builtin, so the probe is free while
+# each unguarded call was a failed fork per interactive shell on a systemd-less
+# box. Count both: every systemctl line must sit under a guard.
+_sc_calls=$(nocomment $SSHAGT | grep -cE '^[[:space:]]*systemctl|\| *systemctl|&& *systemctl')
+_sc_guards=$(nocomment $SSHAGT | grep -cE 'command -v systemctl')
+assert "every systemctl call is behind a command -v guard" "[[ $_sc_guards -ge 2 && $_sc_calls -gt 0 ]]"
+# The predictability that makes the socket reusable is also what makes the
+# DIRECTORY choice load-bearing: a fixed name in a world-writable /tmp is a path
+# another local user can pre-create, and the stale-socket branch rm -f's it.
+assert "the agent socket never defaults into world-writable /tmp" \
+    "[[ -z \$(nocomment $SSHAGT | grep -E 'DF_AGENT_(DIR|SOCK)=' | grep -F '/tmp') ]]"
+assert "the agent socket falls back to a private dir" \
+    "nocomment $SSHAGT | grep -qE 'DF_AGENT_DIR=.*HOME/\\.ssh'"
+assert "the runtime dir uses \$UID, not a fork per shell" \
+    "[[ -z \$(nocomment $SSHAGT | grep -F '/run/user/\$(id -u)') ]]"
+unset _sc_calls _sc_guards
+
+# setup-ssh-agent.sh: a deliberate, named skip exits 0. Phase 3 settled this shape
+# for the fetchers (fb_require_os), and the same reasoning applies to a
+# systemd-only setup script on a machine with no systemd: a non-zero exit reads as
+# breakage to every caller, and this path is the documented normal state.
+SSHSETUP="home/dot_local/bin/executable_setup-ssh-agent.sh"
+assert "setup-ssh-agent probes for systemctl, not only dbus" \
+    "grep -q 'command -v systemctl' $SSHSETUP"
+assert "setup-ssh-agent exits 0 on a deliberate skip" \
+    "grep -qE 'exit 0' $SSHSETUP"
+# A bin dir with the ordinary tools but NO systemctl. `env -i PATH=/nonexistent`
+# does NOT work here: env resolves the interpreter itself against the NEW PATH, so
+# it dies with "env: bash: No such file or directory" before the script is reached
+# and the assert measures env's failure instead of the script's exit status.
+SSA_BIN="$SB/ssa-bin"; rm -rf "$SSA_BIN"; mkdir -p "$SSA_BIN"
+for _b in bash dirname readlink basename cat grep sed mkdir; do
+    _src=$(command -v "$_b" 2>/dev/null) && ln -sf "$_src" "$SSA_BIN/$_b"
+done
+unset _b _src
+_ssa_out="$(env -i HOME="$SB" PATH="$SSA_BIN" "$SSA_BIN/bash" "$REPO/$SSHSETUP" 2>&1)"; _ssa_rc=$?
+assert "setup-ssh-agent exits 0 with no systemctl on PATH" "[[ $_ssa_rc -eq 0 ]]"
+assert "and says why, by name"  "grep -q 'No systemctl on PATH' <<<\"\$_ssa_out\""
+unset _ssa_out _ssa_rc; rm -rf "$SSA_BIN"
+
 sec "df_os: one OS predicate, three consumers"
 
 DFOS_DFC="lib/df-common.sh"
