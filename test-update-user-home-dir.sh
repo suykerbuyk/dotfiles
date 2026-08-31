@@ -3521,6 +3521,68 @@ assert "no split LICENSE-MIT/-APACHE files"    "[[ ! -e $REPO/LICENSE-MIT && ! -
 # in there would assert copyright we do not hold and relicense their MIT as dual.
 assert "vendored nvim keeps its own LICENSE"   "[[ -f $REPO/home/dot_config/nvim-kickstart-modular/LICENSE.md ]]"
 assert "no SykeTech banner in vendored nvim"   "! grep -rql 'SykeTech LTD' $REPO/home/dot_config/nvim-kickstart-modular"
+# ===========================================================================
+# `#!/bin/bash` is a LINUX assumption. FreeBSD ships neither /bin/bash nor
+# /usr/bin/bash — bash lives in /usr/local/bin — so the KERNEL fails the exec with
+# ENOENT before a single line of the script runs. The file is simply not
+# executable there, and no amount of POSIX-correct content inside it helps.
+#
+# This was invisible to the suite for the worst possible reason: the --help test
+# below invoked `bash "$REPO/$h"`, naming the interpreter itself and bypassing the
+# shebang entirely. Eight scripts carried an unusable shebang past 769 assertions.
+#
+# /bin/sh is the ONE hardcoded interpreter path POSIX guarantees. Everything else
+# goes through /usr/bin/env, which is present on Linux, FreeBSD and macOS alike —
+# and on macOS is strictly better than /bin/bash, which is bash 3.2.57 from 2007
+# (Apple's last GPLv2 release): no mapfile, no ${x^^}, no associative arrays.
+#
+# The tradeoff, recorded because it is real: env resolves through PATH, so a
+# stripped PATH breaks it. Measured on FreeBSD — with PATH=/usr/bin:/bin, as cron
+# supplies, `env bash` fails because /usr/local/bin is not on it. That is fine for
+# these interactive ~/.local/bin tools and is a reason NOT to use env for anything
+# that must run from cron.
+sec "shebangs: portable interpreters, resolvable on this platform"
+
+_sb_hard=0; _sb_unres=0
+while IFS= read -r _f; do
+    [[ -f "$_f" ]] || continue
+    _sb="$(head -1 "$_f" 2>/dev/null)"
+    [[ "$_sb" == '#!'* ]] || continue
+    _interp="${_sb#\#!}"; _interp="${_interp%% *}"
+    case "$_interp" in
+        /bin/sh) ;;                        # guaranteed by POSIX
+        /usr/bin/env)
+            # Behavioural: the program env is asked to find must actually exist.
+            # Structural alone would happily pass `#!/usr/bin/env fish` on a box
+            # with no fish. Restricted to SHELLS deliberately — python3 is a
+            # documented SOFT dependency here (the tsh-login helper degrades
+            # without it) and is legitimately absent on FreeBSD.
+            _prog="${_sb#\#!/usr/bin/env }"; _prog="${_prog%% *}"
+            case "$_prog" in
+                sh|bash|zsh|ksh|dash)
+                    command -v "$_prog" >/dev/null 2>&1 || {
+                        echo "    UNRESOLVABLE $_f -> $_prog"; _sb_unres=$((_sb_unres+1)); }
+                    ;;
+            esac
+            ;;
+        *)
+            echo "    HARDCODED $_f -> $_sb"; _sb_hard=$((_sb_hard+1))
+            ;;
+    esac
+done < <(git ls-files | grep -v nvim-kickstart)
+assert "no script hardcodes an interpreter path beyond /bin/sh" "[[ $_sb_hard -eq 0 ]]"
+assert "every env-resolved SHELL interpreter exists on this platform" "[[ $_sb_unres -eq 0 ]]"
+unset _f _sb _interp _prog _sb_hard _sb_unres
+
+# The scan above must actually be looking at something. A shebang census that
+# silently matched zero files would pass both asserts forever — the vacuous-assert
+# class this suite exists to prevent.
+_sb_seen=$(git ls-files | grep -v nvim-kickstart | while read -r _f; do
+    [[ -f "$_f" ]] && head -1 "$_f" 2>/dev/null | grep -q '^#!' && echo x
+done | wc -l)
+assert "the shebang census actually scanned files (>= 45)" "[[ $_sb_seen -ge 45 ]]"
+unset _sb_seen _f
+
 # Several scripts print their own header comment block as --help. The SPDX banner
 # sits ABOVE that block, so a naive line-anchored extractor prints the banner and
 # stops — which is exactly what happened when the banners first landed: two of
@@ -3528,7 +3590,10 @@ assert "no SykeTech banner in vendored nvim"   "! grep -rql 'SykeTech LTD' $REPO
 for h in test-update-user-home-dir.sh \
          home/dot_local/bin/executable_setup-ssh-agent.sh \
          home/dot_local/bin/executable_agent-bootstrap.sh; do
-    out="$(bash "$REPO/$h" --help 2>/dev/null)"
+    # Invoked through its OWN shebang, not `bash <file>`. Naming the interpreter
+    # here is what let eight scripts carry an unusable `#!/bin/bash` past this very
+    # test: it proved the CONTENT ran under bash, never that the file could execute.
+    out="$("$REPO/$h" --help 2>/dev/null)"
     assert "--help non-empty: $(basename "$h")"      "[[ \$(printf '%s' \"\$out\" | wc -l) -ge 3 ]]"
     assert "--help omits the banner: $(basename "$h")" "! printf '%s' \"\$out\" | grep -q 'SPDX-License-Identifier'"
 done

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 echo "Backing Pictures up to the the vault"
 rsync -avr ~/Pictures/ vault01:/ark01/srv/media/pictures/ $@
 ping -c 1 -W 1 -w 1 -q s76 2>&1 >/dev/null || exit 0

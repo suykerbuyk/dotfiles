@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 echo "Backing up thunderbird to the the vault"
 rsync -avzr ~/.thunderbird/ vault01:/ark01/bkup/thunderbird/ --delete-after $@
 ping -c 1 -W 1 -w 1 -q s76 2>&1 >/dev/null || exit 0
