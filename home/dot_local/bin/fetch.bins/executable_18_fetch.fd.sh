@@ -56,10 +56,26 @@ SRC_DIR="${FB_TMP}/${BIN_NAME}-${TAG_NAME}-${ARCH}-unknown-${OS}-musl"
 
 install_bin "${SRC_DIR}/${BIN_NAME}" "$BIN_NAME" --version
 
-# Completions ship in the tarball under autocomplete/. fd's zsh file is already
-# named _fd; bat's (slot 19) is not, which is why the helper always renames.
+# Generate from the INSTALLED binary, not the extracted tarball -- slot 20's
+# rule (see 20_fetch.delta.sh). install_bin's fb_check_bin gate is version-blind,
+# so on any run where it printed "already valid (skipping)" the tree under
+# $SRC_DIR is a NEWER fd than the one on PATH; installing the tarball's
+# completion files there would describe flags the installed binary does not
+# implement. Generating from the binary on PATH keeps the two halves in
+# agreement whichever version is actually installed.
+#
+# Guarded, unlike slot 20's: --gen-completions is a HIDDEN flag,
+# absent from `fd --help`, so it is the likeliest of the three to disappear. A failed or empty
+# generation drops the file so fb_install_completions warns and leaves the
+# PREVIOUSLY installed completions -- which match the binary on PATH -- in
+# place. The -s test matters because `cmd > file` creates the file even when cmd
+# fails, and a truncated file is still -r.
+"${BIN_DIR}/${BIN_NAME}" --gen-completions zsh  > "${FB_TMP}/_fd"     2>/dev/null || true
+[[ -s "${FB_TMP}/_fd" ]]     || rm -f "${FB_TMP}/_fd"
+"${BIN_DIR}/${BIN_NAME}" --gen-completions bash > "${FB_TMP}/fd.bash" 2>/dev/null || true
+[[ -s "${FB_TMP}/fd.bash" ]] || rm -f "${FB_TMP}/fd.bash"
 fb_install_completions "$BIN_NAME" \
-    "${SRC_DIR}/autocomplete/_fd" \
-    "${SRC_DIR}/autocomplete/fd.bash"
+    "${FB_TMP}/_fd" \
+    "${FB_TMP}/fd.bash"
 
 echo "Installed fd ${VERSION} (musl tarball) -> ${BIN_DIR}/${BIN_NAME}"

@@ -2254,6 +2254,29 @@ assert "podman fetcher generates storage.conf"      "grep -q 'storage.conf' $POD
 # runroot KEY (a `runroot = ...` TOML assignment), not that the word is absent.
 assert "podman fetcher writes no runroot key"       "! grep -qE 'runroot[[:space:]]*=' $PODMAN_FETCHER"
 assert "podman fetcher emits podman-rootless-setup" "grep -q 'podman-rootless-setup' $PODMAN_FETCHER"
+
+# The prune must run on BOTH paths, as in slots 16/22/24. The install path prunes
+# as a side effect of a successful upgrade, but a run interrupted between the
+# extraction and the prune would strand the old ~85 MB tree FOREVER: every later
+# run takes the fast path, which until now exited without ever reaching
+# prune_old_versions. Count CALLS, not the definition — `prune_old_versions()`
+# carries `() {` and cannot match a bare-call pattern.
+assert "podman fetcher defines prune_old_versions" \
+    "grep -qE '^prune_old_versions\(\) \{' $PODMAN_FETCHER"
+assert "podman fetcher calls prune from BOTH paths" \
+    "[[ \$(nocomment $PODMAN_FETCHER | grep -cE '^[[:space:]]*prune_old_versions[[:space:]]*\$') -eq 2 ]]"
+# Ordering, not just presence: the fast-path call is the INDENTED one, and it must
+# land before that path's `exit 0` or it is dead code below a branch that already
+# returned.
+#
+# The count guard is LOAD-BEARING, not belt-and-braces. Without it this assert
+# FAILS OPEN: with the indented call deleted, the line-number substitution yields
+# the empty string, and `[[ "" -lt 42 ]]` is TRUE because empty is 0 in an
+# arithmetic context. Mutation testing caught exactly that — the same
+# empty-compares-equal shape as the iter-62 tsh parse. Prove the call EXISTS
+# before comparing its position.
+assert "podman prunes before the fast-path exit" \
+    "[[ \$(nocomment $PODMAN_FETCHER | grep -cE '^[[:space:]]+prune_old_versions[[:space:]]*\$') -eq 1 ]] && [[ \$(nocomment $PODMAN_FETCHER | grep -nE '^[[:space:]]+prune_old_versions[[:space:]]*\$' | head -1 | cut -d: -f1) -lt \$(nocomment $PODMAN_FETCHER | grep -n 'exit 0' | head -1 | cut -d: -f1) ]]"
 # The generated setup script must itself be valid bash. Extract the quoted-heredoc
 # body (between the `<<'SETUP_EOF'` open line and the bare `SETUP_EOF` close) and
 # bash -n it, so a typo in the generated helper fails here, not at the user's sudo.
@@ -2593,6 +2616,40 @@ assert "doctor registry lists herdr"                "grep -q 'herdr|herdr|' lib/
 assert "installer uninstall covers herdr"           "grep -qE '^[[:space:]]*for b in .*\\bherdr\\b' update-user-home-dir.sh"
 
 # ===========================================================================
+# ---------------------------------------------------------------------------
+# Slot 08 — zed. This fetcher CANNOT detect an upstream bump: cloud.zed.dev
+# serves a versionless "latest" redirect, so the only way to learn what upstream
+# ships is to fetch it. Zed therefore pins to whatever installed first, and the
+# override has to be reachable.
+#
+# It used to PRINT "Run with --force to reinstall" while parsing no arguments at
+# all — and Phase 5 runs every fetcher bare, so even a real flag would have been
+# unreachable from the installer. The advertised remedy did not exist. Pin the
+# working shape AND the absence of the phantom one.
+# ---------------------------------------------------------------------------
+sec "structural: zed fetcher (slot 08, no network)"
+ZED_FETCHER="home/dot_local/bin/fetch.bins/executable_08_fetch.zed.sh"
+assert "zed fetcher present"              "[[ -f $ZED_FETCHER ]]"
+assert "zed fetcher is valid bash"        "bash -n $ZED_FETCHER"
+assert "zed fetcher sources _lib.sh"      "grep -q '_lib.sh' $ZED_FETCHER"
+assert "zed fetcher carries the SPDX banner" \
+    "grep -q 'SPDX-License-Identifier: MIT OR Apache-2.0' $ZED_FETCHER"
+assert "zed fetcher honours ZED_FETCH_FORCE" \
+    "grep -q 'ZED_FETCH_FORCE:-0' $ZED_FETCHER"
+assert "zed fetcher tells the user the env var, not a flag" \
+    "grep -q 'Set ZED_FETCH_FORCE=1' $ZED_FETCHER"
+# NEGATIVE — awk, not `grep -v | grep -q`: under this harness's pipefail a
+# short-circuiting grep -q SIGPIPEs its producer and the assert fails on a match.
+# Comment-stripped, because the header above DOCUMENTS the retired string.
+assert "zed fetcher never advertises a --force flag" \
+    "awk '/^[[:space:]]*#/{next} /Run with --force/{f=1} END{exit f?1:0}' $ZED_FETCHER"
+# Anti-vacuity: the asserts above all pass if the fast path were simply deleted,
+# which would re-download a 450 MB bundle on every Phase-5 run.
+assert "zed fetcher still has an already-installed fast path" \
+    "grep -q 'already installed' $ZED_FETCHER"
+assert "zed fast path still exits without downloading" \
+    "[[ \$(nocomment $ZED_FETCHER | grep -n 'exit 0' | head -1 | cut -d: -f1) -lt \$(nocomment $ZED_FETCHER | grep -n 'gh_download' | head -1 | cut -d: -f1) ]]"
+
 # Structural checks for slots 18-21 (fd, bat, delta, xh) — source only, run in
 # every group. These four are the ripgrep shape, so the invariants worth pinning
 # are the four places they DIVERGE from it, every one of which fails invisibly
@@ -2674,12 +2731,17 @@ for f in "$FD_FETCHER" "$BAT_FETCHER" "$XH_FETCHER"; do
     assert "$(basename "$f") inner dir uses \${TAG_NAME} (tag has a v)" \
         "grep -qF 'SRC_DIR=\"\${FB_TMP}/\${BIN_NAME}-\${TAG_NAME}-' $f"
 done
-# Trap 4 — bat is the only one of the four whose zsh completion is NOT shipped
-# under its autoload name, which is exactly why the helper renames rather than
-# copying. Pin both halves: bat hands over the .zsh file, and the helper is what
-# writes the _<tool> name.
-assert "bat fetcher hands the helper its bat.zsh file" \
-    "grep -qF 'autocomplete/bat.zsh' $BAT_FETCHER"
+# Trap 4 — bat's zsh completion is not named _bat, which is exactly why the
+# helper renames rather than copying. That is unchanged by the move to generated
+# completions: bat still emits a bat.zsh-shaped file, and the helper still owns
+# the autoload name. Pin both halves.
+#
+# INVERTED 2026-09-05: this used to require 'autocomplete/bat.zsh', the TARBALL
+# path. bat now generates into $FB_TMP from the installed binary, so the old
+# assert pinned the skew it was meant to guard against. The invariant it protects
+# — the source is .zsh-named and the helper does the renaming — is unchanged.
+assert "bat fetcher hands the helper a .zsh-named file" \
+    "nocomment $BAT_FETCHER | grep -qF '\${FB_TMP}/bat.zsh'"
 assert "helper installs zsh completions under _<tool>" \
     "grep -qF 'cp \"\$zsrc\" \"\${zdir}/_\${tool}\"' $LIB"
 assert "helper removes zsh completions by _<tool>" \
@@ -2688,6 +2750,72 @@ assert "helper removes zsh completions by _<tool>" \
 assert "delta generates its own completions"        "grep -q -- '--generate-completion' $DELTA_FETCHER"
 assert "delta generates BOTH zsh and bash" \
     "[[ \$(nocomment $DELTA_FETCHER | grep -c -- '--generate-completion') -eq 2 ]]"
+
+# --- completions follow the INSTALLED binary, not the tarball ----------------
+# install_bin's fb_check_bin gate is version-blind, so on a run where it printed
+# "already valid (skipping)" the tree under $SRC_DIR is a NEWER tool than the one
+# on PATH. Installing the tarball's completion files there ships completions
+# describing flags the installed binary does not implement — the skew that used
+# to affect three of these four slots. delta already generated from the binary on
+# PATH; fd, bat and xh now do too.
+for f in "$FD_FETCHER" "$BAT_FETCHER" "$XH_FETCHER"; do
+    b="$(basename "$f")"
+    # NEGATIVE, so read comment-stripped and use awk (the pipefail/SIGPIPE trap
+    # documented above). Every one of these files DISCUSSES the tarball in prose.
+    assert "$b takes no completion file from the tarball" \
+        "awk '/^[[:space:]]*#/{next} /autocomplete\\/|completions\\//{f=1} END{exit f?1:0}' $f"
+    # Anti-vacuity: the negative above passes trivially if the call was deleted.
+    assert "$b still installs completions via the helper" \
+        "grep -qE '^[[:space:]]*fb_install_completions[[:space:]]' $f"
+    # Generation reads ${BIN_DIR}/<tool>, so it MUST follow install_bin. Reversed,
+    # it would read a binary that is not there yet on a first install.
+    # Both operands must EXIST before their order means anything: an absent match
+    # yields "" and `[[ "" -lt N ]]` is true (empty is 0 in arithmetic context),
+    # so the bare comparison would pass on a file that generates nothing at all.
+    assert "$b generates AFTER install_bin" \
+        "[[ \$(nocomment $f | grep -cE '^[[:space:]]*install_bin[[:space:]]') -ge 1 && \$(nocomment $f | grep -c 'BIN_DIR}/\${BIN_NAME}') -ge 1 ]] && [[ \$(nocomment $f | grep -nE '^[[:space:]]*install_bin[[:space:]]' | head -1 | cut -d: -f1) -lt \$(nocomment $f | grep -n 'BIN_DIR}/\${BIN_NAME}' | head -1 | cut -d: -f1) ]]"
+    # A failed generation leaves a CREATED but empty file, which is still -r and
+    # would install an empty completion. The -s guard is what prevents that, once
+    # per shell.
+    assert "$b drops an empty or failed generation" \
+        "[[ \$(nocomment $f | grep -c -- '-s \"\${FB_TMP}/') -eq 2 ]]"
+done
+unset f b
+
+# The generated path, its -s guard and the helper argument must all name the SAME
+# file — three mentions each. Renaming just ONE of the three fails silently:
+# generation writes one name, the helper is handed another, that file is not -r,
+# and fb_install_completions WARNS and installs nothing. No error, no completions.
+# Mutation testing found this hole — the ".zsh-named file" assert above does not
+# close it, because it still matches the two occurrences a partial rename leaves.
+for spec in "$FD_FETCHER:_fd:fd.bash" "$BAT_FETCHER:bat.zsh:bat.bash" "$XH_FETCHER:_xh:xh.bash"; do
+    f="${spec%%:*}"; _rest="${spec#*:}"; _z="${_rest%%:*}"; _b="${_rest#*:}"
+    b="$(basename "$f")"
+    # Two refinements, each forced by a mutation that escaped the naive form:
+    #   1. The trailing quote. grep -F is a SUBSTRING match, so without it
+    #      "fd.bash.other" still contains "fd.bash" and a suffix-renamed path
+    #      counts as agreement.
+    #   2. grep -o | wc -l, not grep -c. `grep -c` counts LINES, and the guard
+    #      line names the path TWICE (`[[ -s X ]] || rm -f X`), so renaming just
+    #      one of that line's two mentions left the line count unchanged.
+    # Four occurrences each: the generation redirect, both halves of the guard,
+    # and the helper argument.
+    assert "$b names its zsh temp consistently ($_z x4)" \
+        "[[ \$(nocomment $f | grep -oF '\${FB_TMP}/$_z\"' | wc -l) -eq 4 ]]"
+    assert "$b names its bash temp consistently ($_b x4)" \
+        "[[ \$(nocomment $f | grep -oF '\${FB_TMP}/$_b\"' | wc -l) -eq 4 ]]"
+done
+unset spec f _rest _z _b b
+
+# Flags differ per tool and none is guessable: fd's --gen-completions is HIDDEN
+# (absent from `fd --help`), bat takes a bare shell name, xh takes complete-<shell>.
+# Two calls each — one per shell — so a dropped shell is caught as a count.
+assert "fd generates both shells (--gen-completions)" \
+    "[[ \$(nocomment $FD_FETCHER | grep -c -- '--gen-completions') -eq 2 ]]"
+assert "bat generates both shells (--completion)" \
+    "[[ \$(nocomment $BAT_FETCHER | grep -c -- '--completion ') -eq 2 ]]"
+assert "xh generates both shells (--generate complete-)" \
+    "[[ \$(nocomment $XH_FETCHER | grep -c -- '--generate complete-') -eq 2 ]]"
 
 assert "doctor registry lists fd"                   "grep -q 'fd|fd|' lib/doctor-registry.sh"
 assert "doctor registry lists bat"                  "grep -q 'bat|bat|' lib/doctor-registry.sh"

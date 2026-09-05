@@ -205,6 +205,10 @@ print_rootless_state() {
 }
 
 # --- prune older version dirs (pure cache, ~85MB each) ------------------------
+# Called from BOTH the fast path and the install path, as in slots 16/22/24: the
+# normal upgrade run prunes as a side effect of installing, but a run interrupted
+# between extraction and this call would otherwise strand the old tree forever,
+# since every later run takes the fast path and never reaches the install path.
 prune_old_versions() {
     local d
     for d in "${APP_DIR}"/podman-*; do
@@ -222,6 +226,7 @@ prune_old_versions() {
 if [[ -x "$APP/bin/podman" ]] && "$APP/bin/podman" --version >/dev/null 2>&1; then
     echo "podman $ver already installed; symlink + config ensured -> $APP/bin/podman"
     link_podman
+    prune_old_versions
     gen_configs
     gen_setup_script
     print_rootless_state

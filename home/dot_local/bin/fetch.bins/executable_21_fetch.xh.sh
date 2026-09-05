@@ -52,8 +52,26 @@ SRC_DIR="${FB_TMP}/${BIN_NAME}-${TAG_NAME}-${ARCH}-unknown-${OS}-musl"
 
 install_bin "${SRC_DIR}/${BIN_NAME}" "$BIN_NAME" --version
 
+# Generate from the INSTALLED binary, not the extracted tarball -- slot 20's
+# rule (see 20_fetch.delta.sh). install_bin's fb_check_bin gate is version-blind,
+# so on any run where it printed "already valid (skipping)" the tree under
+# $SRC_DIR is a NEWER xh than the one on PATH; installing the tarball's
+# completion files there would describe flags the installed binary does not
+# implement. Generating from the binary on PATH keeps the two halves in
+# agreement whichever version is actually installed.
+#
+# Guarded, unlike slot 20's: `xh --generate <KIND>` is documented; the
+# KIND is complete-zsh / complete-bash, NOT a bare shell name. A failed or empty
+# generation drops the file so fb_install_completions warns and leaves the
+# PREVIOUSLY installed completions -- which match the binary on PATH -- in
+# place. The -s test matters because `cmd > file` creates the file even when cmd
+# fails, and a truncated file is still -r.
+"${BIN_DIR}/${BIN_NAME}" --generate complete-zsh  > "${FB_TMP}/_xh"     2>/dev/null || true
+[[ -s "${FB_TMP}/_xh" ]]     || rm -f "${FB_TMP}/_xh"
+"${BIN_DIR}/${BIN_NAME}" --generate complete-bash > "${FB_TMP}/xh.bash" 2>/dev/null || true
+[[ -s "${FB_TMP}/xh.bash" ]] || rm -f "${FB_TMP}/xh.bash"
 fb_install_completions "$BIN_NAME" \
-    "${SRC_DIR}/completions/_xh" \
-    "${SRC_DIR}/completions/xh.bash"
+    "${FB_TMP}/_xh" \
+    "${FB_TMP}/xh.bash"
 
 echo "Installed xh ${VERSION} (musl tarball) -> ${BIN_DIR}/${BIN_NAME}"

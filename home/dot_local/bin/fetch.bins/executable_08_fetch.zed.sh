@@ -24,10 +24,30 @@ ARCH="$(uname -m)"  # Zed uses raw uname -m values
 
 DOWNLOAD_URL="https://cloud.zed.dev/releases/$CHANNEL/latest/download?asset=zed&arch=$ARCH&os=$OS&source=install.sh"
 
-# Check if already installed (preserved from original)
-if [[ -d "${INSTALL_DIR}" && -x "${INSTALL_DIR}/bin/${BIN_NAME}" ]]; then
+# Already-installed fast path.
+#
+# This fetcher CANNOT detect an upstream bump: the download URL below is a
+# server-side "latest" redirect carrying no version, so the only way to learn
+# what upstream ships is to fetch and extract it. Zed therefore pins to whatever
+# version installed first. That is a known limitation of this slot, not an
+# oversight -- see the fetch.bins version-blindness work.
+#
+# ZED_FETCH_FORCE=1 overrides, matching JQ_FETCH_FORCE (slot 01), TSH_FETCH_FORCE
+# (slot 22) and OP_FETCH_FORCE (slot 23). An env var is the only override shape
+# that can work here: Phase 5 runs every fetcher bare, passing no arguments
+# (update-user-home-dir.sh), so a flag would be unreachable from the installer.
+# This message used to advertise "--force" -- a flag this script never parsed and
+# the installer never passed, so the remedy it named did not exist.
+#
+# Forcing works because INSTALL_DIR is a FIXED path: the rm -rf + extract below
+# replaces the payload in place, and the ~/.local/bin/zed symlink already points
+# into it, so install_bin taking its version-blind skip does not block the
+# upgrade.
+if [[ "${ZED_FETCH_FORCE:-0}" != "1" ]] \
+   && [[ -d "${INSTALL_DIR}" && -x "${INSTALL_DIR}/bin/${BIN_NAME}" ]]; then
     CURRENT_VERSION="$(${INSTALL_DIR}/bin/${BIN_NAME} --version 2>/dev/null | cut -d' ' -f2 || echo 'unknown')"
-    echo "Zed $CURRENT_VERSION already installed. Run with --force to reinstall."
+    echo "Zed $CURRENT_VERSION already installed."
+    echo "  Set ZED_FETCH_FORCE=1 to reinstall (this fetcher cannot detect an upstream bump)."
     exit 0
 fi
 
