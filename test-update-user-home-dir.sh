@@ -2845,6 +2845,106 @@ assert "doctor registry lists op"                   "grep -q 'op|op|' lib/doctor
 assert "no op-login refs in source or docs" \
     "! grep -rin --exclude-dir=.git --exclude=.chezmoiremove -e op-login home lib README.md doctor keys update-user-home-dir.sh"
 
+# Structural checks for the proxmox-mcp fetcher (slot 24) — source only.
+# Two invariants carry this slot, and both are about how the binary is INVOKED.
+# It has NO version flag (`--version` is rc 2, "flag provided but not defined"),
+# so --version cannot be a verification argv — a gate keyed on it would reject a
+# perfectly good binary every time. And with PROXMOX_API_URL, PROXMOX_TOKEN_ID
+# and PROXMOX_TOKEN_SECRET all set it SERVES MCP ON STDIO and blocks until stdin
+# closes, so it must never be invoked bare: nothing here bounds an invocation
+# with timeout(1) and stdin is inherited. `--help` is the only argv that both
+# exits 0 and cannot start the server.
+#
+# Read comment-stripped throughout (iter 44): the fetcher's header EXPLAINS the
+# --version trap at length and would satisfy a raw grep forever.
+sec "structural: proxmox-mcp fetcher (slot 24, no network)"
+PMX_FETCHER="home/dot_local/bin/fetch.bins/executable_24_fetch.proxmox-mcp.sh"
+assert "24_fetch.proxmox-mcp.sh present"            "[[ -f $PMX_FETCHER ]]"
+assert "24_fetch.proxmox-mcp.sh is valid bash"      "bash -n $PMX_FETCHER"
+assert "24_fetch.proxmox-mcp.sh sources _lib.sh"    "grep -q '_lib.sh' $PMX_FETCHER"
+assert "24_fetch.proxmox-mcp.sh carries the SPDX banner" \
+    "grep -q 'SPDX-License-Identifier: MIT OR Apache-2.0' $PMX_FETCHER"
+# FreeBSD has no /bin/bash, so the exec fails before line 1 runs. The repo-wide
+# census catches this too; pinned here because this is a new file.
+assert "24_fetch.proxmox-mcp.sh uses an env-resolved shebang" \
+    "[[ \$(head -1 $PMX_FETCHER) == '#!/usr/bin/env bash' ]]"
+
+assert "proxmox-mcp fetcher never probes with --version" \
+    "[[ -z \$(nocomment $PMX_FETCHER | grep -F -e '--version') ]]"
+assert "proxmox-mcp fetcher verifies with --help" \
+    "nocomment $PMX_FETCHER | grep -qF -e '--help'"
+
+# Every invocation of the payload must carry --help. Counted rather than
+# pattern-matched for absence, because the payload variable also appears as an
+# ARGUMENT (mv, ln, [[ -x ]]) where a bare-looking match is correct. Command
+# position is what matters: after `!` or `&&`.
+_pmx_inv=$(nocomment $PMX_FETCHER | grep -cE '(&&|!)[[:space:]]+"\$(PAYLOAD|TMP_BIN)"')
+_pmx_help=$(nocomment $PMX_FETCHER | grep -E '(&&|!)[[:space:]]+"\$(PAYLOAD|TMP_BIN)"' | grep -cF -- '--help')
+# The >= 2 floor is anti-vacuity: a rename of either variable would otherwise
+# make both counts 0 and the equality trivially true.
+assert "proxmox-mcp payload is never invoked bare (2 sites, both --help)" \
+    "[[ $_pmx_inv -ge 2 && $_pmx_inv -eq $_pmx_help ]]"
+unset _pmx_inv _pmx_help
+
+# Versioned payload, because install_bin's fb_check_bin gate is version-blind
+# and this binary cannot be asked its version (slot 22's trick is unavailable).
+assert "proxmox-mcp bypasses install_bin" \
+    "[[ -z \$(nocomment $PMX_FETCHER | grep -E '^[[:space:]]*install_bin[[:space:]]') ]]"
+assert "proxmox-mcp payload path carries the version" \
+    "nocomment $PMX_FETCHER | grep -qF '\${APP_DIR}/\${BIN_NAME}-\${VERSION}'"
+# Both paths prune: a run interrupted between download and prune would otherwise
+# strand the old payload forever, since every later run takes the fast path.
+assert "proxmox-mcp prunes from both the fast path and the install path" \
+    "[[ \$(nocomment $PMX_FETCHER | grep -cE '^[[:space:]]*prune_old_versions[[:space:]]') -ge 2 ]]"
+assert "proxmox-mcp verifies before it symlinks" \
+    "[[ \$(nocomment $PMX_FETCHER | grep -n 'verification failed' | head -1 | cut -d: -f1) -lt \$(nocomment $PMX_FETCHER | grep -n 'ln -sfn' | tail -1 | cut -d: -f1) ]]"
+
+# Exact-match selector binding BOTH jq vars. The release also ships
+# proxmox-mcp_darwin_amd64 and a windows .exe; a contains($arch) filter would
+# select darwin on a linux box, and a hardcoded _linux_ would break the darwin
+# half of the platform declaration (the bug slot 17 carries).
+assert "proxmox-mcp asset selector binds both \$os and \$arch" \
+    "nocomment $PMX_FETCHER | grep -qF '(\"proxmox-mcp_\" + \$os + \"_\" + \$arch)'"
+assert "proxmox-mcp selector hardcodes no OS token" \
+    "[[ -z \$(nocomment $PMX_FETCHER | grep -F 'proxmox-mcp_linux') ]]"
+# fb_arch is CORRECT here (upstream tokens are amd64/arm64), against the usual
+# advice for slots 17-21. Pinned so a later "fix" to uname -m fails loudly
+# instead of 404ing on arm64 only.
+assert "proxmox-mcp uses fb_arch, not raw uname -m" \
+    "nocomment $PMX_FETCHER | grep -qF 'fb_arch'"
+
+# Teardown lockstep. remove_bin looks for the BARE ~/.local/apps/proxmox-mcp,
+# would not find it, would remove only the symlink — and would still report
+# success, because the symlink branch sets removed=1. Both directions asserted:
+# only pinning the special case would let a later edit ADD the stranding loop
+# entry alongside it.
+assert "installer uninstall handles the proxmox-mcp versioned payload" \
+    "grep -q 'proxmox-mcp-\*' update-user-home-dir.sh"
+assert "proxmox-mcp is NOT in the remove_bin loop" \
+    "! grep -qE '^[[:space:]]*for b in .*proxmox-mcp' update-user-home-dir.sh"
+assert "doctor registry lists proxmox-mcp" \
+    "grep -q 'proxmox-mcp|proxmox-mcp|' lib/doctor-registry.sh"
+
+# Credentials and client wiring are deliberately NOT this repo's job: on a host
+# with no lab the env is unset, so a written client stanza would fail its
+# handshake every session, and a stanza in a shared config injects the whole
+# Proxmox tool catalog into every agent on the machine. Host-local values belong
+# in the unmanaged ~/.config/shell/env.d/.
+assert "proxmox-mcp fetcher never sets a PROXMOX_ variable" \
+    "[[ -z \$(nocomment $PMX_FETCHER | grep -E '(export[[:space:]]+)?PROXMOX_[A-Z_]+=') ]]"
+assert "proxmox-mcp fetcher writes no MCP client stanza" \
+    "[[ -z \$(nocomment $PMX_FETCHER | grep -Ei 'mcpServers|mcp_servers|[.]mcp[.]json|--mcp-config') ]]"
+assert "PROXMOX_ALLOW_DESTRUCTIVE is never set in shipped shell code" \
+    "[[ -z \$(grep -rn --include='*.sh' 'PROXMOX_ALLOW_DESTRUCTIVE=' home lib) ]]"
+
+# The slot count in the docs drifted silently before (it read 23 while 23 slots
+# existed only by coincidence of nobody adding one). Derive it instead: this is
+# the assert that keeps High 1 of the 2026-09-04 review from recurring.
+_fb_slots=$(ls home/dot_local/bin/fetch.bins/executable_[0-9]*.sh 2>/dev/null | wc -l)
+assert "fetch-bins.md slot count matches the slots on disk ($_fb_slots)" \
+    "grep -qF 'currently **$_fb_slots slots**' home/doc/fetch-bins.md"
+unset _fb_slots
+
 # fb_system_bin's own contract, asserted on the library. The PATH strip is the
 # whole point: without it the helper answers "system-provided" for our own
 # symlink and the deferral becomes permanent.

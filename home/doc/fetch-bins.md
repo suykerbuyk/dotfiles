@@ -75,7 +75,7 @@ teardown strands them exactly the way tree-sitter's binary was stranded.
 
 Each `NN_fetch.<tool>.sh` sources `_lib.sh` and installs one tool as a **versioned
 static binary** under `~/.local/apps/`, symlinked into `~/.local/bin/`. There are
-currently **23 slots** (01–23).
+currently **24 slots** (01–24).
 
 Key `_lib.sh` helpers:
 - `fb_init` — dirs, temp dir with cleanup trap, and a guard against running inside
@@ -419,6 +419,58 @@ Key `_lib.sh` helpers:
   recopies the file and strips setgid, so the check runs every time,
   including the "already valid" skip. `./doctor` reports `NEED` on the
   same predicate (`df_op_linux_sgid_ok` in `lib/df-common.sh`).
+
+- **proxmox-mcp** (slot **24**) is an MCP server for Proxmox VE
+  (`gordcurrie/proxmox-mcp`, Go). Upstream ships **bare uncompressed binaries**
+  named `proxmox-mcp_<os>_<arch>` — no archive, no checksums, no signature — for
+  linux/darwin on amd64+arm64, plus a windows `.exe`. No FreeBSD build, so the
+  slot skips there.
+
+  **The probe is `--help`, and that is load-bearing.** This binary has *no*
+  version flag: `--version` is `flag provided but not defined` (rc 2), so it
+  cannot be a verification argv — a gate would reject a perfectly good binary
+  every time. And the payload is never invoked **bare**: with
+  `PROXMOX_API_URL`, `PROXMOX_TOKEN_ID` and `PROXMOX_TOKEN_SECRET` all set —
+  i.e. on a host that actually has a lab — a bare run starts serving MCP on
+  stdio and blocks until stdin closes. Nothing here bounds an invocation with
+  `timeout(1)` and stdin is inherited, so under a TTY that is an unbounded hang
+  mid-Phase 5. `--help` is the only argv that both exits 0 and cannot start the
+  server.
+
+  **It uses a versioned payload path, not `install_bin`** — the ghostty shape.
+  `install_bin`'s `fb_check_bin` gate is version-blind, and this binary cannot
+  be asked its version, so slot 22's compare-the-installed-version trick is
+  unavailable. Putting the upstream version in the path lets the filesystem
+  answer "is this current?" without asking the binary anything. Teardown is
+  therefore a **special case, not a `for b in …` loop entry**: `remove_bin`
+  would look for the bare `~/.local/apps/proxmox-mcp`, not find it, remove only
+  the symlink, and still report success.
+
+  **`fb_arch` is correct here**, against the usual advice below: upstream's
+  tokens are `amd64`/`arm64`, exactly what `fb_arch` emits. Do not "fix" it to a
+  raw `uname -m` the way slots 17–21 need — that would 404 on arm64.
+
+  **Credentials and MCP client config are deliberately NOT provisioned here.**
+  The fetcher installs a binary and nothing else. `PROXMOX_API_URL`,
+  `PROXMOX_TOKEN_ID` and `PROXMOX_TOKEN_SECRET` are host-local and are never
+  committed to this repo; put them in the unmanaged
+  `~/.config/shell/env.d/*.sh` drop-in, which `env.sh` sources for **every**
+  shell including non-interactive ones — which matters, because an MCP server
+  is spawned as a child of an agent, not of a shell you typed into. The
+  age-encrypted `~/.keys` is the alternative if the agent is always launched
+  from an interactive shell: it is encrypted at rest, where `env.d` is
+  plaintext on a disk that is not LUKS, but it is rc-layer only and a
+  desktop-entry or systemd-launched agent will never see it. Pick per host.
+
+  `PROXMOX_ALLOW_DESTRUCTIVE` must never be defaulted on — not in the fetcher,
+  not in an `env.d` example, not in copy-pasteable documentation.
+
+  **No MCP client stanza is written by the updater** — not Claude
+  `mcpServers`, not Grok `[mcp_servers.proxmox]`, not `.mcp.json`, not a herdr
+  `--mcp-config`. Two reasons: on a host with no lab the env is unset, so every
+  session would take a handshake failure; and a stanza in a shared client
+  config injects the whole Proxmox tool catalog into every agent on the
+  machine, including implementors that have no use for it.
 
 ## chezmoi source layout (`home/`)
 - Attribute-encoded names: `dot_*`, `private_*` (e.g. `private_dot_ssh` → 0700),

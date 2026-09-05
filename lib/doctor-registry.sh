@@ -36,6 +36,7 @@ df_doctor_registry() {
 		'op|op| 1Password CLI v2; DEFERS when a system-wide op exists; Linux desktop IPC needs setgid onepassword-cli' \
 		'zed|zed|' \
 		'ghostty|ghostty| community AppImage; upstream ships Linux via distros' \
+		'proxmox-mcp|proxmox-mcp| MCP server for Proxmox; no --version flag, so the payload path carries the version' \
 		'chezmoi|chezmoi|' \
 		'tv|| not provisioned by fetch.bins' \
 		'keychain|| superseded by ~/.config/bashrc.d/10-ssh-agent.sh'

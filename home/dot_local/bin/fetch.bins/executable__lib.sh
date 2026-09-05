@@ -114,7 +114,11 @@ fb_init() {
 #                (starship-x86_64-unknown-freebsd.tar.gz), rust
 #                (static.rust-lang.org/rustup/dist/x86_64-unknown-freebsd → 200)
 #   freebsd NO   jq, rg, broot, nvim, zed, ninja, podman, tree-sitter, ghostty,
-#                herdr, fd, bat, delta, xh, tsh, op
+#                herdr, fd, bat, delta, xh, tsh, op, proxmox-mcp
+#
+# proxmox-mcp was verified against its release API on 2026-09-04, not inferred
+# from the tool being Go: upstream ships linux/darwin amd64+arm64 and a windows
+# .exe, and no FreeBSD asset at all.
 #
 # There is deliberately NO default arm. An undeclared tool is a hard error, not
 # a guess: a permissive default reproduces exactly the 404-on-FreeBSD behavior
@@ -130,7 +134,7 @@ fb_supported_os() {
     # No FreeBSD build upstream. jq is listed here rather than as an error
     # because slot 01 already defers to a system jq, which is how FreeBSD gets
     # one (pkg install jq) — the fetch is what is unavailable, not the tool.
-    jq|rg|broot|nvim|zed|ninja|podman|tree-sitter|ghostty|herdr|fd|bat|delta|xh|tsh|tctl|op)
+    jq|rg|broot|nvim|zed|ninja|podman|tree-sitter|ghostty|herdr|fd|bat|delta|xh|tsh|tctl|op|proxmox-mcp)
         echo "linux darwin" ;;
     *)
         echo "" ;;

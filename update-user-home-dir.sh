@@ -191,6 +191,21 @@ if $UNINSTALL; then
     else
         echo "  would remove podman (~/.local/apps/podman-* + podman symlink + podman-rootless-setup + generated ~/.config/containers config)"
     fi
+    # proxmox-mcp needs a special case for the same reason ghostty does: the
+    # fetcher installs a VERSIONED payload (~/.local/apps/proxmox-mcp-<ver>),
+    # because the binary has no --version flag and the path is therefore the
+    # only place its version can live. remove_bin looks for the BARE
+    # ~/.local/apps/proxmox-mcp, does not find it, and removes only the symlink
+    # — while still reporting success, because the symlink branch already set
+    # removed=1. The payload would survive on disk forever and a reinstall would
+    # add a second one beside it. rm -f, not -rf: the payload is a file.
+    if $FORCE; then
+        rm -f "$HOME"/.local/apps/proxmox-mcp-*
+        rm -f "$HOME/.local/bin/proxmox-mcp"
+        echo "  removed proxmox-mcp (versioned payload + symlink)"
+    else
+        echo "  would remove proxmox-mcp (~/.local/apps/proxmox-mcp-* + symlink)"
+    fi
     # Rust is not a remove_bin tool: rustup owns ~/.cargo and ~/.rustup, so let
     # it tear itself down cleanly (removes toolchains, cargo, and the homes).
     RUSTUP_BIN="$HOME/.cargo/bin/rustup"
