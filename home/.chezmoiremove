@@ -31,3 +31,20 @@
 # Its sibling home/dot_local/bin/executable_tsh-login-syketech.sh is NOT retired —
 # that cluster is live. See the tsh-login-op-hardening task.
 .local/bin/tsh-login-fth.sh
+
+# protoc, retired. It was pulled from the doctor registry and the installer in
+# iter 27, but that only stopped NEW machines getting it: the fetcher script, the
+# PATH symlink and the fetched payload were already applied, and chezmoi does not
+# remove a target just because its source vanished. Every apply since has left
+# this box with a protoc on PATH that nothing in the repo knew about, no
+# fetcher would ever update, and the uninstall path could not remove — because
+# the installer entry that would have removed it was deleted along with the rest.
+#
+# All three surfaces are listed. The payload glob is deliberate: other machines
+# are on other versions, and a version-pinned entry would miss them.
+#
+# If protoc is ever wanted again it comes back as a proper fetcher slot with a
+# platform-table entry and a teardown case — and these three lines come out.
+.local/bin/fetch.bins/12_fetch.protoc.sh
+.local/bin/protoc
+.local/apps/protoc-*

@@ -451,14 +451,17 @@ gh_download() {
 
 # ----------------------------------------------------------------------
 # Zip extraction WITHOUT a system 'unzip' (prime directive: a plain user
-# with no sudo/root must still end up fully operational). broot, ninja and
-# protoc ship their releases as .zip, and a minimal Debian install does NOT
+# with no sudo/root must still end up fully operational). broot and ninja
+# ship their releases as .zip, and a minimal Debian install does NOT
 # include 'unzip'. fb_unzip extracts with whichever no-root tool is present,
 # in preference order, and EVERY path preserves unix permission bits — the
 # python fallback restores them from the zip's stored attributes, which a
-# bare `python3 -m zipfile -e` does NOT (that would leave protoc's bin/protoc
-# non-executable, because protoc symlinks it directly instead of going through
-# install_bin's chmod +x).
+# bare `python3 -m zipfile -e` does NOT.
+#
+# Preserving the mode bits is load-bearing for any slot that symlinks a payload
+# straight out of the extracted tree instead of handing it to install_bin, since
+# install_bin's `chmod +x` is then never reached — every versioned-payload slot
+# is in that position.
 #
 #   fb_unzip <zipfile> <destdir>
 #
@@ -536,6 +539,33 @@ fb_check_bin() {
     # Nothing installed at all
     if [[ ! -e "$bin_path" ]]; then
         echo "→ $bin_name: not installed"
+        return 1
+    fi
+
+    # A plain FILE where a symlink belongs.
+    #
+    # Everything install_bin manages is a symlink in BIN_DIR: install_bin places
+    # the payload under APP_DIR and links to it. A regular file here was put
+    # there by something else — a tool's own `--install`, or a fetcher
+    # generation that predates the APP_DIR layout — and it used to pass this
+    # check, because it is -e and is NOT -L, so neither symlink branch below
+    # fired and the function fell through to `return 0`. install_bin then
+    # printed "already valid (skipping)" on every run forever, so the tool could
+    # never be updated and had no payload to update FROM.
+    #
+    # Measured 2026-09-05: broot was the only tool in this state, a 13 MB
+    # regular file at ~/.local/bin/broot with no ~/.local/apps/broot behind it,
+    # pinned at whatever version wrote it. Every other managed tool was already
+    # a proper symlink, so this reinstalls exactly one thing rather than the
+    # tree.
+    #
+    # Deliberately NOT removed here, unlike the broken-symlink branches below:
+    # those delete because what they found is already unusable, whereas this
+    # file still RUNS. Leaving it means a fetch that fails partway leaves the
+    # user with a working tool; install_bin's `ln -sfn` replaces it atomically
+    # once a verified payload exists.
+    if [[ ! -L "$bin_path" && -f "$bin_path" ]]; then
+        echo "→ $bin_name: unmanaged plain file at $bin_path (no versioned payload) — will reinstall"
         return 1
     fi
 

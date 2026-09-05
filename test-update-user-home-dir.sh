@@ -2206,6 +2206,39 @@ fbsb() {
 # Payload basenames left in APP_DIR after the expression, sorted, space-joined.
 fbsb_ls() { fbsb "$1"'; echo "REMAIN:$(ls "$APP_DIR" | sort | tr "\n" " ")"' | sed -n 's/.*REMAIN://p'; }
 
+# fb_check_bin's four verdicts, behaviourally. The plain-file branch is new; the
+# other three are the REPAIR behaviour that must survive it, and are the asserts
+# most likely to be lost in a refactor because they are the half that works.
+fbchk() { fbsb 'rc=0; '"$1"'; fb_check_bin '"$2"' >/dev/null 2>&1 || rc=$?; echo "$rc"'; }
+assert_eq "fb_check_bin: a valid symlink passes" \
+    "$(fbchk ': > "$APP_DIR/t"; chmod +x "$APP_DIR/t"; ln -sfn "$APP_DIR/t" "$BIN_DIR/t"' t)" "0"
+assert_eq "fb_check_bin: a dangling symlink still triggers reinstall" \
+    "$(fbchk 'ln -sfn "$APP_DIR/gone" "$BIN_DIR/t"' t)" "1"
+assert_eq "fb_check_bin: a non-executable target still triggers reinstall" \
+    "$(fbchk ': > "$APP_DIR/t"; ln -sfn "$APP_DIR/t" "$BIN_DIR/t"' t)" "1"
+assert_eq "fb_check_bin: an absent binary still triggers reinstall" \
+    "$(fbchk 'true' t)" "1"
+# THE new one. A regular file in BIN_DIR is not something install_bin ever
+# creates — it places the payload in APP_DIR and links to it — so a plain file
+# was written by something else and has no payload to update from. It used to
+# PASS, because it is -e and not -L, so both symlink branches were skipped and
+# the function fell through to `return 0`; install_bin then answered "already
+# valid (skipping)" forever. Measured 2026-09-05: broot, and only broot.
+assert_eq "fb_check_bin: an unmanaged plain file triggers reinstall (the broot case)" \
+    "$(fbchk ': > "$BIN_DIR/t"; chmod +x "$BIN_DIR/t"' t)" "1"
+# It must NOT delete that file, unlike the broken-symlink branches: what they
+# found is already unusable, whereas this one still runs. A fetch that dies
+# partway must leave the user a working tool.
+assert_eq "fb_check_bin: it leaves the plain file in place to be replaced atomically" \
+    "$(fbsb ': > "$BIN_DIR/t"; chmod +x "$BIN_DIR/t"; fb_check_bin t >/dev/null 2>&1 || true
+             [[ -f "$BIN_DIR/t" ]] && echo PRESENT || echo GONE')" "PRESENT"
+# End to end: install_bin heals the plain file into payload + symlink.
+assert_eq "install_bin converts an unmanaged plain file into a managed symlink" \
+    "$(fbsb ': > "$BIN_DIR/t"; chmod +x "$BIN_DIR/t"
+             mkdir -p "$APP_DIR/src"; printf "#!/bin/sh\necho hi\n" > "$APP_DIR/src/t"; chmod +x "$APP_DIR/src/t"
+             install_bin "$APP_DIR/src/t" t >/dev/null 2>&1 || true
+             [[ -L "$BIN_DIR/t" ]] && echo SYMLINK || echo "STILL-PLAIN"')" "SYMLINK"
+
 assert "_lib.sh declares fb_pin"             "grep -qE '^fb_pin\(\)' $FBLIB"
 assert "_lib.sh declares fb_prune_versions"  "grep -qE '^fb_prune_versions\(\)' $FBLIB"
 
@@ -2452,6 +2485,26 @@ assert "doctor registry lists podman"               "grep -q 'podman|podman|' li
 assert "protoc fully removed from doctor registry"  "! grep -q protoc lib/doctor-registry.sh"
 assert "shell doctor.sh is thin wrapper only"       "grep -q 'dotfiles-doctor()' home/dot_config/shell/doctor.sh && ! grep -q 'df_doctor_registry' home/dot_config/shell/doctor.sh"
 assert "protoc fully removed from installer"         "! grep -q protoc update-user-home-dir.sh"
+# iter 27 removed protoc from the registry and the installer, which stopped NEW
+# machines getting it — and left every EXISTING machine with a fetcher script, a
+# PATH symlink and a fetched payload that no source, no fetcher and no uninstall
+# path knew about. chezmoi does not remove a target because its source vanished;
+# .chezmoiremove is what does, on every machine rather than the one someone
+# noticed on. Same rule as alacritty and tsh-login-fth.sh above it.
+assert "chezmoiremove retires the protoc fetcher script" \
+    "grep -qE '^\.local/bin/fetch\.bins/12_fetch\.protoc\.sh\$' home/.chezmoiremove"
+assert "chezmoiremove retires the protoc PATH symlink" \
+    "grep -qE '^\.local/bin/protoc\$' home/.chezmoiremove"
+# Version-GLOBBED on purpose: other machines are on other protoc versions, and a
+# pinned entry would miss every one of them.
+assert "chezmoiremove retires the protoc payload by glob" \
+    "grep -qE '^\.local/apps/protoc-\*\$' home/.chezmoiremove"
+# The last surface: _lib.sh used protoc as its worked example of a .zip payload
+# whose permission bits matter. The lesson outlived the tool, so it was rewritten
+# rather than deleted — but the tool's name must not survive anywhere the reader
+# could take it for something still installed.
+assert "protoc is named nowhere in fetch.bins sources" \
+    "! grep -rqi protoc home/dot_local/bin/fetch.bins/"
 # Installer uninstall special-case for podman (versioned dir + generated helper).
 assert "installer uninstall handles podman versioned dir" "grep -q 'podman-\*' update-user-home-dir.sh"
 assert "installer uninstall removes podman-rootless-setup" "grep -q 'podman-rootless-setup' update-user-home-dir.sh"
