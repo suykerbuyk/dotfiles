@@ -18,10 +18,12 @@ set -euo pipefail
 fb_init
 fb_require_os chezmoi
 
-# Skip if already present and valid (version-agnostic check).
-if fb_check_bin chezmoi && [[ -x "${BIN_DIR}/chezmoi" ]]; then
-    echo "chezmoi: already valid ($("${BIN_DIR}/chezmoi" --version 2>&1 | head -1))"
-    exit 0
-fi
-
+# No local "already valid" gate any more. That check was fb_check_bin's
+# version-agnostic one: it passed as soon as ~/.local/bin/chezmoi resolved to
+# something executable, so chezmoi could never be upgraded by this slot or by
+# the installer's Phase 2, which carried a copy of the same gate.
+#
+# fetch_chezmoi now owns the decision: it resolves the version, answers from the
+# FILESYSTEM whether that version is installed, and returns without downloading
+# when it is. One decision, both callers.
 fetch_chezmoi

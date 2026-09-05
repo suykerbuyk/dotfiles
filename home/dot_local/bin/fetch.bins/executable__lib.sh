@@ -288,10 +288,47 @@ fb_arch() {
 #
 # It prints the PATH rather than the JSON so the document crosses a command
 # substitution once instead of once per consumer.
+#
+# THE OPTIONAL <tag>. Without it this helper only ever knew /releases/latest,
+# which made FB_PIN_<TOOL> decorative on every GitHub-backed slot: slot 07
+# computed TAG_NAME="v${VERSION}" from the pin and then asked for the LATEST
+# release's assets anyway, so FB_PIN_NVIM=0.11.0 downloaded 0.12.5 and filed it
+# at nvim-0.11.0. The standing ruling is that prune-to-one is safe BECAUSE
+# pinning is a supported way to say "stay here"; a pin that does not reach the
+# downloaded bytes makes that premise false.
+#
+# Pass the tag ONLY on the pinned path. Passing it unconditionally would be a
+# silent regression of the halving above: /releases/tags/<tag> is a different
+# URL and therefore a different cache entry, so a slot that handed over the tag
+# it had just learned FROM /releases/latest would spend two requests to read one
+# release. The convention across the slots is a PIN_TAG variable that is empty
+# unless fb_pin returned something.
+# A 404 on /releases/tags/<tag> is indistinguishable, at curl's exit status,
+# from the rate limit and the offline case — and the message those two print
+# ("rate limited or offline?") sends the reader chasing the network when the
+# real cause is a pin naming a tag that does not exist. Only fires when a tag
+# was actually requested, so the unpinned messages are unchanged.
+gh_pinned_tag_hint() {
+    local repo="$1" tag="${2:-}"
+    [[ -n "$tag" ]] || return 0
+    echo "       This request named the PINNED tag '${tag}'. If the network is fine," >&2
+    echo "       that tag does not exist in ${repo}. The slot derives the tag from" >&2
+    echo "       FB_PIN_<TOOL>, which holds the VERSION (fb_pin's own header: slot" >&2
+    echo "       04 is the exception that keeps its go1. prefix), so check the pin" >&2
+    echo "       value against the repository's published releases." >&2
+}
+
 gh_release_json() {
-    local repo="$1"
-    local url="https://api.github.com/repos/${repo}/releases/latest"
-    local dir="${FB_TMP:-}" cache token
+    local repo="$1" tag="${2:-}"
+    local url dir="${FB_TMP:-}" cache key token
+
+    if [[ -n "$tag" ]]; then
+        url="https://api.github.com/repos/${repo}/releases/tags/${tag}"
+        key="${repo//\//_}-${tag//\//_}"
+    else
+        url="https://api.github.com/repos/${repo}/releases/latest"
+        key="${repo//\//_}-latest"
+    fi
 
     # A standalone caller may source _lib.sh without fb_init, which is what
     # creates FB_TMP. Degrade to a private temp dir rather than writing a cache
@@ -299,7 +336,7 @@ gh_release_json() {
     if [[ -z "$dir" || ! -d "$dir" ]]; then
         dir="$(mktemp -d)"
     fi
-    cache="${dir}/gh-release-${repo//\//_}.json"
+    cache="${dir}/gh-release-${key}.json"
 
     # -s, not -e: a zero-length file from an interrupted or failed write must not
     # be mistaken for a successful fetch and served as a cache hit forever.
@@ -319,6 +356,7 @@ gh_release_json() {
             rm -f "$cache"
             echo "Error: GitHub API request failed for ${repo} (authenticated)." >&2
             echo "       Check that GH_TOKEN/GITHUB_TOKEN is valid and not expired." >&2
+            gh_pinned_tag_hint "$repo" "$tag"
             exit 1
         fi
     else
@@ -328,6 +366,7 @@ gh_release_json() {
             echo "       Unauthenticated GitHub allows 60 requests/hour per IP, and a full" >&2
             echo "       installer pass spends roughly half of that. Export GH_TOKEN (or" >&2
             echo "       GITHUB_TOKEN) to raise the limit to 5000/hour." >&2
+            gh_pinned_tag_hint "$repo" "$tag"
             exit 1
         fi
     fi
@@ -626,6 +665,13 @@ gh_latest_tag() {
     printf '%s' "$tag"
 }
 
+#   gh_asset_url <repo> <filter> [arch] [os] [tag]
+#
+# <tag> is the PINNED tag, and is empty on every unpinned path. Empty means
+# /releases/latest, which is the document gh_latest_tag has already paid for —
+# handing over a tag that was itself just read from that document would open a
+# SECOND cache entry at /releases/tags/<tag> and spend a second request to learn
+# the same thing. See gh_release_json's header.
 gh_asset_url() {
     local repo="$1"
     local jq_filter="$2"
@@ -642,10 +688,10 @@ gh_asset_url() {
     # not passed) so a filter may reference either without jq erroring.
     asset_url="$(jq -r --arg arch "${3:-}" --arg os "${4:-}" '
         .assets[] | select(.name | '"$jq_filter"') | .browser_download_url
-    ' < "$(gh_release_json "$repo")" | head -1)"
+    ' < "$(gh_release_json "$repo" "${5:-}")" | head -1)"
 
     if [[ -z "$asset_url" ]]; then
-        echo "Error: no matching asset for filter '$jq_filter' (arch=${3:-} os=${4:-})." >&2
+        echo "Error: no matching asset for filter '$jq_filter' (arch=${3:-} os=${4:-}${5:+ tag=$5})." >&2
         exit 1
     fi
     printf '%s' "$asset_url"
@@ -950,6 +996,143 @@ install_bin() {
 }
 
 # ----------------------------------------------------------------------
+# Versioned install — the twin of install_bin, for a BARE SINGLE BINARY
+# ----------------------------------------------------------------------
+#   fb_versioned_current   <name> <version> [probe...]   -> the fast path
+#   install_versioned_bin  <src> <name> <version> [probe...]
+#
+# Both place the payload at ${APP_DIR}/<name>-<version> and symlink
+# ${BIN_DIR}/<name> straight at it. That is the whole trick, and it is slot 16's
+# and slot 24's: put the upstream version in the PATH and let the FILESYSTEM
+# answer "is this current?", instead of asking a binary that may have no version
+# flag (slot 24) or whose parse is a single point of failure (slot 22, iter 62).
+#
+# WHY A SHARED HELPER HERE, WHEN PHASE 4 REFUSED ONE. fb_stage_payload's header
+# records that judgement and it still stands: the SIX hand-rolled versioned slots
+# are a toolchain tree, a runtime tree, a userland tree, an AppImage file, a
+# directory of two binaries and a bare binary, with fast paths that regenerate
+# configs, install terminfo, or migrate a legacy layout — a helper spanning them
+# would need about five callbacks, which is a framework, not an abstraction.
+#
+# The phase-5 slots are not that. Thirteen of the fourteen are ONE bare binary
+# with the symlink at the payload itself and no suffix below it — literally slot
+# 24 with a different name and probe. Copying forty lines thirteen times is the
+# per-slot duplication this whole task was filed about. The fourteenth is slot 14
+# (age + age-keygen from one tarball), which takes the versioned DIRECTORY shape
+# and hand-rolls on fb_stage_payload/fb_publish_payload the way slot 22 does.
+#
+# WHAT IS DELIBERATELY NOT IN HERE: the prune. fb_prune_versions stays the
+# caller's call with explicit globs, exactly as the six do, because the glob is
+# the one place where these payloads are genuinely NOT uniform — a legacy
+# unversioned payload, ripgrep's abandoned naming scheme, age's collision with
+# age-keygen. Hiding a derived "${name}-*" inside the helper is what would make
+# it silently wrong.
+#
+# THE [0-9] CONVENTION callers should follow: prune and teardown match
+# <name>-[0-9]*, never <name>-*. `age-*` matches age-keygen, so the bare form
+# makes a prune delete a sibling TOOL's payload. Every tag in this tree
+# normalizes to a leading digit once the 'v' is stripped, so anchoring the
+# version component on a digit costs nothing and closes that.
+
+# True when <name>-<version> is already installed and runnable. Re-asserts the
+# PATH symlink on the way out — cheap, and it self-heals a hand-deleted link, a
+# link left behind pointing at a pruned payload, and the unmanaged plain FILE
+# case (broot's, before phase 1): `ln -sfn` replaces all three.
+#
+# Prints nothing and returns 1 on a miss, so the caller falls through to the
+# download. That direction matters more than it looks: every failure mode here
+# degrades toward DOWNLOADING AND INSTALLING, never toward leaving the machine
+# without a binary — which is the property slots 01/09/14 need, since they run
+# before `chezmoi apply` on a bare machine.
+fb_versioned_current() {
+    local name="$1" version="$2"; shift 2
+    local probe=("$@")
+    local payload
+
+    if [[ -z "$name" || -z "$version" ]]; then
+        echo "Error: fb_versioned_current needs <name> <version>." >&2
+        exit 1
+    fi
+    payload="${APP_DIR}/${name}-${version}"
+
+    [[ -x "$payload" && ! -d "$payload" ]] || return 1
+    if [[ ${#probe[@]} -gt 0 ]]; then
+        "$payload" "${probe[@]}" >/dev/null 2>&1 || return 1
+    fi
+
+    echo "${name} ${version} already installed; symlink ensured."
+    ln -sfn "$payload" "${BIN_DIR}/${name}"
+    return 0
+}
+
+# Stage beside the destination, copy, chmod, VERIFY THE STAGE, publish, link.
+#
+# Verifying before the publish is the one place this is stricter than install_bin,
+# which copies the binary to its final path and only then probes it — so a broken
+# download on that path has already replaced the payload by the time anything
+# notices, and its remedy is `rm -f "$src"`, leaving the tool absent. Here a
+# failed probe throws away a staging file nothing points at and the previous
+# payload is still live on PATH.
+install_versioned_bin() {
+    local src="$1" name="$2" version="$3"; shift 3
+    local probe=("$@")
+    local final stage
+
+    if [[ -z "$src" || -z "$name" || -z "$version" ]]; then
+        echo "Error: install_versioned_bin needs <src> <name> <version>." >&2
+        exit 1
+    fi
+    if [[ ! -e "$src" ]]; then
+        echo "Error: install_versioned_bin: no source at ${src}." >&2
+        exit 1
+    fi
+    final="${APP_DIR}/${name}-${version}"
+
+    # install_bin's self-copy trap, in the versioned spelling. A caller that has
+    # already placed the binary at its final path would otherwise make the copy
+    # below a self-copy: cp fails, set -e kills the fetcher before the symlink,
+    # and the payload is installed with nothing on PATH pointing at it. -ef
+    # (device+inode) rather than string equality, per iter 58 — `realpath -m` is
+    # GNU-only and failed OPEN on BSD by making both sides the empty string.
+    if [[ -e "$final" ]] && [[ "$src" -ef "$final" ]]; then
+        echo "Error: install_versioned_bin: source IS the destination (${final})." >&2
+        echo "       Hand it the extracted binary, not the payload path." >&2
+        exit 1
+    fi
+
+    stage="$(fb_stage_payload "$final")"
+    if ! { cp -a "$src" "$stage" 2>/dev/null || cp "$src" "$stage"; }; then
+        rm -rf "$stage"
+        echo "Error: could not stage ${name} to ${stage}" >&2
+        exit 1
+    fi
+    chmod +x "$stage"
+
+    if [[ ${#probe[@]} -gt 0 ]]; then
+        if ! "$stage" "${probe[@]}" >/dev/null 2>&1; then
+            rm -rf "$stage"
+            echo "Error: ${name} ${version} is not a working binary (verification failed)." >&2
+            echo "       Nothing was published and nothing was relinked; whatever was" >&2
+            echo "       installed before this run is still on PATH." >&2
+            exit 1
+        fi
+    fi
+
+    fb_publish_payload "$stage" "$final"
+    chmod +x "$final"
+    ln -sfn "$final" "${BIN_DIR}/${name}"
+
+    echo "Installed ${name} ${version} -> ${BIN_DIR}/${name}"
+    # Only with a probe, and only the caller's argv. install_bin defaults to
+    # --version when given none, which prints a usage error under the label
+    # "version:" for any tool that spells it differently; printing nothing is
+    # better than printing that.
+    if [[ ${#probe[@]} -gt 0 ]]; then
+        echo "  version: $("${BIN_DIR}/${name}" "${probe[@]}" 2>&1 | head -1)"
+    fi
+}
+
+# ----------------------------------------------------------------------
 # Shell completions (slots 18-21: fd, bat, delta, xh)
 #
 # Three of those four ship completion files INSIDE their release tarball; delta
@@ -1036,8 +1219,9 @@ remove_bin() {
         echo "Error: remove_bin requires bin_name" >&2
         return 1
     fi
+    local app_root="${APP_DIR:-$HOME/.local/apps}"
     local bin_path="${BIN_DIR:-$HOME/.local/bin}/${bin_name}"
-    local app_path="${APP_DIR:-$HOME/.local/apps}/${bin_name}"
+    local app_path="${app_root}/${bin_name}"
 
     # Remove the PATH symlink (or stray file) and the APP_DIR runtime if present.
     # Does NOT gate on fb_check_bin: a broken/half-installed tool must still be
@@ -1045,13 +1229,34 @@ remove_bin() {
     local removed=0
     if [[ -e "$bin_path" || -L "$bin_path" ]]; then rm -f "$bin_path"; removed=1; fi
     if [[ -e "$app_path" ]]; then rm -rf "$app_path"; removed=1; fi
+
+    # VERSIONED payloads, per the 2026-09-05 ruling that reversed "versioned
+    # runtime dirs are intentionally left". That ruling is why $APP_DIR grew to
+    # 3.5 GB with 1.6 GB orphaned: teardown removed the symlink and left the
+    # tree, so nothing on the machine referenced it and nothing would ever
+    # reclaim it. One glob now serves both the prune and the teardown.
+    #
+    # -[0-9], never a bare -*: `age-*` matches age-keygen, so the bare form makes
+    # `remove_bin age` delete a DIFFERENT tool's payload. Every version in this
+    # tree leads with a digit once the tag's 'v' is stripped.
+    #
+    # Payloads whose name is not "<binname>-<version>" are still the caller's
+    # problem and still have their own teardown special cases in
+    # update-user-home-dir.sh: go is `go1.27.1` (no separator), tsh's payload is
+    # `teleport-<v>` (the tool is not the binary), zed is `zed.app`.
+    local versioned
+    for versioned in "${app_root}/${bin_name}"-[0-9]*; do
+        [[ -e "$versioned" ]] || continue   # unmatched glob stays literal
+        rm -rf "$versioned"
+        echo "  removed versioned payload: $(basename "$versioned")"
+        removed=1
+    done
+
     if [[ "$removed" == 1 ]]; then
-        echo "→ removed $bin_name (symlink + $app_path)"
+        echo "→ removed $bin_name (symlink + payloads under $app_root)"
     else
         echo "$bin_name: nothing to remove"
     fi
-    # Note: versioned runtimes (e.g. $APP_DIR/go1.26.5) are left in place; the
-    # PATH symlink is gone, so the tool is no longer active.
 }
 
 # ----------------------------------------------------------------------
@@ -1063,15 +1268,41 @@ remove_bin() {
 # checkout twin of 01_fetch.jq.sh (which now just calls it), the same pattern
 # fetch_chezmoi/09_fetch.chezmoi.sh use. Requires fb_init (FB_TMP, BIN_DIR).
 # ----------------------------------------------------------------------
+#
+# VERSIONED PAYLOAD, and the fast path lives HERE rather than in the slot,
+# because two callers reach this function: 01_fetch.jq.sh and the installer's
+# Phase 1, which bootstraps jq directly. Each used to carry its own
+# `fb_check_bin jq && exit` — the version-blind gate in two places — so putting
+# the decision in the function fixes both and cannot drift apart again.
 fetch_jq() {
-    local os arch tag url
+    local os arch tag ver url payload prev
     os="$(fb_os macos)"           # jq labels it "macos"/"linux"
     arch="$(fb_arch amd64)"       # amd64 | arm64
-    tag="$(gh_latest_tag_nojq jqlang/jq)"
+
+    # jq tags the release "jq-1.8.1", so the tag IS the payload basename and
+    # FB_PIN_JQ holds the bare version. Pinning short-circuits the lookup and its
+    # request; the `||`/if is load-bearing under set -e, since fb_pin returns 1
+    # when unset.
+    if ver="$(fb_pin jq)"; then
+        tag="jq-${ver}"
+    else
+        tag="$(gh_latest_tag_nojq jqlang/jq)"
+        ver="${tag#jq-}"
+    fi
+    payload="${APP_DIR}/jq-${ver}"
+
+    # Fast path before the download. The bare `jq` glob sweeps the legacy
+    # unversioned payload; -[0-9] rather than a bare -*, per fb_prune_versions.
+    if fb_versioned_current jq "$ver" --version; then
+        fb_prune_versions "$payload" "" 'jq-[0-9]*' 'jq'
+        return 0
+    fi
+
     url="https://github.com/jqlang/jq/releases/download/${tag}/jq-${os}-${arch}"
     gh_download "$url" "${FB_TMP}/jq"
-    install_bin "${FB_TMP}/jq" jq --version
-    echo "Installed jq $tag (static release binary, jq-free bootstrap) -> ${BIN_DIR}/jq"
+    prev="$(fb_prev_payload jq)"
+    install_versioned_bin "${FB_TMP}/jq" jq "$ver" --version
+    fb_prune_versions "$payload" "$prev" 'jq-[0-9]*' 'jq'
 }
 
 # ----------------------------------------------------------------------
@@ -1079,22 +1310,43 @@ fetch_jq() {
 # the plain linux_<arch> asset is statically linked; no libc/musl variant
 # needed). Same gh_* pattern as the other fetchers. Requires fb_init (FB_TMP).
 # ----------------------------------------------------------------------
+#
+# VERSIONED PAYLOAD, fast path in the FUNCTION for the same reason as fetch_jq:
+# 09_fetch.chezmoi.sh and the installer's Phase 2 both call it, and each used to
+# carry its own version-blind `fb_check_bin chezmoi && exit`.
 fetch_chezmoi() {
-    local os arch tag ver url tarball
+    local os arch tag ver url tarball payload prev pin_tag=""
     os="$(fb_os darwin)"                          # linux | darwin | freebsd
     arch="$(fb_arch amd64)"                       # amd64 | arm64
-    tag="$(gh_latest_tag twpayne/chezmoi)"
-    ver="${tag#v}"
+
+    # PIN_TAG semantics, as in every GitHub-backed slot: carry the pinned tag
+    # through to the asset lookup, and leave it EMPTY otherwise so the unpinned
+    # path keeps reading the one cached /releases/latest document.
+    if ver="$(fb_pin chezmoi)"; then
+        tag="v${ver}"
+        pin_tag="$tag"
+    else
+        tag="$(gh_latest_tag twpayne/chezmoi)"
+        ver="${tag#v}"
+    fi
+    payload="${APP_DIR}/chezmoi-${ver}"
+
+    if fb_versioned_current chezmoi "$ver" --version; then
+        fb_prune_versions "$payload" "" 'chezmoi-[0-9]*' 'chezmoi'
+        return 0
+    fi
+
     # Matches e.g. chezmoi_2.72.0_linux_amd64.tar.gz or _freebsd_amd64.tar.gz.
     # The underscores around $os are load-bearing: upstream also ships
     # linux-glibc_ and linux-musl_ builds, and only the exact "_<os>_<arch>"
     # token excludes them (and the armv*/i386/loong64 variants).
-    url="$(gh_asset_url twpayne/chezmoi 'endswith("_" + $os + "_" + $arch + ".tar.gz")' "$arch" "$os")"
+    url="$(gh_asset_url twpayne/chezmoi 'endswith("_" + $os + "_" + $arch + ".tar.gz")' "$arch" "$os" "$pin_tag")"
     tarball="${FB_TMP}/chezmoi.tar.gz"
     gh_download "$url" "$tarball"
     tar -xzf "$tarball" -C "$FB_TMP" chezmoi 2>/dev/null || tar -xzf "$tarball" -C "$FB_TMP"
-    install_bin "${FB_TMP}/chezmoi" chezmoi --version
-    echo "Installed chezmoi $ver (static release binary) -> ${BIN_DIR}/chezmoi"
+    prev="$(fb_prev_payload chezmoi)"
+    install_versioned_bin "${FB_TMP}/chezmoi" chezmoi "$ver" --version
+    fb_prune_versions "$payload" "$prev" 'chezmoi-[0-9]*' 'chezmoi'
 }
 
 # ----------------------------------------------------------------------
@@ -1106,21 +1358,86 @@ fetch_chezmoi() {
 # identity on a machine that is setting secrets up for the first time. Callable
 # from the checkout (like fetch_jq/fetch_chezmoi). Requires fb_init (FB_TMP).
 # ----------------------------------------------------------------------
+#
+# VERSIONED PAYLOAD DIRECTORY — the ONE phase-5 slot that is not a bare single
+# binary, and the reason install_versioned_bin refuses a directory rather than
+# growing a mode for it.
+#
+# age ships TWO binaries from one tarball, and they must move together. Two
+# independent versioned FILES could be left at two versions by a run interrupted
+# between them — the both-or-neither problem slot 22 solved for tsh/tctl with a
+# single versioned directory, solved the same way here. So this hand-rolls on
+# fb_stage_payload/fb_publish_payload like slot 22 does.
+#
+# The prune globs are why the -[0-9] anchor exists at all: a bare `age-*` matches
+# `age-keygen`, so the naive glob would delete a sibling tool's payload. The two
+# bare-name globs sweep the pre-migration layout, in which both binaries sat
+# unversioned in APP_DIR.
 fetch_age() {
-    local os arch tag ver url tarball dir
+    local os arch tag ver url tarball dir payload prev stage pin_tag=""
     os="$(fb_os darwin)"          # age uses "linux"/"darwin"
     arch="$(fb_arch amd64)"       # amd64 | arm64
-    tag="$(gh_latest_tag FiloSottile/age)"
-    ver="${tag#v}"
+
+    if ver="$(fb_pin age)"; then
+        tag="v${ver}"
+        pin_tag="$tag"
+    else
+        tag="$(gh_latest_tag FiloSottile/age)"
+        ver="${tag#v}"
+    fi
+    payload="${APP_DIR}/age-${ver}"
+
+    # Fast path. BOTH binaries must be present and one must run: the same
+    # both-or-neither rule the directory exists to enforce, applied to the check.
+    if [[ -x "${payload}/age" && -x "${payload}/age-keygen" ]] \
+       && "${payload}/age" --version >/dev/null 2>&1; then
+        echo "age ${ver} already installed; symlinks ensured."
+        ln -sfn "${payload}/age"        "${BIN_DIR}/age"
+        ln -sfn "${payload}/age-keygen" "${BIN_DIR}/age-keygen"
+        fb_prune_versions "$payload" "" 'age-[0-9]*' 'age' 'age-keygen'
+        return 0
+    fi
+
     # Asset e.g. age-v1.2.1-linux-amd64.tar.gz -> extracts to age/{age,age-keygen}
-    url="$(gh_asset_url FiloSottile/age 'contains("-'"$os"'-") and endswith("-" + $arch + ".tar.gz")' "$arch")"
+    url="$(gh_asset_url FiloSottile/age 'contains("-'"$os"'-") and endswith("-" + $arch + ".tar.gz")' "$arch" "" "$pin_tag")"
     tarball="${FB_TMP}/age.tar.gz"
     gh_download "$url" "$tarball"
     tar -xzf "$tarball" -C "$FB_TMP"
     dir="${FB_TMP}/age"
-    install_bin "${dir}/age" age --version
-    install_bin "${dir}/age-keygen" age-keygen   # no --version verify: flag varies by release
-    echo "Installed age $ver (age + age-keygen, static release) -> ${BIN_DIR}"
+
+    prev="$(fb_prev_payload age /age)"
+    # fb_prev_payload's documented trap, and age is the slot that walks into it:
+    # on the PRE-migration layout ~/.local/bin/age resolves to $APP_DIR/age — a
+    # bare file whose path ends in "/age" — so stripping the suffix yields
+    # $APP_DIR itself, a "previous payload" whose name lies. Harmless as a spare
+    # (a spare is only ever compared, never deleted) but one refactor away from
+    # being passed somewhere that deletes. Drop it rather than carry it.
+    [[ "$prev" != "$APP_DIR" ]] || prev=""
+
+    stage="$(fb_stage_payload "$payload")"
+    mkdir -p "$stage"
+    cp -a "${dir}/age" "${dir}/age-keygen" "$stage/"
+    chmod +x "${stage}/age" "${stage}/age-keygen"
+
+    # Verify the STAGE, before publish and before either symlink moves. age-keygen
+    # gets no --version probe: the flag varies by release, and a wrong probe
+    # rejects a working binary (slot 24's lesson).
+    if ! "${stage}/age" --version >/dev/null 2>&1; then
+        rm -rf "$stage"
+        echo "Error: the downloaded age ${ver} is not runnable (verification failed)." >&2
+        echo "       Nothing was published; whatever age was installed before this" >&2
+        echo "       run is still on PATH — which matters, because chezmoi apply" >&2
+        echo "       calls age to decrypt ~/.keys." >&2
+        exit 1
+    fi
+
+    fb_publish_payload "$stage" "$payload"
+    ln -sfn "${payload}/age"        "${BIN_DIR}/age"
+    ln -sfn "${payload}/age-keygen" "${BIN_DIR}/age-keygen"
+    fb_prune_versions "$payload" "$prev" 'age-[0-9]*' 'age' 'age-keygen'
+
+    echo "Installed age ${ver} (age + age-keygen, static release) -> ${BIN_DIR}"
+    echo "  version: $("${BIN_DIR}/age" --version 2>&1 | head -1)"
 }
 
 # ----------------------------------------------------------------------

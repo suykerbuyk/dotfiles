@@ -169,8 +169,20 @@ link_ghostty() {
 # Assets are Ghostty-<version>-<arch>.AppImage; each has a .zsync twin that the
 # exact-name match below excludes.
 # ---------------------------------------------------------------------------
-TAG_NAME="$(gh_latest_tag "$REPO")"
-VERSION="${TAG_NAME#v}"
+#
+# FB_PIN_GHOSTTY holds a version; PIN_TAG carries it through to the asset lookup
+# and is EMPTY otherwise, so the unpinned path keeps reading the one cached
+# /releases/latest document rather than opening a second entry at
+# /releases/tags/<tag> for the tag it just read from it. The `||` after fb_pin
+# is load-bearing under set -e: it returns 1 when unset.
+PIN_TAG=""
+if VERSION="$(fb_pin "$BIN_NAME")"; then
+    TAG_NAME="v${VERSION}"
+    PIN_TAG="$TAG_NAME"
+else
+    TAG_NAME="$(gh_latest_tag "$REPO")"
+    VERSION="${TAG_NAME#v}"
+fi
 APPIMAGE="${APP_DIR}/${BIN_NAME}-${VERSION}.AppImage"
 
 # Fast path: this exact version is already installed and runnable. Re-assert the
@@ -189,7 +201,7 @@ fi
 # variable it defines — so the version is interpolated shell-side and the arch
 # rides the jq arg (the age fetcher's shape).
 ASSET_URL="$(gh_asset_url "$REPO" \
-    '. == ("Ghostty-'"$VERSION"'-" + $arch + ".AppImage")' "$ARCH")"
+    '. == ("Ghostty-'"$VERSION"'-" + $arch + ".AppImage")' "$ARCH" "" "$PIN_TAG")"
 
 GHOSTTY_PREV="$(fb_prev_payload "$BIN_NAME")"
 

@@ -1758,6 +1758,88 @@ assert "template sets encryption = age"             "grep -q 'encryption = \"age
 agebody="$( . "$LIB" >/dev/null 2>&1; declare -f fetch_age )"
 assert "fetch_age defined in _lib.sh"               "[[ -n \"\$agebody\" ]]"
 assert "fetch_age installs age AND age-keygen"      "grep -q 'age-keygen' <<<\"\$agebody\""
+
+# --- phase 5d: the three BOOTSTRAP slots -------------------------------------
+# jq, chezmoi and age reach the version-blind gate through a different door from
+# the other eleven: each is fetched by a LIBRARY function called from two places
+# — the slot, and the installer's Phases 1-3 — and each of those places carried
+# its own copy of `fb_check_bin <tool> && exit`. Two copies of one blind gate.
+#
+# The decision lives in the FUNCTION now, which is the property worth pinning:
+# it cannot drift back apart, and fixing it once fixes both callers. These run
+# BEFORE `chezmoi apply` on a bare machine, so a regression here is not a broken
+# tool, it is a machine that cannot finish provisioning.
+#
+# `declare -f` is the right reader here and not just a convenience: bash strips
+# comments from a stored function body, so these asserts are inherently
+# comment-blind. That is the iter-44 lesson satisfied structurally rather than by
+# remembering to pipe through nocomment.
+jqbody2="$( . "$LIB" >/dev/null 2>&1; declare -f fetch_jq )"
+cmbody="$(  . "$LIB" >/dev/null 2>&1; declare -f fetch_chezmoi )"
+for _5d in jqbody2 cmbody; do
+    _5dn="fetch_jq"; [[ "$_5d" == jqbody2 ]] || _5dn="fetch_chezmoi"
+    assert "$_5dn resolves a version before deciding" \
+        "grep -q 'fb_pin ' <<<\"\${$_5d}\""
+    assert "$_5dn checks the fast path in the FUNCTION, not the caller" \
+        "grep -q 'fb_versioned_current ' <<<\"\${$_5d}\""
+    assert "$_5dn installs a versioned payload" \
+        "grep -q 'install_versioned_bin ' <<<\"\${$_5d}\""
+    assert "$_5dn prunes on BOTH paths" \
+        "[[ \$(grep -c 'fb_prune_versions ' <<<\"\${$_5d}\") -eq 2 ]]"
+    # The legacy sweep: the bare-name glob beside the versioned one. Without it
+    # the unversioned payload every machine currently carries is reclaimed by
+    # nothing and the tool sits on disk twice.
+    assert "$_5dn sweeps its legacy unversioned payload" \
+        "[[ \$(grep -c \"fb_prune_versions .*'\${_5dn#fetch_}'\" <<<\"\${$_5d}\") -eq 2 ]]"
+    assert "$_5dn anchors its versioned glob on a digit" \
+        "[[ \$(grep -c \"'\${_5dn#fetch_}-\\[0-9\\]\\*'\" <<<\"\${$_5d}\") -eq 2 ]]"
+    assert "$_5dn no longer routes through install_bin" \
+        "[[ -z \$(grep -E '(^|[[:space:]])install_bin[[:space:]]' <<<\"\${$_5d}\") ]]"
+done
+unset _5d _5dn
+# age is the ONE phase-5 payload that is a DIRECTORY, because two binaries from
+# one tarball must move together — an interrupted run must not be able to leave
+# age at one version and age-keygen at another. install_versioned_bin refuses a
+# directory, so this hand-rolls on the staging helpers the way slot 22 does.
+assert "fetch_age uses a versioned payload DIRECTORY" \
+    "grep -q 'age-\${ver}' <<<\"\$agebody\""
+assert "fetch_age stages and publishes through the helpers" \
+    "grep -q 'fb_stage_payload ' <<<\"\$agebody\" && grep -q 'fb_publish_payload ' <<<\"\$agebody\""
+assert "fetch_age does NOT route through install_versioned_bin" \
+    "[[ -z \$(grep -E '(^|[[:space:]])install_versioned_bin[[:space:]]' <<<\"\$agebody\") ]]"
+assert "fetch_age no longer routes through install_bin" \
+    "[[ -z \$(grep -E '(^|[[:space:]])install_bin[[:space:]]' <<<\"\$agebody\") ]]"
+assert "fetch_age links BOTH binaries out of the one payload" \
+    "[[ \$(grep -c 'ln -sfn \"\${payload}/' <<<\"\$agebody\") -eq 4 ]]"
+assert "fetch_age prunes on BOTH paths" \
+    "[[ \$(grep -c 'fb_prune_versions ' <<<\"\$agebody\") -eq 2 ]]"
+# THE glob that must never be written as age-*, in both call sites. A bare
+# age-* matches age-keygen, so the naive form deletes a sibling tool's payload.
+assert "fetch_age anchors its versioned glob on a digit" \
+    "[[ \$(grep -cF \"'age-[0-9]*'\" <<<\"\$agebody\") -eq 2 ]]"
+assert "fetch_age sweeps BOTH legacy unversioned binaries" \
+    "[[ \$(grep -cF \"'age' 'age-keygen'\" <<<\"\$agebody\") -eq 2 ]]"
+# Verify before publish, same contract install_versioned_bin enforces for the
+# other thirteen. A broken age published in place is not merely an un-upgraded
+# tool: `chezmoi apply` calls age to decrypt ~/.keys.
+assert "fetch_age verifies the STAGE before publishing" \
+    "[[ \$(grep -n '\"\${stage}/age\" --version' <<<\"\$agebody\" | head -1 | cut -d: -f1) -lt \$(grep -n 'fb_publish_payload' <<<\"\$agebody\" | head -1 | cut -d: -f1) ]]"
+
+# The installer's own copies of the blind gate are gone. Comment-stripped: all
+# three phases now EXPLAIN in prose why the branch was removed, and a raw grep
+# would match that explanation and pass forever.
+assert "installer Phase 1-3 carry no version-blind gate" \
+    "[[ -z \$(nocomment update-user-home-dir.sh | grep -E '^[[:space:]]*(el)?if.*fb_check_bin (jq|chezmoi|age)') ]]"
+# Anti-vacuity: the bootstrap calls themselves must still be there.
+assert "installer still bootstraps all three before apply" \
+    "[[ \$(nocomment update-user-home-dir.sh | grep -cE '^[[:space:]]*fetch_(jq|chezmoi|age)\$') -ge 3 ]]"
+# The system-jq deferral must stay SECOND. fb_init prepends \$BIN_DIR to PATH, so
+# on a box with both a distro jq and a user-local one the user RUNS the local
+# copy; letting the system branch win would report "already provided system-wide"
+# while leaving the jq actually on PATH frozen forever — the same silent pin,
+# relocated. A box with no user-local jq still spends no GitHub request.
+assert "installer prefers upgrading a user-local jq over deferring to the system one" \
+    "[[ \$(nocomment update-user-home-dir.sh | grep -n 'fetch_jq' | head -1 | cut -d: -f1) -lt \$(nocomment update-user-home-dir.sh | grep -n 'fb_system_bin jq' | head -1 | cut -d: -f1) ]]"
 # Installer wiring: secrets phase exists, is before apply, and the loop skips age.
 assert "installer has the secrets (age) phase"      "grep -q 'Phase 3: secrets bootstrap (age)' update-user-home-dir.sh"
 assert "installer skips 14_fetch.age.sh in loop"    "grep -q '14_fetch.age.sh ]] && continue' update-user-home-dir.sh"
@@ -2302,9 +2384,18 @@ GHSTUB2
 
 assert "_lib.sh declares gh_release_json" "grep -qE '^gh_release_json\(\)' $FBLIB"
 # The census that keeps it collapsed: three helpers used to hit the same endpoint
-# independently. Exactly one call site may name it.
-assert_eq "only ONE api.github.com call site remains in _lib.sh" \
-    "$(grep -c 'api\.github\.com' "$FBLIB")" "1"
+# independently. Exactly one FUNCTION may name it.
+#
+# This used to count the literal string and expect 1, which was a proxy for the
+# property and stopped being one the moment the tagged-release lookup added a
+# second URL INSIDE that same function -- the count went to 2 while the property
+# it stood for was untouched. Pin the property directly instead: the endpoint may
+# be named only inside gh_release_json, and inside it exactly twice (latest, and
+# the pinned tag).
+assert_eq "api.github.com is named ONLY inside gh_release_json" \
+    "$(awk '/^gh_release_json\(\)/{f=1} f&&/^}$/{f=0;next} !f' "$FBLIB" | grep -c 'api\.github\.com' || true)" "0"
+assert_eq "gh_release_json names the latest AND the tagged endpoint" \
+    "$(awk '/^gh_release_json\(\)/{f=1} f&&/^}$/{exit} f' "$FBLIB" | grep -c 'api\.github\.com' || true)" "2"
 # A normal slot resolves a tag and an asset: two requests before, one now.
 assert_eq "tag + asset on one repo costs ONE request" \
     "$(ghsb 'gh_latest_tag Foo/bar >/dev/null; gh_asset_url Foo/bar "endswith(\".tar.gz\")" >/dev/null')" "1"
@@ -2559,10 +2650,21 @@ assert "nvim fetcher passes BOTH the current and legacy globs" \
 # migration could not half-happen silently. Phase 4 completed it: six versioned
 # slots, one implementation, zero local copies. The census moves with the code —
 # that is what it is for.
-assert "all SIX versioned slots use the shared prune" \
-    "[[ \$(grep -lE '^[[:space:]]*fb_prune_versions[[:space:]]' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | wc -l) -eq 6 ]]"
+#
+# UPDATED in phases 5b and 5c: eleven more slots (03, 05, 06, 11, 13, 15, 17 then
+# 18, 19, 20, 21) moved off install_bin onto a versioned payload, so the pruning
+# population is 17, not 6. The count is deliberately a moving number — that is
+# what makes it a census and not a decoration. Phase 5d moves it again.
+assert "all SEVENTEEN versioned slots use the shared prune" \
+    "[[ \$(grep -lE '^[[:space:]]*fb_prune_versions[[:space:]]' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | wc -l) -eq 17 ]]"
 assert "no slot defines a local prune any more" \
     "[[ \$(grep -lE '^prune_old_versions\(\)' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | wc -l) -eq 0 ]]"
+# The six HAND-ROLLED versioned slots, distinct from the helper-driven ones added
+# in phase 5. These six own their staging and publish directly because their
+# payload shapes differ (toolchain tree, runtime tree, userland tree, AppImage
+# file, directory of two binaries, bare binary) and their fast paths do different
+# extra work; the phase-5 slots are one uniform shape and go through
+# install_versioned_bin instead. Only these six may name fb_stage_payload.
 FB_VERSIONED="$(echo home/dot_local/bin/fetch.bins/executable_{04,07,12,16,22,24}_fetch.*.sh)"
 # Every versioned slot prunes on BOTH paths, so two call sites each, twelve in
 # total. A slot that prunes only on install strands its predecessor forever the
@@ -2591,8 +2693,274 @@ assert "no versioned slot builds a payload path in FB_TMP" \
     "[[ -z \$(cat \$FB_VERSIONED | sed 's/#.*//' | grep -E '^[A-Z_]+=\"\\\$\{?FB_TMP' | grep -v '^TARBALL=') ]]"
 assert "no versioned slot moves a payload out of FB_TMP" \
     "[[ -z \$(cat \$FB_VERSIONED | sed 's/#.*//' | grep -E '^[[:space:]]*mv .*FB_TMP') ]]"
-assert "each of the six prunes from BOTH paths (12 call sites)" \
-    "[[ \$(cat home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | grep -cE '^[[:space:]]*fb_prune_versions[[:space:]]') -eq 12 ]]"
+assert "each of the seventeen prunes from BOTH paths (34 call sites)" \
+    "[[ \$(cat home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | grep -cE '^[[:space:]]*fb_prune_versions[[:space:]]') -eq 34 ]]"
+
+# --- fb_versioned_current / install_versioned_bin (phase 5) -----------------
+# The versioned twin of fb_check_bin + install_bin, for a BARE SINGLE BINARY.
+# Phase 4 refused a shared helper for the six hand-rolled versioned slots and
+# that judgement stands — six payload shapes with six different fast paths is a
+# framework, not an abstraction. The phase-5 slots are the opposite case:
+# thirteen of fourteen are one bare binary symlinked at the payload itself, i.e.
+# slot 24 with a different name and probe. The fourteenth (age, two binaries from
+# one tarball) takes the directory shape and hand-rolls like slot 22.
+assert "_lib.sh declares fb_versioned_current"  "grep -qE '^fb_versioned_current\(\)' $FBLIB"
+assert "_lib.sh declares install_versioned_bin" "grep -qE '^install_versioned_bin\(\)' $FBLIB"
+
+# THE point of the whole design: the symlink lands on the VERSIONED payload, so
+# the filesystem answers "is this current?" and no binary is ever asked for a
+# version string. Slot 24 cannot report one; slot 22's parse was a single point
+# of failure (iter 62).
+assert_eq "install_versioned_bin links at the versioned payload" \
+    "$(fbsb 'printf "#!/bin/sh\nexit 0\n" > "$APP_DIR/src"; chmod +x "$APP_DIR/src"
+             install_versioned_bin "$APP_DIR/src" t 1.2.3 --version >/dev/null
+             readlink "$BIN_DIR/t"' | sed 's|.*/||')" "t-1.2.3"
+
+# Where this is STRICTER than install_bin. install_bin copies to the final path
+# and probes it there, so a broken download has already replaced the payload
+# before anything notices, and its remedy (rm -f "$src") leaves the tool ABSENT.
+# Verifying the STAGE means a failed probe throws away a file nothing points at.
+assert_eq "a failed verification publishes nothing" \
+    "$(fbsb_ls 'printf "#!/bin/sh\nexit 1\n" > "$APP_DIR/src"; chmod +x "$APP_DIR/src"
+                (install_versioned_bin "$APP_DIR/src" t 1.2.3 --version) >/dev/null 2>&1 || true')" \
+    "src "
+assert_eq "a failed verification leaves the previous payload on PATH" \
+    "$(fbsb 'printf "#!/bin/sh\nexit 0\n" > "$APP_DIR/t-1.0.0"; chmod +x "$APP_DIR/t-1.0.0"
+             ln -sfn "$APP_DIR/t-1.0.0" "$BIN_DIR/t"
+             printf "#!/bin/sh\nexit 1\n" > "$APP_DIR/src"; chmod +x "$APP_DIR/src"
+             (install_versioned_bin "$APP_DIR/src" t 2.0.0 --version) >/dev/null 2>&1 || true
+             readlink "$BIN_DIR/t"' | sed 's|.*/||')" "t-1.0.0"
+
+# install_bin's self-copy trap in the versioned spelling: a caller that hands
+# over the payload path itself makes the copy a self-copy, cp fails, set -e kills
+# the fetcher BEFORE the symlink, and the tool ends up installed with nothing on
+# PATH. Slot 06's header still carries the scar from the install_bin version.
+assert_re "install_versioned_bin refuses a self-copy" \
+    "$(fbsb 'printf "#!/bin/sh\nexit 0\n" > "$APP_DIR/t-1.2.3"; chmod +x "$APP_DIR/t-1.2.3"
+             (install_versioned_bin "$APP_DIR/t-1.2.3" t 1.2.3) 2>&1 || true')" \
+    'source IS the destination'
+assert_re "install_versioned_bin refuses a missing source" \
+    "$(fbsb '(install_versioned_bin "$APP_DIR/nope" t 1.2.3) 2>&1 || true')" \
+    'no source at'
+
+# --- the fast path ----------------------------------------------------------
+assert_eq "fb_versioned_current is true for the installed version" \
+    "$(fbsb 'printf "#!/bin/sh\nexit 0\n" > "$APP_DIR/t-1.2.3"; chmod +x "$APP_DIR/t-1.2.3"
+             if fb_versioned_current t 1.2.3 --version >/dev/null; then echo YES; else echo NO; fi')" "YES"
+assert_eq "fb_versioned_current is false for a different version" \
+    "$(fbsb 'printf "#!/bin/sh\nexit 0\n" > "$APP_DIR/t-1.2.3"; chmod +x "$APP_DIR/t-1.2.3"
+             if fb_versioned_current t 9.9.9 --version >/dev/null; then echo YES; else echo NO; fi')" "NO"
+# Presence is not operability -- the delta/op rule. A half-written payload, or
+# one for the wrong arch, must fall through to the download rather than be
+# relinked and declared fine.
+assert_eq "fb_versioned_current is false when the probe fails" \
+    "$(fbsb 'printf "#!/bin/sh\nexit 1\n" > "$APP_DIR/t-1.2.3"; chmod +x "$APP_DIR/t-1.2.3"
+             if fb_versioned_current t 1.2.3 --version >/dev/null; then echo YES; else echo NO; fi')" "NO"
+# A DIRECTORY is -x (searchable), so without the explicit -d rejection this
+# helper would happily link ~/.local/bin/<tool> at a directory and report the
+# tool installed. Slot 14's age-<version>/ is exactly that shape, and it
+# hand-rolls on fb_stage_payload/fb_publish_payload for this reason.
+assert_eq "fb_versioned_current rejects a directory payload" \
+    "$(fbsb 'mkdir -p "$APP_DIR/t-1.2.3"
+             if fb_versioned_current t 1.2.3 >/dev/null; then echo YES; else echo NO; fi')" "NO"
+# Self-healing, and it is what lets the fast path subsume fb_check_bin's repair
+# branches: a hand-deleted link, a link left pointing at a pruned payload, and
+# the unmanaged plain FILE (broot's state before phase 1) are all fixed by the
+# ln -sfn, without a download.
+assert_eq "the fast path repairs a hand-deleted symlink" \
+    "$(fbsb 'printf "#!/bin/sh\nexit 0\n" > "$APP_DIR/t-1.2.3"; chmod +x "$APP_DIR/t-1.2.3"
+             fb_versioned_current t 1.2.3 --version >/dev/null
+             readlink "$BIN_DIR/t"' | sed 's|.*/||')" "t-1.2.3"
+assert_eq "the fast path replaces an unmanaged plain file" \
+    "$(fbsb 'printf "#!/bin/sh\nexit 0\n" > "$APP_DIR/t-1.2.3"; chmod +x "$APP_DIR/t-1.2.3"
+             printf "stale\n" > "$BIN_DIR/t"
+             fb_versioned_current t 1.2.3 --version >/dev/null
+             [[ -L "$BIN_DIR/t" ]] && readlink "$BIN_DIR/t"' | sed 's|.*/||')" "t-1.2.3"
+# Every failure mode here must degrade toward DOWNLOADING, never toward leaving
+# the machine with no binary -- slots 01/09/14 run before `chezmoi apply` on a
+# bare machine, where "no binary" is a machine that cannot finish provisioning.
+assert_eq "an absent payload falls through rather than failing" \
+    "$(fbsb 'if fb_versioned_current t 1.2.3 --version >/dev/null 2>&1; then echo YES; else echo FALLTHROUGH; fi')" \
+    "FALLTHROUGH"
+
+# --- remove_bin sweeps versioned payloads (the reversed teardown ruling) -----
+# update-user-home-dir.sh used to rule that versioned runtime dirs are
+# "intentionally left". That is why APP_DIR reached 3.5 GB with 1.6 GB orphaned:
+# teardown removed the symlink and left the tree, and the only code that knew the
+# tree's name was the fetcher just torn down. Reversed 2026-09-05; one glob now
+# serves both the prune and the teardown.
+assert_eq "remove_bin removes versioned payloads" \
+    "$(fbsb_ls 'mkdir -p "$APP_DIR"/t-1.0.0 "$APP_DIR"/t-2.0.0; : > "$APP_DIR/t"
+                remove_bin t >/dev/null')" ""
+assert_eq "remove_bin still removes the legacy unversioned payload" \
+    "$(fbsb_ls ': > "$APP_DIR/t"; remove_bin t >/dev/null')" ""
+# -[0-9], never a bare -*: `age-*` matches age-keygen, so the bare glob makes
+# `remove_bin age` delete a DIFFERENT tool's payload during teardown. Every
+# version in this tree leads with a digit once the tag's 'v' is stripped.
+assert_eq "remove_bin age leaves age-keygen alone" \
+    "$(fbsb_ls 'mkdir -p "$APP_DIR"/age-1.2.1; : > "$APP_DIR/age-keygen"
+                remove_bin age >/dev/null')" "age-keygen "
+assert_re "remove_bin names the versioned payloads it removed" \
+    "$(fbsb 'mkdir -p "$APP_DIR"/t-1.0.0; remove_bin t 2>&1')" \
+    'removed versioned payload: t-1\.0\.0'
+
+# --- FB_PIN reaches the downloaded bytes (phase 5) ---------------------------
+# The pin used to be decorative on every GitHub-backed slot: slot 07 computed
+# TAG_NAME="v${VERSION}" from the pin and then asked gh_asset_url for whatever
+# /releases/latest returned, so FB_PIN_NVIM=0.11.0 downloaded 0.12.5 and filed it
+# at nvim-0.11.0. The standing ruling that prune-to-one is safe BECAUSE pinning
+# holds a version rested on that working.
+assert "gh_release_json can request a specific tag" \
+    "nocomment $FBLIB | awk '/^gh_release_json\(\)/{f=1} f&&/^}\$/{exit} f' | grep -q 'releases/tags/'"
+assert "the release cache is keyed on the tag, not just the repo" \
+    "nocomment $FBLIB | awk '/^gh_release_json\(\)/{f=1} f&&/^}\$/{exit} f' | grep -qF 'gh-release-\${key}'"
+assert "gh_asset_url forwards its 5th argument as the tag" \
+    "nocomment $FBLIB | awk '/^gh_asset_url\(\)/{f=1} f&&/^}\$/{exit} f' | grep -qF 'gh_release_json \"\$repo\" \"\${5:-}\"'"
+# A 404 on /releases/tags/<tag> is indistinguishable at curl's exit status from
+# the rate limit and from being offline, and those two print "rate limited or
+# offline?" -- which sends the reader chasing the network when the real cause is
+# a pin naming a tag that does not exist.
+assert "a failed PINNED request says the tag may not exist" \
+    "grep -qE '^gh_pinned_tag_hint\(\)' $FBLIB"
+assert_eq "the hint is silent when no tag was requested" \
+    "$(fbsb 'gh_pinned_tag_hint some/repo "" 2>&1')" ""
+assert_re "the hint names the tag that was requested" \
+    "$(fbsb 'gh_pinned_tag_hint some/repo v9.9.9 2>&1')" 'PINNED tag .v9\.9\.9'
+
+# PIN_TAG must be EMPTY on the unpinned path. Handing gh_asset_url the tag that
+# was itself just read from /releases/latest opens a SECOND cache entry at
+# /releases/tags/<tag> and spends a second request to re-read the same release --
+# silently undoing the halving gh_release_json exists for.
+for _pf in 07 16 24; do
+    _pfile="$(echo home/dot_local/bin/fetch.bins/executable_${_pf}_fetch.*.sh)"
+    _pb="$(basename "$_pfile")"
+    # Comment-stripped: every one of these files EXPLAINS PIN_TAG in prose above
+    # the code, so a raw grep matches the rationale and stays green after the
+    # call site is gutted. The iter-44 lesson, and mutation testing keeps
+    # re-proving it.
+    assert "$_pb resolves its version through fb_pin" \
+        "nocomment $_pfile | grep -q 'fb_pin '"
+    assert "$_pb initializes PIN_TAG empty" \
+        "nocomment $_pfile | grep -qE '^PIN_TAG=\"\"'"
+    assert "$_pb hands PIN_TAG to the asset lookup" \
+        "nocomment $_pfile | grep -qF '\"\$PIN_TAG\"'"
+    # The regression this whole block exists to prevent, stated directly.
+    assert "$_pb does not hand the latest tag to the asset lookup" \
+        "[[ -z \$(nocomment $_pfile | grep -A2 'gh_asset_url' | grep 'TAG_NAME' || true) ]]"
+done
+unset _pf _pfile _pb
+
+# --- phases 5b/5c: the eleven gated slots migrate off install_bin ------------
+# Eleven slots whose payload is ONE bare binary and whose only reason for calling
+# install_bin was history. Each now resolves its version, answers from the
+# FILESYSTEM whether that version is installed, and only then spends a download.
+# 5b was group A (03, 05, 06, 11, 13, 15, 17); 5c was group B (18-21), which do
+# the same thing and additionally install shell completions.
+#
+# Every assert below is a loop over the group, so a slot added to (or dropped
+# from) FB_PHASE5 is covered without anyone remembering to write asserts for it
+# — the same way fb_require_os's coverage comes free from the per-slot loop.
+FB_PHASE5="$(echo home/dot_local/bin/fetch.bins/executable_{03,05,06,11,13,15,17,18,19,20,21}_fetch.*.sh)"
+assert_eq "phases 5b/5c cover eleven slots" "$(echo $FB_PHASE5 | wc -w)" "11"
+for _5f in $FB_PHASE5; do
+    _5b="$(basename "$_5f")"
+    # NEGATIVE, so comment-stripped: every one of these files now EXPLAINS in its
+    # header why it left install_bin, and a raw grep would match that prose and
+    # pass forever. Mutation testing has caught this exact shape three times in
+    # this tree (iters 63-64).
+    assert "$_5b bypasses install_bin" \
+        "[[ -z \$(nocomment $_5f | grep -E '^[[:space:]]*install_bin[[:space:]]') ]]"
+    # Anti-vacuity for the negative above: it passes trivially if the install
+    # call was simply deleted.
+    assert "$_5b installs a versioned payload" \
+        "nocomment $_5f | grep -qE '^[[:space:]]*install_versioned_bin[[:space:]]'"
+    assert "$_5b checks the fast path before installing" \
+        "nocomment $_5f | grep -qE '^[[:space:]]*if fb_versioned_current[[:space:]]'"
+    assert "$_5b captures the previous payload via the shared helper" \
+        "nocomment $_5f | grep -q 'fb_prev_payload '"
+    assert "$_5b prunes on BOTH paths" \
+        "[[ \$(nocomment $_5f | grep -cE '^[[:space:]]*fb_prune_versions[[:space:]]') -eq 2 ]]"
+
+    # THE ordering property, and the reason this task exists: the version
+    # decision must precede the first download. A line-number comparison ALONE is
+    # not sufficient — slots 08 and 23 reach an `exit 0` before their download,
+    # which is exactly the measurement error the task's own first draft made — so
+    # both operands must exist first, and what is compared is the fast-path exit
+    # against the first transfer.
+    assert "$_5b decides before it downloads" \
+        "[[ \$(nocomment $_5f | grep -cE '^[[:space:]]*if fb_versioned_current[[:space:]]') -ge 1 && \$(nocomment $_5f | grep -cE '^[[:space:]]*(gh_download|ASSET_URL=)') -ge 1 ]] && [[ \$(nocomment $_5f | grep -nE '^[[:space:]]*if fb_versioned_current[[:space:]]' | head -1 | cut -d: -f1) -lt \$(nocomment $_5f | grep -nE '^[[:space:]]*(gh_download|ASSET_URL=)' | head -1 | cut -d: -f1) ]]"
+
+    # The LEGACY SWEEP. ${BIN_NAME}-[0-9]* matches none of the unversioned
+    # payloads sitting in ~/.local/apps right now (age, bat, broot, chezmoi,
+    # delta, fd, fzf, herdr, ninja, starship, tree-sitter, xh), so a migration
+    # shipping only that glob leaves every tool double-resident and reclaims
+    # nothing. The bare-name glob is the sweep, and it composes with the deferred
+    # delete for free: on the migration run fb_prev_payload returns the legacy
+    # path, so it is passed as the SPARE and collected one run later.
+    assert "$_5b sweeps its legacy unversioned payload" \
+        "[[ \$(nocomment $_5f | grep -cE 'fb_prune_versions .*\"\\\$BIN_NAME\"') -eq 2 ]]"
+    # -[0-9], never a bare -*: `age-*` matches age-keygen. Uniform across the
+    # group so no slot has to remember it individually.
+    assert "$_5b anchors its versioned glob on a digit" \
+        "[[ \$(nocomment $_5f | grep -cF '\${BIN_NAME}-[0-9]*') -eq 2 ]]"
+
+    # Pinning, same contract as the three slots above: PIN_TAG empty unless
+    # fb_pin fired, and never the tag just read from /releases/latest.
+    assert "$_5b resolves its version through fb_pin" \
+        "nocomment $_5f | grep -q 'fb_pin '"
+    assert "$_5b initializes PIN_TAG empty" \
+        "nocomment $_5f | grep -qE '^PIN_TAG=\"\"'"
+    assert "$_5b hands PIN_TAG to the asset lookup" \
+        "nocomment $_5f | grep -qF '\"\$PIN_TAG\"'"
+    assert "$_5b does not hand the latest tag to the asset lookup" \
+        "[[ -z \$(nocomment $_5f | grep -A2 'gh_asset_url' | grep 'TAG_NAME' || true) ]]"
+
+    # The banner that used to LIE. These slots closed with `echo "Installed <tool>
+    # $VERSION"` printing the version they had RESOLVED, immediately after
+    # install_bin had printed "already valid (skipping)" — a run that upgraded
+    # nothing ending by claiming it had. install_versioned_bin owns that line now
+    # and prints what is on disk, so a second one here would be the lie again.
+    assert "$_5b does not print its own Installed banner" \
+        "[[ -z \$(nocomment $_5f | grep -E '^[[:space:]]*echo \"Installed ') ]]"
+done
+unset _5f _5b
+
+# Slot 03 is the only one with a THIRD glob: ~/.local/bin/rg resolves into
+# ripgrep-15.1.0-x86_64-unknown-linux-musl/, a scheme this fetcher stopped
+# producing two generations ago and that neither rg-[0-9]* nor the bare rg
+# matches. Without it that directory is reclaimed by nothing, on every machine.
+assert "ripgrep fetcher reclaims its abandoned naming scheme" \
+    "[[ \$(nocomment home/dot_local/bin/fetch.bins/executable_03_fetch.ripgrep.sh | grep -cF \"'ripgrep-[0-9]*'\") -eq 2 ]]"
+
+# --- the exemption census ---------------------------------------------------
+# After phase 5, install_bin has exactly TWO callers left, and both are named
+# exemptions carrying open questions of their own:
+#   08 zed cannot learn its upstream version at all — cloud.zed.dev serves a
+#      versionless "latest" redirect — and the operator ruled against parsing
+#      that redirect, since it couples the fetcher to an undocumented URL shape
+#      upstream can change silently. It stays version-blind, with a working
+#      ZED_FETCH_FORCE=1 as the only upgrade path.
+#   23 op's versioned rewrite collides with op_ensure_linux_sgid: every upgrade
+#      produces a fresh inode with no setgid, which breaks 1Password desktop IPC
+#      until two sudo commands are run.
+# Naming them makes the remaining gap visible instead of forgotten, and makes a
+# THIRD slot appearing here a regression rather than a quiet decision.
+assert_eq "install_bin has exactly two remaining callers" \
+    "$(grep -l '^[[:space:]]*install_bin[[:space:]]' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | wc -l)" "2"
+assert_eq "install_bin's remaining callers are slots 08 and 23" \
+    "$(grep -l '^[[:space:]]*install_bin[[:space:]]' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | xargs -n1 basename | sort | tr '\n' ' ')" \
+    "executable_08_fetch.zed.sh executable_23_fetch.op.sh "
+# No LIBRARY helper routes through it either. fetch_jq, fetch_chezmoi and
+# fetch_age were the last three, and they were the same version-blind gate
+# reached through a different door — a library function rather than a slot.
+assert "no _lib.sh fetch_* helper calls install_bin" \
+    "[[ -z \$(nocomment $FBLIB | grep -E '^[[:space:]]+install_bin[[:space:]]') ]]"
+# install_bin itself STAYS, and so does every repair branch in fb_check_bin.
+# Phase 5 stopped routing fourteen tools through the version-blind SKIP; it did
+# not touch the dangling-symlink, dead-target and plain-file repairs that share
+# the function — the half that works, and the half a refactor loses first.
+assert "install_bin is still defined" "grep -qE '^install_bin\(\)' $FBLIB"
+assert "fb_check_bin is still defined" "grep -qE '^fb_check_bin\(\)' $FBLIB"
 
 #   3. an UNDECLARED tool is a hard error. There is no default arm in the
 #      table, because a permissive default silently restores the 404s this
@@ -3047,7 +3415,15 @@ assert "herdr fetcher sources _lib.sh"              "grep -q '_lib.sh' $HD_FETCH
 assert "herdr fetcher never CALLS fb_arch"          "awk '/^[[:space:]]*#/{next} /fb_arch/{f=1} END{exit f?1:0}' $HD_FETCHER"
 assert "herdr fetcher uses raw uname -m"            "grep -qE 'ARCH=\"\\\$\\(uname -m\\)\"' $HD_FETCHER"
 assert "herdr fetcher matches the asset EXACTLY"    "grep -qF '. == (\"herdr-linux-\" + \$arch)' $HD_FETCHER"
-assert "herdr fetcher goes through install_bin"     "grep -qE '^[[:space:]]*install_bin[[:space:]]' $HD_FETCHER"
+# INVERTED 2026-09-05 (phase 5b). This pinned "goes through install_bin", which
+# was the version-BLIND gate: once ~/.local/bin/herdr resolved, install_bin
+# answered "already valid (skipping)" and herdr could never upgrade — after
+# spending the 21 MB download. Per the iter-62 rule an assert pinning a superseded
+# shape is inverted, not satisfied, or the migration reads as breakage.
+assert "herdr fetcher bypasses install_bin" \
+    "[[ -z \$(nocomment $HD_FETCHER | grep -E '^[[:space:]]*install_bin[[:space:]]') ]]"
+assert "herdr fetcher installs a versioned payload" \
+    "nocomment $HD_FETCHER | grep -qE '^[[:space:]]*install_versioned_bin[[:space:]]'"
 assert "herdr fetcher has no extraction step"       "! grep -qE '(tar -x|gunzip|fb_unzip|appimage-extract)' $HD_FETCHER"
 assert "doctor registry lists herdr"                "grep -q 'herdr|herdr|' lib/doctor-registry.sh"
 # Same lockstep regression tree-sitter shipped with in iter 30: a fetcher that is
@@ -3114,7 +3490,17 @@ for f in "$FD_FETCHER" "$BAT_FETCHER" "$DELTA_FETCHER" "$XH_FETCHER"; do
     assert "$b sources _lib.sh"    "grep -q '_lib.sh' $f"
     assert "$b carries the SPDX banner" \
         "grep -q 'SPDX-License-Identifier: MIT OR Apache-2.0' $f"
-    assert "$b goes through install_bin" "grep -qE '^[[:space:]]*install_bin[[:space:]]' $f"
+    # INVERTED 2026-09-05 (phase 5c). This pinned "goes through install_bin",
+    # which was the version-BLIND gate: once ~/.local/bin/<tool> resolved,
+    # install_bin answered "already valid (skipping)" and the tool could never
+    # upgrade — after spending the download. Per the iter-62 rule an assert
+    # pinning a superseded shape is inverted, not satisfied, or the migration
+    # reads as breakage. Comment-stripped because every one of these files now
+    # EXPLAINS in its header why it left install_bin.
+    assert "$b bypasses install_bin" \
+        "[[ -z \$(nocomment $f | grep -E '^[[:space:]]*install_bin[[:space:]]') ]]"
+    assert "$b installs a versioned payload" \
+        "nocomment $f | grep -qE '^[[:space:]]*install_versioned_bin[[:space:]]'"
     # Trap 1 — NEGATIVE, so read comment-stripped source: every one of these
     # files DOCUMENTS in its header why fb_arch is unusable, and a raw grep would
     # match its own rationale and fail permanently. awk, not `grep -v | grep -q`:
@@ -3189,6 +3575,29 @@ assert "helper removes zsh completions by _<tool>" \
 assert "delta generates its own completions"        "grep -q -- '--generate-completion' $DELTA_FETCHER"
 assert "delta generates BOTH zsh and bash" \
     "[[ \$(nocomment $DELTA_FETCHER | grep -c -- '--generate-completion') -eq 2 ]]"
+# Phase 5c: delta's two SIDE EFFECTS are now functions called from both the fast
+# path and the install path, because the fast path exits before reaching the
+# install. Both are cheap, idempotent and per-machine, and a fast-path-only run
+# that skipped them would stop healing a hand-deleted completion file or a
+# gitconfig that lost the delta keys (which ./doctor's reconcile can strip).
+# Slot 16's fast path re-installs its terminfo and desktop entry for the same
+# reason, and that precedent is why this is not merely an optimisation.
+assert "delta refreshes completions on BOTH paths" \
+    "[[ \$(nocomment $DELTA_FETCHER | grep -cE '^[[:space:]]*refresh_completions\$') -eq 2 ]]"
+assert "delta wires git on BOTH paths" \
+    "[[ \$(nocomment $DELTA_FETCHER | grep -cE '^[[:space:]]*wire_git\$') -eq 2 ]]"
+assert "delta generates from the INSTALLED binary, not the tarball" \
+    "[[ \$(nocomment $DELTA_FETCHER | awk '/^refresh_completions\(\) \{/{f=1} f&&/^\}\$/{exit} f' | grep -c 'BIN_DIR}/\${BIN_NAME}') -eq 2 ]]"
+# The git wiring must never name a delta that is not on PATH: `core.pager = delta`
+# with no delta does NOT degrade — `git diff` dies with exit 128 and prints no
+# diff at all. On the install path that means wire_git follows the install.
+assert "delta wires git AFTER the install on the install path" \
+    "[[ \$(nocomment $DELTA_FETCHER | grep -cE '^[[:space:]]*install_versioned_bin[[:space:]]') -ge 1 && \$(nocomment $DELTA_FETCHER | grep -cE '^[[:space:]]*wire_git\$') -ge 1 ]] && [[ \$(nocomment $DELTA_FETCHER | grep -nE '^[[:space:]]*install_versioned_bin[[:space:]]' | head -1 | cut -d: -f1) -lt \$(nocomment $DELTA_FETCHER | grep -nE '^[[:space:]]*wire_git\$' | tail -1 | cut -d: -f1) ]]"
+# It still owns exactly five keys and restates nothing else, which is what keeps
+# gh's credential helpers, vp's merge driver and the user's [user] identity out
+# of the blast radius. Moving the block into a function must not widen that.
+assert "delta still sets exactly five git keys" \
+    "[[ \$(nocomment $DELTA_FETCHER | grep -cE '^[[:space:]]*git config --global ') -eq 5 ]]"
 
 # --- completions follow the INSTALLED binary, not the tarball ----------------
 # install_bin's fb_check_bin gate is version-blind, so on a run where it printed
@@ -3206,13 +3615,27 @@ for f in "$FD_FETCHER" "$BAT_FETCHER" "$XH_FETCHER"; do
     # Anti-vacuity: the negative above passes trivially if the call was deleted.
     assert "$b still installs completions via the helper" \
         "grep -qE '^[[:space:]]*fb_install_completions[[:space:]]' $f"
-    # Generation reads ${BIN_DIR}/<tool>, so it MUST follow install_bin. Reversed,
-    # it would read a binary that is not there yet on a first install.
-    # Both operands must EXIST before their order means anything: an absent match
-    # yields "" and `[[ "" -lt N ]]` is true (empty is 0 in arithmetic context),
-    # so the bare comparison would pass on a file that generates nothing at all.
-    assert "$b generates AFTER install_bin" \
-        "[[ \$(nocomment $f | grep -cE '^[[:space:]]*install_bin[[:space:]]') -ge 1 && \$(nocomment $f | grep -c 'BIN_DIR}/\${BIN_NAME}') -ge 1 ]] && [[ \$(nocomment $f | grep -nE '^[[:space:]]*install_bin[[:space:]]' | head -1 | cut -d: -f1) -lt \$(nocomment $f | grep -n 'BIN_DIR}/\${BIN_NAME}' | head -1 | cut -d: -f1) ]]"
+    # RETARGETED 2026-09-05 (phase 5c). The property is unchanged — generation
+    # reads ${BIN_DIR}/<tool>, so it must never run before the binary is there —
+    # but the shape that guaranteed it did change. Generation now lives in a
+    # refresh_completions FUNCTION, defined near the top of the file and CALLED
+    # from both the fast path and the install path, because the fast path exits
+    # before reaching the install. A first-line-of-each comparison would now
+    # measure the DEFINITION, which legitimately precedes everything.
+    #
+    # So compare the CALLS instead. Both operands must EXIST before their order
+    # means anything: an absent match yields "" and `[[ "" -lt N ]]` is true
+    # (empty is 0 in arithmetic context), so the bare comparison would pass on a
+    # file that generates nothing at all — the iter-63 fail-open shape.
+    assert "$b generates from a function called on BOTH paths" \
+        "[[ \$(nocomment $f | grep -cE '^[[:space:]]*refresh_completions\$') -eq 2 ]]"
+    assert "$b generates AFTER install_versioned_bin on the install path" \
+        "[[ \$(nocomment $f | grep -cE '^[[:space:]]*install_versioned_bin[[:space:]]') -ge 1 && \$(nocomment $f | grep -cE '^[[:space:]]*refresh_completions\$') -ge 1 ]] && [[ \$(nocomment $f | grep -nE '^[[:space:]]*install_versioned_bin[[:space:]]' | head -1 | cut -d: -f1) -lt \$(nocomment $f | grep -nE '^[[:space:]]*refresh_completions\$' | tail -1 | cut -d: -f1) ]]"
+    # Anti-vacuity for the pair above: the function must actually read the
+    # binary on PATH, not the extracted tree. That is the whole rule slot 20
+    # established and the other three copied.
+    assert "$b generates from the INSTALLED binary, not the tarball" \
+        "[[ \$(nocomment $f | awk '/^refresh_completions\(\) \{/{f=1} f&&/^\}\$/{exit} f' | grep -c 'BIN_DIR}/\${BIN_NAME}') -ge 2 ]]"
     # A failed generation leaves a CREATED but empty file, which is still -r and
     # would install an empty completion. The -s guard is what prevents that, once
     # per shell.
@@ -4052,9 +4475,18 @@ if [[ $NET == 1 ]]; then
     sec "network: fetch_chezmoi + a real fetcher (jq) + remove_bin"
     ( set +e; . "$LIB" >/dev/null 2>&1; fb_init; fetch_chezmoi >/dev/null 2>&1 )
     assert "fetch_chezmoi installed a working binary" "\"$BIN_DIR/chezmoi\" --version >/dev/null 2>&1"
-    # fetch.bins were applied into ~ during the apply group; run jq from there
+    # fetch.bins were applied into ~ during the apply group; run jq from there.
+    #
+    # JQ_FETCH_FORCE=1 is REQUIRED, and its absence was a latent bad assert
+    # (found 2026-09-05, failing on the clean tree as well as this one). Slot 01
+    # defers to a system-wide jq via fb_system_bin, and fb_system_bin strips
+    # $BIN_DIR from PATH before looking — so on any host with a distro jq the
+    # slot correctly exits without installing anything, the sandbox BIN_DIR stays
+    # empty, and this assert fails. It could only ever pass on a machine with no
+    # system jq. The override is the documented way to say "install a user-local
+    # copy anyway", which is exactly what this assert means to exercise.
     if [[ -x "$SB/.local/bin/fetch.bins/01_fetch.jq.sh" ]]; then
-        "$SB/.local/bin/fetch.bins/01_fetch.jq.sh" >/dev/null 2>&1
+        JQ_FETCH_FORCE=1 "$SB/.local/bin/fetch.bins/01_fetch.jq.sh" >/dev/null 2>&1
         assert "jq fetched + runnable from applied ~" "\"$BIN_DIR/jq\" --version >/dev/null 2>&1"
         ( set +e; . "$LIB" >/dev/null 2>&1; remove_bin jq >/dev/null 2>&1 )
         assert "remove_bin removed jq symlink"        "[[ ! -e \"$BIN_DIR/jq\" ]]"

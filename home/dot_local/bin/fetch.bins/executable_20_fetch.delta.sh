@@ -58,6 +58,13 @@ set -euo pipefail
 # makes that entire hazard disappear — we never see, touch, or restate the rest
 # of the file. See doc/fetch-bins.md.
 
+# VERSIONED PAYLOAD, not install_bin (phase 5 of the version-blindness fix).
+# install_bin gates on fb_check_bin, which compares no version, so once
+# ~/.local/bin/delta resolved this slot could never upgrade — and it downloaded
+# the tarball first and discarded it, on every installer run. On an arch with no
+# musl build it spent TWO GitHub requests probing for one before doing so, which
+# the fast path below now skips entirely.
+
 . "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/_lib.sh"
 
 BIN_NAME="delta"
@@ -67,53 +74,23 @@ fb_require_os
 OS="$(fb_os)"
 ARCH="$(uname -m)"  # x86_64 | aarch64 — matches delta's asset names as-is
 
-TAG_NAME="$(gh_latest_tag dandavison/delta)"
-# No-op today (the tag has no "v"), so $VERSION == $TAG_NAME. Kept anyway: it
-# costs nothing and stays correct if upstream ever starts tagging with a "v".
-VERSION="${TAG_NAME#v}"
+# --- side effects, called from BOTH the fast path and the install path --------
+# Functions rather than straight-line code because the fast path below exits
+# before reaching the install. Both are cheap, idempotent and per-machine, and
+# both are things a fast-path-only run would stop healing.
 
-# Prefer musl (fully static, no glibc floor); fall back to gnu where upstream
-# publishes no musl build for this arch — which today means aarch64.
-#
-# gh_asset_url `exit 1`s when nothing matches, which is what makes probing it
-# awkward. The `|| ASSET_URL=""` MUST sit OUTSIDE the command substitution:
-# `exit` terminates the subshell outright, so an inner `$(… || true)` never runs
-# its fallback — the substitution still yields status 1, and `set -e` kills the
-# script at the assignment. That form looks correct, passes every structural
-# grep, and fails ONLY on an arch with no musl build. It was written that way
-# first and caught by an aarch64 dry run, not by the test suite.
-LIBC="musl"
-ASSET_URL="$(gh_asset_url dandavison/delta \
-    'endswith(".tar.gz") and contains("linux-musl") and contains($arch)' "$ARCH" 2>/dev/null)" \
-    || ASSET_URL=""
-if [[ -z "$ASSET_URL" ]]; then
-    LIBC="gnu"
-    echo "→ delta publishes no linux-musl build for ${ARCH}; falling back to linux-gnu" >&2
-    ASSET_URL="$(gh_asset_url dandavison/delta \
-        'endswith(".tar.gz") and contains("linux-gnu") and contains($arch)' "$ARCH")"
-fi
+# Generated, not shipped (note 3). Generate from the INSTALLED binary rather than
+# the extracted one, so the completions always describe the delta that is
+# actually on PATH -- this slot got that right first and slots 18/19/21 copied it.
+refresh_completions() {
+    "${BIN_DIR}/${BIN_NAME}" --generate-completion zsh  > "${FB_TMP}/_delta"
+    "${BIN_DIR}/${BIN_NAME}" --generate-completion bash > "${FB_TMP}/delta.bash"
+    fb_install_completions "$BIN_NAME" "${FB_TMP}/_delta" "${FB_TMP}/delta.bash"
+}
 
-TARBALL="${FB_TMP}/delta.tar.gz"
-gh_download "$ASSET_URL" "$TARBALL"
-
-tar -xzf "$TARBALL" -C "$FB_TMP"
-# ${VERSION}, not ${TAG_NAME}: delta's tag carries no "v". See note 2 above.
-# ${LIBC} is what the musl/gnu branch above resolved to.
-SRC_DIR="${FB_TMP}/${BIN_NAME}-${VERSION}-${ARCH}-unknown-${OS}-${LIBC}"
-
-install_bin "${SRC_DIR}/${BIN_NAME}" "$BIN_NAME" --version
-
-# Generated, not shipped (note 3). Generate from the INSTALLED binary rather
-# than the extracted one, so that on a run where install_bin took its
-# "already valid (skipping)" path the completions still describe the delta that
-# is actually on PATH.
-"${BIN_DIR}/${BIN_NAME}" --generate-completion zsh  > "${FB_TMP}/_delta"
-"${BIN_DIR}/${BIN_NAME}" --generate-completion bash > "${FB_TMP}/delta.bash"
-fb_install_completions "$BIN_NAME" "${FB_TMP}/_delta" "${FB_TMP}/delta.bash"
-
-# --- git wiring ---------------------------------------------------------------
-# Only reached after install_bin succeeded (it exits non-zero on a failed
-# verification), so core.pager never names a delta that is not there. That
+# Only ever called after delta is verified and on PATH (install_versioned_bin
+# exits non-zero on a failed verification, and the fast path only fires when the
+# payload already ran), so core.pager never names a delta that is not there. That
 # ordering is load-bearing: `core.pager = delta` with no delta on PATH does NOT
 # degrade — `git diff` dies with "fatal: unable to execute pager 'delta'" and
 # exit 128, printing no diff at all. An unguarded interactive.diffFilter is just
@@ -137,20 +114,97 @@ fb_install_completions "$BIN_NAME" "${FB_TMP}/_delta" "${FB_TMP}/delta.bash"
 # script, and the fetcher exits non-zero having ALREADY installed delta
 # successfully — a spurious failure for a tool that is otherwise fine. delta is
 # useful standalone (`delta a.txt b.txt`), so no git is not an error here.
-if command -v git >/dev/null 2>&1; then
-    _prev_pager="$(git config --global --get core.pager 2>/dev/null || true)"
-    if [[ -n "$_prev_pager" && "$_prev_pager" != delta* ]]; then
-        echo "  note: replacing existing git core.pager ('${_prev_pager}') with delta" >&2
-    fi
+wire_git() {
+    local _prev_pager
+    if command -v git >/dev/null 2>&1; then
+        _prev_pager="$(git config --global --get core.pager 2>/dev/null || true)"
+        if [[ -n "$_prev_pager" && "$_prev_pager" != delta* ]]; then
+            echo "  note: replacing existing git core.pager ('${_prev_pager}') with delta" >&2
+        fi
 
-    git config --global core.pager delta
-    git config --global interactive.diffFilter 'delta --color-only'
-    git config --global delta.navigate true
-    git config --global delta.side-by-side true
-    git config --global delta.line-numbers true
-    echo "  git:     core.pager + interactive.diffFilter -> delta (navigate, side-by-side, line-numbers)"
+        git config --global core.pager delta
+        git config --global interactive.diffFilter 'delta --color-only'
+        git config --global delta.navigate true
+        git config --global delta.side-by-side true
+        git config --global delta.line-numbers true
+        echo "  git:     core.pager + interactive.diffFilter -> delta (navigate, side-by-side, line-numbers)"
+    else
+        echo "  note: git not found — skipped the delta git wiring (delta itself is installed)" >&2
+    fi
+}
+
+# FB_PIN_DELTA holds a version; PIN_TAG carries it through to the asset lookup
+# and is EMPTY otherwise, so the unpinned path keeps reading the one cached
+# /releases/latest document instead of opening a second entry at
+# /releases/tags/<tag> for the tag it just read from it. The `||` after fb_pin is
+# load-bearing under set -e: it returns 1 when unset.
+#
+# delta's tags carry no "v", so the pinned tag is the version verbatim — the
+# mirror image of fd and bat. See note 2 in the header; the asymmetry is real and
+# per-project, not a thing to tidy away.
+PIN_TAG=""
+if VERSION="$(fb_pin "$BIN_NAME")"; then
+    TAG_NAME="$VERSION"
+    PIN_TAG="$TAG_NAME"
 else
-    echo "  note: git not found — skipped the delta git wiring (delta itself is installed)" >&2
+    TAG_NAME="$(gh_latest_tag dandavison/delta)"
+    # No-op today (the tag has no "v"), so $VERSION == $TAG_NAME. Kept anyway: it
+    # costs nothing and stays correct if upstream ever starts tagging with a "v".
+    VERSION="${TAG_NAME#v}"
 fi
 
-echo "Installed delta ${VERSION} (${LIBC} tarball) -> ${BIN_DIR}/${BIN_NAME}"
+PAYLOAD="${APP_DIR}/${BIN_NAME}-${VERSION}"
+
+# Fast path, BEFORE the download AND before the musl/gnu probe below — which is
+# worth two GitHub requests on an arch with no musl build. The bare `delta` glob
+# is the legacy unversioned payload this slot is migrating off; -[0-9] rather
+# than a bare -*, per fb_prune_versions.
+#
+# Both side effects are re-asserted here, not just on the install path. They are
+# cheap, idempotent, and per-machine: git config keys can be lost to an edit or
+# to ./doctor's reconcile, and completion files to a hand deletion, and a fast
+# path that skipped them would stop healing either. Slot 16's fast path
+# re-installs its terminfo and desktop entry for the same reason.
+if fb_versioned_current "$BIN_NAME" "$VERSION" --version; then
+    fb_prune_versions "$PAYLOAD" "" "${BIN_NAME}-[0-9]*" "$BIN_NAME"
+    refresh_completions
+    wire_git
+    exit 0
+fi
+
+# Prefer musl (fully static, no glibc floor); fall back to gnu where upstream
+# publishes no musl build for this arch — which today means aarch64.
+#
+# gh_asset_url `exit 1`s when nothing matches, which is what makes probing it
+# awkward. The `|| ASSET_URL=""` MUST sit OUTSIDE the command substitution:
+# `exit` terminates the subshell outright, so an inner `$(… || true)` never runs
+# its fallback — the substitution still yields status 1, and `set -e` kills the
+# script at the assignment. That form looks correct, passes every structural
+# grep, and fails ONLY on an arch with no musl build. It was written that way
+# first and caught by an aarch64 dry run, not by the test suite.
+LIBC="musl"
+ASSET_URL="$(gh_asset_url dandavison/delta \
+    'endswith(".tar.gz") and contains("linux-musl") and contains($arch)' "$ARCH" "" "$PIN_TAG" 2>/dev/null)" \
+    || ASSET_URL=""
+if [[ -z "$ASSET_URL" ]]; then
+    LIBC="gnu"
+    echo "→ delta publishes no linux-musl build for ${ARCH}; falling back to linux-gnu" >&2
+    ASSET_URL="$(gh_asset_url dandavison/delta \
+        'endswith(".tar.gz") and contains("linux-gnu") and contains($arch)' "$ARCH" "" "$PIN_TAG")"
+fi
+
+TARBALL="${FB_TMP}/delta.tar.gz"
+gh_download "$ASSET_URL" "$TARBALL"
+
+tar -xzf "$TARBALL" -C "$FB_TMP"
+# ${VERSION}, not ${TAG_NAME}: delta's tag carries no "v". See note 2 above.
+# ${LIBC} is what the musl/gnu branch above resolved to.
+SRC_DIR="${FB_TMP}/${BIN_NAME}-${VERSION}-${ARCH}-unknown-${OS}-${LIBC}"
+
+DELTA_PREV="$(fb_prev_payload "$BIN_NAME")"
+install_versioned_bin "${SRC_DIR}/${BIN_NAME}" "$BIN_NAME" "$VERSION" --version
+fb_prune_versions "$PAYLOAD" "$DELTA_PREV" "${BIN_NAME}-[0-9]*" "$BIN_NAME"
+
+refresh_completions
+wire_git
+echo "  libc:    ${LIBC}"

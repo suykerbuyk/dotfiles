@@ -9,6 +9,11 @@ set -euo pipefail
 # (not a tarball), so this mirrors the ripgrep/fzf pattern but unzips instead of
 # untars. Uses lib for the GitHub helpers, temp discipline, verification gate,
 # and the safety guard. See home/doc/fetch-bins.md.
+#
+# VERSIONED PAYLOAD, not install_bin (phase 5 of the version-blindness fix).
+# install_bin gates on fb_check_bin, which compares no version, so once
+# ~/.local/bin/ninja resolved this slot could never upgrade — and it downloaded
+# the zip first and discarded it, on every installer run.
 
 . "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/_lib.sh"
 
@@ -32,17 +37,39 @@ case "${OS}:${ARCH}" in
     *) echo "Error: unsupported platform '${OS}/${ARCH}' for ninja." >&2; exit 1 ;;
 esac
 
-TAG_NAME="$(gh_latest_tag ninja-build/ninja)"
-VERSION="${TAG_NAME#v}"
+# FB_PIN_NINJA holds a version; PIN_TAG carries it through to the asset lookup
+# and is EMPTY otherwise, so the unpinned path keeps reading the one cached
+# /releases/latest document instead of opening a second entry at
+# /releases/tags/<tag> for the tag it just read from it. The `||` after fb_pin is
+# load-bearing under set -e: it returns 1 when unset.
+PIN_TAG=""
+if VERSION="$(fb_pin "$BIN_NAME")"; then
+    TAG_NAME="v${VERSION}"
+    PIN_TAG="$TAG_NAME"
+else
+    TAG_NAME="$(gh_latest_tag ninja-build/ninja)"
+    VERSION="${TAG_NAME#v}"
+fi
+
+PAYLOAD="${APP_DIR}/${BIN_NAME}-${VERSION}"
+
+# Fast path, BEFORE the download: the version is already in hand, so there is
+# nothing to learn from spending the transfer. The bare `ninja` glob is the
+# legacy unversioned payload this slot is migrating off; -[0-9] rather than a
+# bare -*, per fb_prune_versions.
+if fb_versioned_current "$BIN_NAME" "$VERSION" --version; then
+    fb_prune_versions "$PAYLOAD" "" "${BIN_NAME}-[0-9]*" "$BIN_NAME"
+    exit 0
+fi
 
 # The asset names carry no version/arch token, so match the exact name.
-ASSET_URL="$(gh_asset_url ninja-build/ninja '. == $arch' "$ASSET")"
+ASSET_URL="$(gh_asset_url ninja-build/ninja '. == $arch' "$ASSET" "" "$PIN_TAG")"
 
 ZIP="${FB_TMP}/ninja.zip"
 gh_download "$ASSET_URL" "$ZIP"
 
 fb_unzip "$ZIP" "$FB_TMP"   # single 'ninja' binary at the zip root
 
-install_bin "${FB_TMP}/${BIN_NAME}" "$BIN_NAME" --version
-
-echo "Installed ninja $VERSION (release zip) -> ${BIN_DIR}/${BIN_NAME}"
+NINJA_PREV="$(fb_prev_payload "$BIN_NAME")"
+install_versioned_bin "${FB_TMP}/${BIN_NAME}" "$BIN_NAME" "$VERSION" --version
+fb_prune_versions "$PAYLOAD" "$NINJA_PREV" "${BIN_NAME}-[0-9]*" "$BIN_NAME"

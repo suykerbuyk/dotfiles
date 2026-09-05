@@ -21,8 +21,23 @@ ARCH="$(fb_arch x86_64)"
 # FB_PIN_NVIM short-circuits the release lookup (and its API call). The `||` is
 # load-bearing under `set -e`: fb_pin returns 1 when unset, and a bare assignment
 # would abort on that status instead of falling through.
+#
+# PIN_TAG carries the pin THROUGH to the asset lookup, and is empty otherwise.
+# Without it this slot honoured the pin in the payload PATH only: it computed
+# TAG_NAME="v${VERSION}" and then asked gh_asset_url for the assets of whatever
+# /releases/latest returned, so FB_PIN_NVIM=0.11.0 on a machine without that
+# payload downloaded the latest tarball and filed it at nvim-0.11.0. The pin was
+# decorative, and the standing ruling that prune-to-one is safe BECAUSE pinning
+# holds a version rested on it.
+#
+# It must stay EMPTY on the unpinned path. Handing gh_asset_url the tag that was
+# just read from /releases/latest would open a second cache entry at
+# /releases/tags/<tag> and spend a second API request to re-read the same
+# release — undoing the halving gh_release_json exists for.
+PIN_TAG=""
 if VERSION="$(fb_pin nvim)"; then
     TAG_NAME="v${VERSION}"
+    PIN_TAG="$TAG_NAME"
 else
     TAG_NAME="$(gh_latest_tag neovim/neovim)"
     VERSION="${TAG_NAME#v}"  # strip leading 'v' if present
@@ -33,7 +48,7 @@ if [[ -z "$VERSION" ]]; then
 fi
 
 # Deterministic tarball selection (endswith + arch; no .zsync or .deb)
-ASSET_URL="$(gh_asset_url neovim/neovim 'endswith(".tar.gz") and contains($arch)' "$ARCH")"
+ASSET_URL="$(gh_asset_url neovim/neovim 'endswith(".tar.gz") and contains($arch)' "$ARCH" "" "$PIN_TAG")"
 
 TARBALL="${FB_TMP}/nvim.tar.gz"
 INSTALL_DIR="${APP_DIR}/nvim-${VERSION}"

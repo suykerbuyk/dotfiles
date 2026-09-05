@@ -6,8 +6,16 @@
 set -euo pipefail
 
 # fzf installer (CLI/TUI). Uses lib for GitHub helpers, temp discipline,
-# verification, and safety guard. Simplified to ~10 lines.
-# See Context.fetch.bins.refactor.md.
+# verification, and safety guard.
+#
+# VERSIONED PAYLOAD, not install_bin (phase 5 of the version-blindness fix).
+# install_bin gates on fb_check_bin, which compares no version, so once
+# ~/.local/bin/fzf resolved this slot could never upgrade — and it downloaded the
+# 4.8 MB tarball first and discarded it, on every installer run.
+#
+# ^R BELONGS TO fzf, and that is a ruling (iter 44): the rebind at the end of
+# dotfiles_tool_init is load-bearing, not cleanup. Nothing in this fetcher may
+# install a keybinding of its own.
 
 . "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/_lib.sh"
 
@@ -19,20 +27,43 @@ OS="$(fb_os)"
 ARCH="$(fb_arch amd64)"  # fzf uses amd64/arm (armv7l->arm)
 ARCH_FOR_FZF="${ARCH/armv7l/arm}"  # extra normalization
 
-TAG_NAME="$(gh_latest_tag junegunn/fzf)"
-VERSION="${TAG_NAME#v}"  # no 'v' prefix
+# FB_PIN_FZF holds a version; PIN_TAG carries it through to the asset lookup and
+# is EMPTY otherwise, so the unpinned path keeps reading the one cached
+# /releases/latest document instead of opening a second entry at
+# /releases/tags/<tag> for the tag it just read from it. The `||` after fb_pin is
+# load-bearing under set -e: it returns 1 when unset.
+#
+# fzf's tags carry no 'v' prefix, so the pinned tag is the version verbatim.
+PIN_TAG=""
+if VERSION="$(fb_pin "$BIN_NAME")"; then
+    TAG_NAME="$VERSION"
+    PIN_TAG="$TAG_NAME"
+else
+    TAG_NAME="$(gh_latest_tag junegunn/fzf)"
+    VERSION="${TAG_NAME#v}"  # no 'v' prefix
+fi
+
+PAYLOAD="${APP_DIR}/${BIN_NAME}-${VERSION}"
+
+# Fast path, BEFORE the download: the version is already in hand.
+if fb_versioned_current "$BIN_NAME" "$VERSION" --version; then
+    fb_prune_versions "$PAYLOAD" "" "${BIN_NAME}-[0-9]*" "$BIN_NAME"
+    exit 0
+fi
 
 # Asset pattern: fzf-${VERSION}-linux_${arch}.tar.gz
-ASSET_URL="$(gh_asset_url junegunn/fzf 'contains("linux") and contains($arch)' "$ARCH_FOR_FZF")"
+ASSET_URL="$(gh_asset_url junegunn/fzf 'contains("linux") and contains($arch)' "$ARCH_FOR_FZF" "" "$PIN_TAG")"
 
 TARBALL="${FB_TMP}/fzf.tar.gz"
 gh_download "$ASSET_URL" "$TARBALL"
 
 tar -xzf "$TARBALL" -C "$FB_TMP"
 
-# Hand install_bin the extracted binary in FB_TMP; it copies into APP_DIR itself.
-# Pre-moving it to ${APP_DIR}/${BIN_NAME} makes src and install_bin's dest the
-# same path, and its `cp` fails ("are the same file") before the symlink is made.
-install_bin "${FB_TMP}/${BIN_NAME}" "$BIN_NAME" --version
-
-echo "Installed fzf $VERSION (tarball) -> ${BIN_DIR}/${BIN_NAME}"
+# Hand install_versioned_bin the extracted binary in FB_TMP; it copies to the
+# versioned payload itself. Pre-moving it to the payload path makes src and the
+# destination the same file, which the helper refuses outright — install_bin's
+# old failure mode here was worse: `cp` died, and under set -e so did the script,
+# leaving the runtime installed and nothing on PATH. That silently broke fzf.
+FZF_PREV="$(fb_prev_payload "$BIN_NAME")"
+install_versioned_bin "${FB_TMP}/${BIN_NAME}" "$BIN_NAME" "$VERSION" --version
+fb_prune_versions "$PAYLOAD" "$FZF_PREV" "${BIN_NAME}-[0-9]*" "$BIN_NAME"

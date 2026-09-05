@@ -88,12 +88,24 @@ if $UNINSTALL; then
         echo "(chezmoi not installed — skipping managed-file removal)"
     fi
     echo "-- fetched tools --"
-    # Plain single-binary tools: remove_bin clears the ~/.local/bin symlink and
-    # the ~/.local/apps/<name> runtime. Versioned runtime dirs (go<ver>/,
-    # nvim-<ver>/) are intentionally left; the active symlink is
-    # gone, so the tool is no longer on PATH. Keep this list in lockstep with the
-    # fetch.bins/ scripts (every 0N_fetch.<tool>.sh must map to an entry here, a
-    # special case below, or the rust block).
+    # Plain single-binary tools: remove_bin clears the ~/.local/bin symlink, the
+    # legacy unversioned ~/.local/apps/<name> payload, AND every versioned
+    # ~/.local/apps/<name>-<version>.
+    #
+    # That last clause reverses this comment's own former ruling ("versioned
+    # runtime dirs are intentionally left; the active symlink is gone, so the
+    # tool is no longer on PATH"). Leaving them is how ~/.local/apps reached
+    # 3.5 GB with 1.6 GB orphaned: nothing on the machine referenced those trees
+    # and nothing would ever reclaim them, because the only code that knew their
+    # names was the fetcher that had just been torn down.
+    #
+    # remove_bin matches <name>-[0-9]*, so a payload whose name is not
+    # "<binname>-<version>" still needs a special case below: go is `go1.27.1`
+    # with no separator, tsh's payload is `teleport-<v>`, zed is `zed.app`.
+    #
+    # Keep this list in lockstep with the fetch.bins/ scripts (every
+    # 0N_fetch.<tool>.sh must map to an entry here, a special case below, or the
+    # rust block).
     for b in jq rg go gofmt broot fzf nvim ninja starship chezmoi age age-keygen tree-sitter herdr fd bat xh op; do
         if $FORCE; then remove_bin "$b"; else echo "  would remove_bin $b"; fi
     done
@@ -251,8 +263,20 @@ fi
 # ---------------------------------------------------------------------------
 echo "=== Phase 1: jq (jq-free bootstrap) ==="
 JQ="${BIN_DIR}/jq"
-if ! $FORCE && fb_check_bin jq && [[ -x "$JQ" ]]; then
-    echo "jq present: $("$JQ" --version)"
+# ORDER, and it changed in phase 5. This used to open with a version-blind
+# `fb_check_bin jq && echo "jq present"`, which meant a USER-LOCAL jq could never
+# be upgraded — it merely had to exist. fetch_jq owns that decision now and is
+# idempotent, so the branch becomes "do we manage a jq here?".
+#
+# The system-deferral branch stays SECOND, not first, and that is deliberate:
+# fb_init prepends $BIN_DIR to PATH, so on a box carrying both a distro jq and a
+# user-local one the user actually RUNS the user-local copy. Letting the system
+# branch win would report "already provided system-wide" while leaving the jq on
+# PATH frozen at whatever version installed first — the same silent pin, moved.
+#
+# A box with no user-local jq and a distro jq still spends NO GitHub request.
+if [[ -e "$JQ" || -L "$JQ" ]] && ! $DRY_RUN; then
+    fetch_jq
 elif SYSTEM_JQ="$(fb_system_bin jq --version)"; then
     # A distro jq is enough for every later fetcher to parse GitHub JSON.
     # --force used to remove_bin + fetch_jq anyway, which is what exhausted
@@ -273,9 +297,11 @@ echo
 # 2. Bootstrap the chezmoi binary (uses jq from Phase 1)
 # ---------------------------------------------------------------------------
 echo "=== Phase 2: chezmoi binary ==="
-if ! $FORCE && fb_check_bin chezmoi && [[ -x "$CHEZMOI" ]]; then
-    echo "chezmoi present: $("$CHEZMOI" --version | head -1)"
-elif $DRY_RUN; then
+# The version-blind `fb_check_bin chezmoi && echo "chezmoi present"` branch is
+# gone (phase 5): it passed as soon as the symlink resolved, so chezmoi froze at
+# whatever version installed first. fetch_chezmoi owns the decision now, resolves
+# the version and returns without downloading when that version is on disk.
+if $DRY_RUN; then
     echo "DRY-RUN: fetch_chezmoi (static release binary)"
 else
     $FORCE && remove_bin chezmoi
@@ -301,13 +327,14 @@ if $DRY_RUN; then
     [[ -r "$AGE_KEY" ]] && echo "DRY-RUN: age identity present ($AGE_KEY)" \
                         || echo "DRY-RUN: age identity MISSING — would fetch from 1Password (op) or prompt"
 else
-    # age binary (bootstrap tool; skipped in Phase 5's fetcher loop)
-    if ! $FORCE && fb_check_bin age && [[ -x "${BIN_DIR}/age" ]]; then
-        echo "age present: $("${BIN_DIR}/age" --version)"
-    else
-        $FORCE && { remove_bin age; remove_bin age-keygen; }
-        fetch_age
-    fi
+    # age binary (bootstrap tool; skipped in Phase 5's fetcher loop).
+    # The version-blind `fb_check_bin age` branch is gone (phase 5): it passed as
+    # soon as both symlinks resolved, so age froze at whatever version installed
+    # first. fetch_age owns the decision now — and keeps both binaries in ONE
+    # versioned directory, so an interrupted run can no longer leave age and
+    # age-keygen at different versions.
+    $FORCE && { remove_bin age; remove_bin age-keygen; }
+    fetch_age
     # Render the chezmoi config (encryption settings + sourceDir). Recipient is public.
     if [[ -r "$CFG_TEMPLATE" ]]; then
         mkdir -p "$(dirname "$CHEZMOI_CFG")"

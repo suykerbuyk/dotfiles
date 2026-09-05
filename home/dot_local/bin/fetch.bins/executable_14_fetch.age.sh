@@ -18,10 +18,12 @@ set -euo pipefail
 fb_init
 fb_require_os age
 
-# Skip if both binaries are already present and valid (version-agnostic check).
-if fb_check_bin age && [[ -x "${BIN_DIR}/age" ]] && fb_check_bin age-keygen; then
-    echo "age: already valid ($("${BIN_DIR}/age" --version 2>&1 | head -1))"
-    exit 0
-fi
-
+# No local "already valid" gate any more. That check was fb_check_bin's
+# version-agnostic one: it passed as soon as both symlinks resolved, so age could
+# never be upgraded by this slot or by the installer's Phase 3, which carried a
+# copy of the same gate.
+#
+# fetch_age now owns the decision, and keeps the both-or-neither rule inside it:
+# the two binaries live in ONE versioned directory, so a run interrupted partway
+# can no longer leave age and age-keygen at different versions.
 fetch_age

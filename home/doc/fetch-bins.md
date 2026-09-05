@@ -34,12 +34,24 @@ runnable in place** from the checkout. So the installer:
    phases below. **Defers to a system-wide `jq`** via `fb_system_bin` (same
    trap as slots 22/23): a distro jq is enough, and hitting GitHub for a second
    copy is what exhausted the unauthenticated 60 req/hour budget after a couple
-   of `--force` runs. Skipped if the user-local copy is already valid (unless
-   `--force` *and* no system jq). `JQ_FETCH_FORCE=1` on `01_fetch.jq.sh`
-   installs a user-local copy anyway.
+   of `--force` runs. `JQ_FETCH_FORCE=1` on `01_fetch.jq.sh` installs a
+   user-local copy anyway.
+   - **Branch order is deliberate.** "Do we manage a jq here?" is tested FIRST,
+     and if so `fetch_jq` runs (it is idempotent and version-aware, so it exits
+     without downloading when current). System deferral is SECOND. That is not
+     arbitrary: `fb_init` prepends `$BIN_DIR` to `PATH`, so on a box carrying
+     both a distro jq and a user-local one the user actually **runs** the local
+     copy — letting the system branch win would report "already provided
+     system-wide" while the jq on `PATH` stayed frozen at whatever installed
+     first. A box with no user-local jq and a distro jq still spends no request.
+   - This phase used to open with a version-blind `fb_check_bin jq` gate, which
+     is why a user-local jq could never be upgraded: it merely had to exist.
 2. **Phase 2 — chezmoi binary.** Fetches the static Go release binary
    (`fetch_chezmoi` in `_lib.sh`, which uses the jq from Phase 1) into
-   `~/.local/bin/chezmoi`. Skipped if already present and valid (unless `--force`).
+   `~/.local/bin/chezmoi`. `fetch_chezmoi` resolves the version and returns
+   without downloading when that version is already on disk — the phase carries
+   no gate of its own, because the one it used to carry was version-blind and
+   was a second copy of the one `09_fetch.chezmoi.sh` carried.
 3. **Phase 3 — `chezmoi apply --force`.** Lays down every dotfile *and* the
    `~/.local/bin/` tooling (with decoded names) into `$HOME`. `--force` keeps it
    non-interactive — chezmoi otherwise prompts (`overwrite/skip/…`) when a target
@@ -60,10 +72,14 @@ chezmoi-managed files from `~` (via `chezmoi managed`), removes fetched tools (v
 **Keep the removal list in lockstep with `fetch.bins/`.** Every
 `NN_fetch.<tool>.sh` must map to an entry in the `remove_bin` loop, to a special
 case, or to the rust block — a tool that installs anything `remove_bin` does not
-know about (a versioned path, a desktop entry, generated config) needs the
-special case. zed, podman, ghostty and delta have one; `tree-sitter` was missed
-when it was added as slot 15 and was stranded by `--uninstall --force` until it
-was added to the loop.
+know about (a desktop entry, generated config, a payload whose name is not
+`<binname>-<version>`) needs the special case. zed, podman, ghostty and delta
+have one; `tree-sitter` was missed when it was added as slot 15 and was stranded
+by `--uninstall --force` until it was added to the loop.
+
+Versioned payloads that *do* follow the `<binname>-<version>` naming no longer
+need one: `remove_bin` sweeps `<name>-[0-9]*` itself, per the reversed ruling
+described under `remove_bin` below.
 
 The rule covers **artifacts, not just binaries**. Slots 18–21 install shell
 completion files, so the uninstall path calls `fb_remove_completions` alongside
@@ -92,10 +108,28 @@ Key `_lib.sh` helpers:
   the four exist. Set `FB_UNZIP_BACKEND=unzip|bsdtar|busybox|python3` to pin a
   single backend (used by the test harness to prove each path in isolation). Used
   by broot and ninja.
-- `fetch_jq` / `fetch_chezmoi` — the two bootstrap installers that live in
-  `_lib.sh` (not standalone scripts) so the root installer can call them from the
-  checkout before `chezmoi apply` exists. `01_fetch.jq.sh` and `09_fetch.chezmoi.sh`
-  are thin wrappers that just call them, for idempotent re-fetch / standalone use.
+- `fetch_jq` / `fetch_chezmoi` / `fetch_age` — the three bootstrap installers
+  that live in `_lib.sh` (not standalone scripts) so the root installer can call
+  them from the checkout before `chezmoi apply` exists. `01_fetch.jq.sh`,
+  `09_fetch.chezmoi.sh` and `14_fetch.age.sh` are thin wrappers that just call
+  them, for idempotent re-fetch / standalone use.
+  - **The version decision lives in the FUNCTION, not the caller.** Each of these
+    has *two* callers — the slot and an installer phase — and each caller used to
+    carry its own `fb_check_bin <tool> && exit`: two copies of one version-blind
+    gate, free to drift apart. Putting the fast path inside the function fixes
+    both at once and cannot come apart again.
+  - These run **before `chezmoi apply`** on a bare machine, so every failure mode
+    in them must degrade toward *downloading and installing*, never toward *no
+    binary*: a regression here is not a broken tool, it is a machine that cannot
+    finish provisioning. `fetch_age` is the sharpest case — `chezmoi apply` calls
+    `age` to decrypt `~/.keys`.
+  - `fetch_age` is the one phase-5 payload that is a **directory**,
+    `~/.local/apps/age-<version>/`, holding both `age` and `age-keygen`. Two
+    binaries from one tarball must move together, or a run interrupted between
+    them leaves the pair at two versions — the both-or-neither problem slot 22
+    solved the same way for `tsh`/`tctl`. It therefore hand-rolls on
+    `fb_stage_payload`/`fb_publish_payload` rather than `install_versioned_bin`,
+    which refuses a directory.
 - `install_bin src name [verify-args]` — copy to `~/.local/apps`, verify, then
   symlink (verification gate before the symlink is created). **Pass a `src` that is
   not already `~/.local/apps/<name>`** — idiomatically the extracted binary in
@@ -109,12 +143,75 @@ Key `_lib.sh` helpers:
   symlink or a target that is missing / not executable (no hardcoded versions).
   🔴 Version-agnostic is the *defect*, not a feature: because it compares no
   version, `install_bin` is a no-op forever once a tool is installed, so 17 slots
-  can never upgrade in place and 11 re-download a payload only to discard it. The
-  two helpers below are the first half of the fix.
-- `gh_release_json repo` — fetches `/releases/latest` **once per repo per run**
-  and prints the path of the cached document. `gh_latest_tag`, `gh_asset_url`
-  and `gh_latest_tag_nojq` all read it; none issues a request of its own, and
-  the suite asserts that.
+  could never upgrade in place and 11 re-downloaded a payload only to discard it.
+  The two helpers below are the fix, and fourteen slots have moved onto them.
+  - **Both functions STAY.** Phase 5 stopped *routing* those fourteen through the
+    version-blind skip; it did not touch `fb_check_bin`'s repair branches
+    (dangling symlink, dead target, unmanaged plain file), which are real, are
+    exercised, and share a code path with the bad skip — they are the half that
+    works, and the half a refactor loses first.
+  - `install_bin` has exactly **two** callers left, both named exemptions with
+    open questions of their own: **08 zed**, which cannot learn its upstream
+    version at all (`cloud.zed.dev` serves a versionless redirect, and parsing
+    that redirect was ruled against as coupling to an undocumented URL shape), and
+    **23 op**, whose versioned rewrite collides with the Linux setgid repair. The
+    suite asserts that list, so a third slot appearing on it is a regression
+    rather than a quiet decision.
+- `fb_versioned_current name version [probe…]` /
+  `install_versioned_bin src name version [probe…]` — the **versioned twins** of
+  `fb_check_bin` and `install_bin`, for a **bare single binary**. The payload goes
+  to `~/.local/apps/<name>-<version>` and `~/.local/bin/<name>` is symlinked
+  straight at it, so the **filesystem** answers "is this current?" and no binary
+  is ever asked for a version string. That is slot 16's and slot 24's trick: slot
+  24's binary has no version flag at all, and slot 22's parse was a single point
+  of failure (iter 62).
+  - `fb_versioned_current` is the **pre-download fast path**: true when that exact
+    payload exists and passes the probe, in which case it re-asserts the symlink
+    and the caller exits. Every failure mode returns false and falls through to
+    the download — it can never leave the machine without a binary, which is the
+    property slots 01/09/14 need, since they run before `chezmoi apply` on a bare
+    machine.
+  - The re-assert is what lets the fast path subsume `fb_check_bin`'s repair
+    branches: a hand-deleted link, a link pointing at a pruned payload, and an
+    unmanaged plain **file** (broot's state before phase 1) are all fixed by the
+    `ln -sfn`, without a download.
+  - `install_versioned_bin` **verifies the STAGE**, before the publish and before
+    the symlink. This is stricter than `install_bin`, which copies to the final
+    path and probes it *there* — so a broken download has already replaced the
+    payload by the time anything notices, and its remedy (`rm -f "$src"`) leaves
+    the tool **absent** rather than merely un-upgraded. Here a failed probe throws
+    away a staging file nothing points at, and the previous payload is still live.
+  - It **refuses a directory payload** and a `src` that *is* the destination. The
+    first keeps slot 14's `age-<version>/` shape (two binaries from one tarball)
+    out of a helper that would symlink `~/.local/bin/age` at a directory; that
+    slot hand-rolls on `fb_stage_payload`/`fb_publish_payload` like slot 22. The
+    second is `install_bin`'s self-copy trap in the versioned spelling.
+  - **The prune is deliberately not in here.** `fb_prune_versions` stays the
+    caller's call with explicit globs, because the glob is the one place these
+    payloads are genuinely *not* uniform — a legacy unversioned payload, ripgrep's
+    abandoned naming scheme, age's collision with `age-keygen`. A derived
+    `"${name}-*"` hidden inside the helper is what would make it silently wrong.
+- `gh_release_json repo [tag]` — fetches `/releases/latest` (or `/releases/tags/
+  <tag>`) **once per repo per run** and prints the path of the cached document.
+  `gh_latest_tag`, `gh_asset_url` and `gh_latest_tag_nojq` all read it; none
+  issues a request of its own, and the suite asserts that.
+  - **The optional `tag` is what makes `FB_PIN_<TOOL>` real.** Without it this
+    helper only knew `/releases/latest`, so the pin was decorative on every
+    GitHub-backed slot: slot 07 computed `TAG_NAME="v${VERSION}"` from the pin
+    and then asked for the *latest* release's assets anyway, so
+    `FB_PIN_NVIM=0.11.0` downloaded 0.12.5 and filed it at `nvim-0.11.0`. The
+    standing ruling that prune-to-one is safe *because* pinning holds a version
+    rested on that working.
+  - **Pass it only on the pinned path.** The convention across the slots is a
+    `PIN_TAG` variable that is empty unless `fb_pin` returned something, and
+    `gh_asset_url`'s **5th** argument carries it. Handing over a tag that was
+    itself just read from `/releases/latest` opens a *second* cache entry at
+    `/releases/tags/<tag>` and spends a second request to re-read the same
+    release — silently undoing the halving below. Asserted per slot.
+  - A 404 on a pinned tag is indistinguishable, at curl's exit status, from the
+    rate limit and from being offline — and those two print "rate limited or
+    offline?", sending the reader after the network. `gh_pinned_tag_hint` adds a
+    line naming the tag whenever one was requested.
   - **Why it exists.** The three helpers each used to `curl` the identical
     endpoint, so every GitHub-backed slot spent two requests to learn about one
     release and slot 20 spent three. A full Phase-5 pass was **37 requests**
@@ -196,12 +293,26 @@ Key `_lib.sh` helpers:
   - Standing ruling: an **unpinned** tool tracks upstream and keeps one payload;
     a **pinned** tool holds its version. Pinning is the only supported way to
     stop a tool moving, which is what makes prune-to-one safe.
-  - Slots **04** and **07** use it (they had no prune at all, and held 1.6 GB of
-    the 3.5 GB in `~/.local/apps`). Slots **12, 16, 22, 24** still carry their own
-    `prune_old_versions` and migrate later; the suite asserts that 2/4 split so
-    the migration cannot half-happen silently.
+  - **Anchor the version component on a digit** — `<tool>-[0-9]*`, never a bare
+    `<tool>-*`. `age-*` matches `age-keygen`, so the bare form makes a prune (or
+    a teardown) delete a *different tool's* payload. Every tag in this tree
+    normalizes to a leading digit once the `v` is stripped, so the anchor costs
+    nothing elsewhere.
+  - All **six** versioned slots (04, 07, 12, 16, 22, 24) now use it — phase 4
+    finished the migration the earlier 2/4 split was tracking, and the suite
+    asserts that no slot defines a local `prune_old_versions` any more.
 - `fetch_chezmoi` — fetch the chezmoi static release binary (same `gh_*` pattern).
-- `remove_bin name` — remove a tool's symlink and `~/.local/apps` runtime.
+- `remove_bin name` — remove a tool's symlink, its legacy unversioned
+  `~/.local/apps/<name>` payload, **and every `~/.local/apps/<name>-<version>`**.
+  - That last clause reverses a standing ruling ("versioned runtime dirs are
+    intentionally left; the active symlink is gone, so the tool is no longer on
+    `PATH`"). Leaving them is how `~/.local/apps` reached 3.5 GB with 1.6 GB
+    orphaned: nothing on the machine referenced those trees, and the only code
+    that knew their names was the fetcher that had just been torn down. One glob
+    now serves both the prune and the teardown.
+  - It matches `<name>-[0-9]*`, so a payload whose name is not
+    `<binname>-<version>` still needs a teardown special case: go is `go1.27.1`
+    with no separator, `tsh`'s payload is `teleport-<v>`, zed is `zed.app`.
 - `fb_install_completions tool zsh-src bash-src` / `fb_remove_completions tool…` —
   install (or tear down) shell completion **files** for slots 18–21. The zsh file
   is always installed as `_<tool>`, whatever it is called upstream. Full scheme,
@@ -222,13 +333,13 @@ Key `_lib.sh` helpers:
   `install_bin`/`fb_check_bin`; uninstall is `rustup self uninstall -y`.
 - **ninja** (`11_fetch.ninja.sh`) is a single statically-linked binary shipped in
   a **.zip** (not a tarball), so it unzips instead of untars but is otherwise the
-  plain `install_bin` pattern. The release assets are named by platform, not the
+  plain versioned-payload pattern. The release assets are named by platform, not the
   usual arch tokens (`ninja-linux.zip`, `ninja-linux-aarch64.zip`,
   `ninja-mac.zip`), so it matches the exact asset name. Extracted via `fb_unzip`,
   so no system `unzip` is required.
 - **starship** (`13_fetch.starship.sh`) is the prompt for **both** shells (see
   `doc/shell.md`), fetched as a single static binary in a `.tar.gz` — the plain
-  `install_bin` pattern, same shape as fzf. Its asset arch tokens are Rust target
+  versioned-payload pattern, same shape as fzf. Its asset arch tokens are Rust target
   triples (`x86_64`, `aarch64`), **not** the `amd64`/`arm64` that `fb_arch`
   normalizes to, so it uses `uname -m` directly. It selects the **musl** build:
   it is fully static, and it is the only linux build published for aarch64, so one
@@ -243,13 +354,13 @@ Key `_lib.sh` helpers:
 - **tree-sitter** (`15_fetch.tree-sitter.sh`) is the tree-sitter CLI, required
   by nvim-treesitter's `main` branch (>= 0.26.1) to build parser grammars. A
   single static binary shipped as a **bare `.gz`** (no tarball), so it gunzips
-  then follows the plain `install_bin` pattern. Its asset arch tokens are
+  then follows the plain versioned-payload pattern. Its asset arch tokens are
   node-style (`x64`/`arm64`), so it maps `uname -m` explicitly.
 - **herdr** (`17_fetch.herdr.sh`) is a terminal multiplexer/runtime aimed at AI
   coding agents (Rust, Apache-2.0, `herdrdev/herdr`). It is the **shortest**
   fetcher here, because its release ships a **bare, uncompressed binary** per
   os/arch — no tarball, no zip, not even a `.gz` — so it downloads straight into
-  `$FB_TMP` and hands the file to `install_bin`. There is no extraction step to
+  `$FB_TMP` and hands the file to `install_versioned_bin`. There is no extraction step to
   get wrong. (jq's release is bare too, but jq builds its URL by interpolation
   because the jq-free bootstrap cannot parse the asset list.) Two things to know:
   - Asset arch tokens are **raw `uname -m`** (`x86_64`/`aarch64`), so `fb_arch` is
@@ -315,8 +426,8 @@ Key `_lib.sh` helpers:
     removes that hazard entirely — the rest of the file is never read or restated.
   - **Idempotent:** `git config --global <key> <value>` replaces in place, so
     re-running never duplicates a line or a section.
-  - **Ordering is a safety property.** The keys are set only *after* `install_bin`
-    succeeds. `core.pager = delta` with no delta on PATH does not degrade — `git
+  - **Ordering is a safety property.** The keys are set only *after* the install
+    succeeds — and on the fast path, only when the payload already ran. `core.pager = delta` with no delta on PATH does not degrade — `git
     diff` dies with `fatal: unable to execute pager 'delta'` and exit 128, printing
     no diff at all; an unset-less `interactive.diffFilter` likewise breaks
     `git add -p` with "mismatched output from interactive.diffFilter". A
@@ -531,7 +642,7 @@ Key `_lib.sh` helpers:
   AgileBits CDN (`cache.agilebits.com`) with a predictable URL pattern.
   Default version is 2.39.0 (`OP_FETCH_VERSION=2.x.y` overrides). It
   downloads `op_linux_amd64_vX.Y.Z.zip` (a single static binary), extracts
-  it with `fb_unzip`, and installs via `install_bin`.
+  it with `fb_unzip`, and installs via `install_versioned_bin`.
 
   **It defers to a system-wide `op`.** The distro/AUR package is named
   `1password-cli` and writes `/usr/bin/op` already setgid `onepassword-cli`.

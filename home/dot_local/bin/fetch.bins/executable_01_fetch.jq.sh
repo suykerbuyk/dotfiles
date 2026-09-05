@@ -34,10 +34,13 @@ if [[ "${JQ_FETCH_FORCE:-0}" != "1" ]]; then
     fi
 fi
 
-# Skip if already present and valid (version-agnostic check).
-if fb_check_bin jq && [[ -x "${BIN_DIR}/jq" ]]; then
-    echo "jq: already valid ($("${BIN_DIR}/jq" --version 2>&1 | head -1))"
-    exit 0
-fi
-
+# No local "already valid" gate any more. That check was fb_check_bin's
+# version-agnostic one: it passed as soon as ~/.local/bin/jq resolved to
+# something executable, so a user-local jq could never be upgraded — the same
+# defect as every other slot, reached through a different door.
+#
+# fetch_jq now owns the decision. It resolves the version, answers from the
+# FILESYSTEM whether that version is installed, and returns without downloading
+# when it is. The system-jq deferral above still short-circuits BEFORE that, so
+# a box with a distro jq spends no GitHub request at all.
 fetch_jq

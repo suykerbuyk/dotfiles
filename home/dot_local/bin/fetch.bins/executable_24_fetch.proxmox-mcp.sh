@@ -74,8 +74,19 @@ ARCH="$(fb_arch)"    # amd64 | arm64  — likewise
 # would otherwise strand the old payload forever, since every later run takes
 # the fast path and never reaches this.
 
-TAG_NAME="$(gh_latest_tag "$REPO")"
-VERSION="${TAG_NAME#v}"
+# FB_PIN_PROXMOX_MCP holds a version; PIN_TAG carries it through to the asset
+# lookup and is EMPTY otherwise, so the unpinned path keeps reading the one
+# cached /releases/latest document instead of opening a second entry at
+# /releases/tags/<tag> for the tag it just read from it. The `||` after fb_pin
+# is load-bearing under set -e: it returns 1 when unset.
+PIN_TAG=""
+if VERSION="$(fb_pin "$BIN_NAME")"; then
+    TAG_NAME="v${VERSION}"
+    PIN_TAG="$TAG_NAME"
+else
+    TAG_NAME="$(gh_latest_tag "$REPO")"
+    VERSION="${TAG_NAME#v}"
+fi
 PAYLOAD="${APP_DIR}/${BIN_NAME}-${VERSION}"
 
 # Fast path: this exact version is already installed and runnable. Re-assert the
@@ -91,7 +102,7 @@ fi
 
 # Asset: proxmox-mcp_<os>_<arch> (bare binary, exact name).
 ASSET_URL="$(gh_asset_url "$REPO" \
-    '. == ("proxmox-mcp_" + $os + "_" + $arch)' "$ARCH" "$OS")"
+    '. == ("proxmox-mcp_" + $os + "_" + $arch)' "$ARCH" "$OS" "$PIN_TAG")"
 
 PMCP_PREV="$(fb_prev_payload "$BIN_NAME")"
 
