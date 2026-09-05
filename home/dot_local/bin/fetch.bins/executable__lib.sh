@@ -288,6 +288,117 @@ gh_latest_tag_nojq() {
     printf '%s' "$tag"
 }
 
+# ----------------------------------------------------------------------
+# Version pinning — FB_PIN_<TOOL>
+# ----------------------------------------------------------------------
+# ONE way to say "hold this tool at this version". Before this there was exactly
+# one per-slot spelling, OP_FETCH_VERSION, and it was DEAD CODE: slot 23
+# computed it and never compared it to anything, so bumping it changed nothing
+# on a box that already had op.
+#
+# This is the mechanism behind the standing ruling: an UNPINNED tool tracks
+# upstream and keeps exactly one payload on disk; a PINNED tool holds the named
+# version. Pinning is therefore the only supported way to stop a tool moving,
+# which is precisely what makes prune-to-one safe to adopt — without it there is
+# no way to say "stay here", and "we do not need old versions" and "this one
+# must not move" cannot both be true.
+#
+# The tool name is normalized because env var names cannot carry '-', and three
+# slots would otherwise be unpinnable:
+#   tree-sitter -> FB_PIN_TREE_SITTER   proxmox-mcp -> FB_PIN_PROXMOX_MCP
+#   age-keygen  -> FB_PIN_AGE_KEYGEN
+# Pure bash, no `tr`: GNU and BSD tr disagree about character-class handling,
+# and this runs on both.
+#
+# The pin value is whatever the SLOT calls a version, because that is the string
+# it will interpolate into a path and a URL. Slot 04 is the one that surprises:
+# go.dev reports "go1.26.5", prefix included, so FB_PIN_GO=go1.26.5 — not 1.26.5.
+#
+# Prints the version and returns 0 when set; prints nothing and returns 1 when
+# unset, so a caller may branch on the status or on the output.
+fb_pin() {
+    local tool="$1" var
+    var="FB_PIN_${tool^^}"
+    var="${var//-/_}"
+    var="${var//./_}"
+    [[ -n "${!var:-}" ]] || return 1
+    printf '%s' "${!var}"
+}
+
+# ----------------------------------------------------------------------
+# Shared version prune
+# ----------------------------------------------------------------------
+#   fb_prune_versions <keep> <spare|""> <glob> [glob...]
+#
+# Replaces four hand-rolled copies (slots 12, 16, 22, 24) that had already
+# drifted apart in signature, in rm flags and in which paths they ran on, and
+# gives slots 04 and 07 the prune they never had — which is where the disk
+# actually went: 7 Go toolchains and 2 nvim trees, 1.6 GB of the 3.5 GB in
+# APP_DIR.
+#
+# <keep>  the payload to preserve: the one this run installed or verified.
+# <spare> one MORE payload to preserve, or "" for none. This is the deferred
+#         delete. On the install path the caller passes the payload it just
+#         superseded, because removing a runtime TREE in the same invocation
+#         that replaced it is `rm -rf` on something a live process may still be
+#         reading: POSIX keeps already-open files alive, so nothing fails at the
+#         moment of deletion — it fails on the next lazy load, which is an
+#         intermittent failure that will not reproduce under test. On the fast
+#         path nothing was superseded, so the caller passes "" and the previous
+#         payload goes then. That is a delete deferred by one run, not skipped.
+#
+#         Both paths prune. Fast-path-only would strand nothing but would
+#         ACCUMULATE: a tool whose upstream moves faster than the installer runs
+#         never reaches its fast path, which is how seven Go toolchains happened.
+#
+# <glob>  one or more patterns, relative to APP_DIR. Plural and explicit because
+#         the payload names are NOT uniform and a single derived glob silently
+#         matches nothing:
+#           slot 04 is `go1.*`          — no tool prefix at all
+#           slot 07 is `nvim-*` AND `nvim.appimage-*` — a superseded scheme
+#           slot 16 is `ghostty-*.AppImage`
+#         A helper that globbed "${bin_name}-*" would reclaim none of those.
+#
+# Best-effort by contract: it warns and returns 0 rather than failing, because a
+# prune must never abort a fetcher whose install already succeeded.
+fb_prune_versions() {
+    local keep="$1" spare="$2"; shift 2
+    local pat old n=0
+
+    if [[ $# -eq 0 ]]; then
+        echo "  warning: prune skipped, no glob given" >&2
+        return 0
+    fi
+
+    # REFUSE on an absent keep target. This is the empty-string trap this tree
+    # keeps paying for (iter 58's realpath -m, iter 62's version parse, iter 63's
+    # own test asserts): with keep="" nothing compares equal to it, so the
+    # CURRENT payload is deleted along with the old ones and the tool vanishes
+    # from PATH. A cleanup helper must never be able to remove the thing it
+    # exists to protect.
+    if [[ -z "$keep" || ! -e "$keep" ]]; then
+        echo "  warning: prune skipped, keep target missing: ${keep:-<empty>}" >&2
+        return 0
+    fi
+
+    for pat in "$@"; do
+        for old in "${APP_DIR}"/$pat; do
+            # An unmatched glob stays literal, so -e is the guard, not nullglob
+            # (which would be a global shell-option change inflicted on callers).
+            [[ -e "$old" ]] || continue
+            # -ef, not string equality: device+inode answers "same file" through
+            # a symlink or a differently-spelled path. Iter 62's rule.
+            [[ "$old" -ef "$keep" ]] && continue
+            [[ -n "$spare" && -e "$spare" && "$old" -ef "$spare" ]] && continue
+            rm -rf "$old"
+            echo "  pruned old version: $(basename "$old")"
+            n=$((n + 1))
+        done
+    done
+    [[ $n -eq 0 ]] || echo "  reclaimed $n old payload(s) from ${APP_DIR}"
+    return 0
+}
+
 gh_latest_tag() {
     local repo="$1"
     local url="https://api.github.com/repos/${repo}/releases/latest"

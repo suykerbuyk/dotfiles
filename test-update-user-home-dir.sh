@@ -2177,6 +2177,169 @@ fi
 #   1. an unsupported slot SKIPS (exit 0), rather than erroring;
 #   2. a supported slot is not skipped — a guard that skipped everything would
 #      satisfy (1) perfectly and install nothing;
+# ---------------------------------------------------------------------------
+# fetch.bins: FB_PIN_<TOOL> and the shared version prune.
+#
+# BEHAVIOURAL, not structural: these run the real helpers against a throwaway
+# APP_DIR. fb_prune_versions DELETES, so a grep-only assert would prove nothing
+# about the one property that matters — that it removes the right payloads and
+# never the current one. APP_DIR/BIN_DIR are :=-defaulted in _lib.sh precisely so
+# a caller can point them somewhere safe, which is what makes this testable.
+# ---------------------------------------------------------------------------
+sec "fetch.bins: version pinning and the shared prune (behavioural)"
+
+FBLIB="home/dot_local/bin/fetch.bins/executable__lib.sh"
+
+# Source _lib.sh with APP_DIR/BIN_DIR in a fresh sandbox, run the expression,
+# print its output, then destroy the sandbox. Every case starts from nothing.
+fbsb() {
+    local _sb _out
+    _sb="$(mktemp -d)"
+    _out="$(APP_DIR="$_sb/apps" BIN_DIR="$_sb/bin" bash -c '
+        mkdir -p "$APP_DIR" "$BIN_DIR"
+        . "$1" >/dev/null 2>&1
+        shift
+        eval "$@"' bash "$REPO/$FBLIB" "$1" 2>&1)"
+    rm -rf "$_sb"
+    printf '%s' "$_out"
+}
+# Payload basenames left in APP_DIR after the expression, sorted, space-joined.
+fbsb_ls() { fbsb "$1"'; echo "REMAIN:$(ls "$APP_DIR" | sort | tr "\n" " ")"' | sed -n 's/.*REMAIN://p'; }
+
+assert "_lib.sh declares fb_pin"             "grep -qE '^fb_pin\(\)' $FBLIB"
+assert "_lib.sh declares fb_prune_versions"  "grep -qE '^fb_prune_versions\(\)' $FBLIB"
+
+# --- fb_pin -----------------------------------------------------------------
+assert_eq "fb_pin returns the pin when set" \
+    "$(fbsb 'export FB_PIN_NVIM=0.12.5; fb_pin nvim')" "0.12.5"
+assert_eq "fb_pin prints nothing when unset" \
+    "$(fbsb 'fb_pin nvim || true')" ""
+assert_eq "fb_pin signals unset with status 1" \
+    "$(fbsb 'if fb_pin nvim >/dev/null; then echo SET; else echo UNSET; fi')" "UNSET"
+# Env var names cannot carry '-', so three slots would be unpinnable without the
+# normalization: tree-sitter, proxmox-mcp, age-keygen.
+assert_eq "fb_pin normalizes a hyphenated tool name" \
+    "$(fbsb 'export FB_PIN_TREE_SITTER=1.2.3; fb_pin tree-sitter')" "1.2.3"
+assert_eq "fb_pin normalizes proxmox-mcp" \
+    "$(fbsb 'export FB_PIN_PROXMOX_MCP=0.11.1; fb_pin proxmox-mcp')" "0.11.1"
+# The trap every caller must respect: _lib.sh sets -e, so a BARE
+# VERSION="$(fb_pin x)" aborts the fetcher on the unset status instead of falling
+# through to the upstream lookup. Callers must use `||` (or an if). Pin the
+# hazard so nobody "simplifies" the call sites into the broken form.
+assert_eq "a bare fb_pin assignment aborts under set -e (callers need ||)" \
+    "$(fbsb 'V="$(fb_pin nvim)"; echo REACHED')" ""
+assert_eq "the || form falls through to the fallback" \
+    "$(fbsb 'V="$(fb_pin nvim)" || V=fallback; echo "$V"')" "fallback"
+
+# --- fb_prune_versions ------------------------------------------------------
+# Install path: keep the new payload, SPARE the one just superseded (deferring
+# that delete by one run), drop everything older — including the legacy scheme.
+assert_eq "prune keeps current, spares the superseded, drops older" \
+    "$(fbsb_ls 'mkdir -p "$APP_DIR"/nvim-0.12.3 "$APP_DIR"/nvim-0.12.4 "$APP_DIR"/nvim-0.12.5 "$APP_DIR"/nvim.appimage-0.11.6
+                fb_prune_versions "$APP_DIR/nvim-0.12.5" "$APP_DIR/nvim-0.12.4" "nvim-*" "nvim.appimage-*" >/dev/null')" \
+    "nvim-0.12.4 nvim-0.12.5 "
+# Fast path: nothing was superseded this run, so the deferred delete is collected.
+assert_eq "the next fast-path run collects the deferred delete" \
+    "$(fbsb_ls 'mkdir -p "$APP_DIR"/nvim-0.12.4 "$APP_DIR"/nvim-0.12.5
+                fb_prune_versions "$APP_DIR/nvim-0.12.5" "" "nvim-*" >/dev/null')" \
+    "nvim-0.12.5 "
+# Two globs, and the second is the point: nvim's superseded naming scheme is
+# nvim.appimage-<ver>, which `nvim-*` does not match. Two are resident today.
+assert_eq "a second glob reclaims the superseded naming scheme" \
+    "$(fbsb_ls 'mkdir -p "$APP_DIR"/nvim-0.12.5 "$APP_DIR"/nvim.appimage-0.11.5 "$APP_DIR"/nvim.appimage-0.11.6
+                fb_prune_versions "$APP_DIR/nvim-0.12.5" "" "nvim-*" "nvim.appimage-*" >/dev/null')" \
+    "nvim-0.12.5 "
+# THE assert that matters. With keep="" nothing compares equal to it, so a naive
+# implementation deletes the CURRENT payload along with the old ones and the tool
+# leaves PATH. Same empty-string shape as iter 58's realpath -m and iter 62's
+# version parse. Everything must survive.
+assert_eq "prune REFUSES an empty keep and deletes nothing" \
+    "$(fbsb_ls 'mkdir -p "$APP_DIR"/go1.26.5 "$APP_DIR"/go1.27.1
+                fb_prune_versions "" "" "go1.*" 2>/dev/null')" \
+    "go1.26.5 go1.27.1 "
+assert_eq "prune REFUSES a keep that does not exist" \
+    "$(fbsb_ls 'mkdir -p "$APP_DIR"/go1.26.5 "$APP_DIR"/go1.27.1
+                fb_prune_versions "$APP_DIR/go1.99.0" "" "go1.*" 2>/dev/null')" \
+    "go1.26.5 go1.27.1 "
+assert_re "prune says WHY it refused" \
+    "$(fbsb 'mkdir -p "$APP_DIR"/go1.26.5; fb_prune_versions "" "" "go1.*" 2>&1')" \
+    'prune skipped, keep target missing'
+# A prune must never abort a fetcher whose install already succeeded.
+assert_eq "prune returns 0 even when it refuses" \
+    "$(fbsb 'mkdir -p "$APP_DIR"/go1.26.5; fb_prune_versions "" "" "go1.*" >/dev/null 2>&1; echo "rc=$?"')" \
+    "rc=0"
+assert_eq "no glob given: deletes nothing" \
+    "$(fbsb_ls 'mkdir -p "$APP_DIR"/go1.26.5 "$APP_DIR"/go1.27.1
+                fb_prune_versions "$APP_DIR/go1.27.1" "" 2>/dev/null')" \
+    "go1.26.5 go1.27.1 "
+# The deletion half of that passes even with the guard deleted, because with no
+# globs the loop body never runs. The guard's whole value is SAYING SO, so that
+# is what gets pinned — mutation testing caught the weaker form.
+assert_re "no glob given: says so rather than silently doing nothing" \
+    "$(fbsb 'mkdir -p "$APP_DIR"/go1.27.1; fb_prune_versions "$APP_DIR/go1.27.1" "" 2>&1')" \
+    'prune skipped, no glob given'
+# An unmatched glob stays literal in bash; -e is the guard rather than nullglob,
+# which would be a global shell-option change inflicted on every caller.
+assert_eq "an unmatched glob is harmless" \
+    "$(fbsb_ls 'mkdir -p "$APP_DIR"/go1.27.1
+                fb_prune_versions "$APP_DIR/go1.27.1" "" "nosuchtool-*" >/dev/null')" \
+    "go1.27.1 "
+# Same shape again: rm -rf on the LITERAL unexpanded glob is a silent no-op, so
+# "nothing was deleted" holds even without the -e guard — what changes is that
+# the helper REPORTS pruning a payload named "nosuchtool-*" that never existed.
+# Pin the absence of that false claim.
+assert_eq "an unmatched glob reports no prune" \
+    "$(fbsb 'mkdir -p "$APP_DIR"/go1.27.1
+             fb_prune_versions "$APP_DIR/go1.27.1" "" "nosuchtool-*" 2>&1 | grep -c "pruned old version" || true')" \
+    "0"
+# -ef, not string equality: the keep may be spelled through a symlink or a
+# differently-normalized path and must still be recognised as the same file.
+assert_eq "prune matches the keep by inode, not by spelling" \
+    "$(fbsb_ls 'mkdir -p "$APP_DIR"/ghostty-1.0 "$APP_DIR"/ghostty-1.1
+                ln -s "$APP_DIR/ghostty-1.1" "$APP_DIR/link"
+                fb_prune_versions "$APP_DIR/link" "" "ghostty-*" >/dev/null')" \
+    "ghostty-1.1 link "
+
+# --- slots 04 and 07: the two that never pruned -----------------------------
+GO_FETCHER="home/dot_local/bin/fetch.bins/executable_04_fetch.go.sh"
+NVIM_FETCHER2="home/dot_local/bin/fetch.bins/executable_07_fetch.nvim.sh"
+for f in "$GO_FETCHER" "$NVIM_FETCHER2"; do
+    b="$(basename "$f")"
+    assert "$b prunes on BOTH paths" \
+        "[[ \$(nocomment $f | grep -cE '^[[:space:]]*fb_prune_versions[[:space:]]') -eq 2 ]]"
+    # Comment-stripped (iter 44): the rationale above each call site NAMES
+    # fb_pin, so a raw grep matches the prose and stays green after the call
+    # itself is gutted. Mutation testing caught exactly that.
+    assert "$b resolves its version through fb_pin" \
+        "nocomment $f | grep -q 'fb_pin '"
+    # GNU readlink -f resolves a path whose final component does not exist, so
+    # without the -x test a fresh machine captured "$HOME/.local" as "the previous
+    # payload". Harmless as a spare, false as a value, and BSD readlink differs
+    # again. The guard is what makes both platforms agree.
+    assert "$b guards the previous-payload capture on -x" \
+        "nocomment $f | grep -q '\-n \"\$_prev_bin\" && -x \"\$_prev_bin\"'"
+done
+unset f b
+# Slot 04 is the ONLY payload with no tool prefix: go.dev's version string is
+# already "go1.26.5", so the glob is go1.*, and a helper deriving "${bin}-*"
+# would reclaim nothing here.
+assert "go fetcher prunes on the go1.* glob, not go-*, on BOTH paths" \
+    "[[ \$(nocomment $GO_FETCHER | grep -cF \"'go1.*'\") -eq 2 ]]"
+assert "nvim fetcher passes BOTH the current and legacy globs" \
+    "[[ \$(nocomment $NVIM_FETCHER2 | grep -cF \"'nvim.appimage-*'\") -eq 2 ]]"
+
+# Census. Phase 2 introduced the shared prune and wired the two slots that had
+# NONE — which is where the 1.6 GB was. Slots 12/16/22/24 still carry their own
+# prune_old_versions and are migrated in phase 4, when those files are opened
+# anyway. This assert pins that split so the migration cannot half-happen
+# silently: when a slot moves, its row moves with it.
+assert "exactly 2 slots use the shared prune (04, 07)" \
+    "[[ \$(grep -lE '^[[:space:]]*fb_prune_versions[[:space:]]' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | wc -l) -eq 2 ]]"
+assert "exactly 4 slots still define a local prune (12, 16, 22, 24)" \
+    "[[ \$(grep -lE '^prune_old_versions\(\)' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | wc -l) -eq 4 ]]"
+assert "no slot both defines a local prune AND calls the shared one" \
+    "[[ -z \$(comm -12 <(grep -lE '^prune_old_versions\(\)' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | sort) <(grep -lE '^[[:space:]]*fb_prune_versions[[:space:]]' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | sort)) ]]"
+
 #   3. an UNDECLARED tool is a hard error. There is no default arm in the
 #      table, because a permissive default silently restores the 404s this
 #      replaced and a restrictive one silently stops installing a tool that

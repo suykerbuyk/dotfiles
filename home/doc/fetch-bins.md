@@ -107,6 +107,46 @@ Key `_lib.sh` helpers:
   the calling convention above is still the one to follow.)
 - `fb_check_bin name` — **version-agnostic** validity check: reinstalls on a broken
   symlink or a target that is missing / not executable (no hardcoded versions).
+  🔴 Version-agnostic is the *defect*, not a feature: because it compares no
+  version, `install_bin` is a no-op forever once a tool is installed, so 17 slots
+  can never upgrade in place and 11 re-download a payload only to discard it. The
+  two helpers below are the first half of the fix.
+- `fb_pin tool` — the one way to say "hold this tool at this version".
+  `FB_PIN_<TOOL>=x.y.z`, with the tool name upper-cased and `-` mapped to `_`
+  (`tree-sitter` → `FB_PIN_TREE_SITTER`), so the hyphenated slots are pinnable at
+  all. Prints the pin and returns 0 when set; prints nothing and **returns 1**
+  when unset — so a call site must use `VERSION="$(fb_pin x)" || VERSION=…` or an
+  `if`. A bare assignment aborts the fetcher under `set -e`, which is asserted.
+  The value is whatever the *slot* calls a version, because that string is
+  interpolated into a path and a URL: go.dev reports `go1.26.5` prefix included,
+  so it is `FB_PIN_GO=go1.26.5`, not `1.26.5`.
+- `fb_prune_versions keep spare glob [glob…]` — the shared version prune. Keeps
+  `keep`, keeps `spare` as well (or `""` for none), deletes every other match of
+  the globs under `~/.local/apps`.
+  - **`spare` is the deferred delete.** On the install path a slot passes the
+    payload it just superseded, because `rm -rf` on a runtime tree in the same
+    invocation that replaced it removes files a live process may still lazily
+    load — POSIX keeps already-open files alive, so it fails later and
+    intermittently rather than at the moment of deletion. On the fast path
+    nothing was superseded, so `""` is passed and that payload goes then. A
+    delete deferred by one run, not skipped. Both paths prune, because
+    fast-path-only would **accumulate** for a tool whose upstream moves faster
+    than the installer runs — which is how seven Go toolchains happened.
+  - **The globs are explicit and plural** because the payload names are not
+    uniform: slot 04 is `go1.*` (no tool prefix — go.dev's version string already
+    starts with `go`), slot 07 needs `nvim-*` **and** `nvim.appimage-*` for its
+    superseded naming scheme. A helper deriving `"${bin}-*"` reclaims neither.
+  - **It refuses on an absent `keep`** and says so, rather than deleting the
+    current payload alongside the old ones — the empty-string trap this tree has
+    now paid for three times. Best-effort by contract: it warns and returns 0, so
+    a prune can never abort a fetcher whose install already succeeded.
+  - Standing ruling: an **unpinned** tool tracks upstream and keeps one payload;
+    a **pinned** tool holds its version. Pinning is the only supported way to
+    stop a tool moving, which is what makes prune-to-one safe.
+  - Slots **04** and **07** use it (they had no prune at all, and held 1.6 GB of
+    the 3.5 GB in `~/.local/apps`). Slots **12, 16, 22, 24** still carry their own
+    `prune_old_versions` and migrate later; the suite asserts that 2/4 split so
+    the migration cannot half-happen silently.
 - `fetch_chezmoi` — fetch the chezmoi static release binary (same `gh_*` pattern).
 - `remove_bin name` — remove a tool's symlink and `~/.local/apps` runtime.
 - `fb_install_completions tool zsh-src bash-src` / `fb_remove_completions tool…` —
