@@ -264,15 +264,99 @@ fb_arch() {
 # ----------------------------------------------------------------------
 # GitHub release helpers (with rate-limit/empty guards)
 # ----------------------------------------------------------------------
-gh_latest_tag_nojq() {
+# ----------------------------------------------------------------------
+# GitHub release metadata — fetched ONCE per repo per run
+# ----------------------------------------------------------------------
+#   gh_release_json <repo>   -> prints the PATH of a file holding the JSON
+#
+# gh_latest_tag and gh_asset_url each used to issue their OWN request to the
+# identical /releases/latest endpoint, so every GitHub-backed slot spent two
+# requests to learn about one release, and slot 20 spent three (it probes musl,
+# then falls back to gnu). Measured across a Phase-5 pass: ~32-35 unauthenticated
+# requests against GitHub's limit of 60 per hour per IP. Two installer runs
+# inside one hour exhausted it — which update-user-home-dir.sh's own header
+# records happening in practice, and which is not a soft failure: gh_latest_tag
+# calls `exit 1`, so the slot dies.
+#
+# The cache is a FILE, and that is forced rather than preferred. Callers invoke
+# these helpers inside $( ), which runs them in a SUBSHELL, so anything memoized
+# in a variable or an associative array is discarded the instant the substitution
+# closes — the memo would silently never hit. A file under $FB_TMP survives every
+# subshell and dies with the run, which is exactly the wanted lifetime: long
+# enough to serve both consumers, short enough that a fetcher never acts on a
+# release list from a previous invocation.
+#
+# It prints the PATH rather than the JSON so the document crosses a command
+# substitution once instead of once per consumer.
+gh_release_json() {
     local repo="$1"
     local url="https://api.github.com/repos/${repo}/releases/latest"
-    local json
+    local dir="${FB_TMP:-}" cache token
 
-    if ! json="$(curl -fsSL "$url")"; then
-        echo "Error: could not reach GitHub API (rate limited or offline?)." >&2
+    # A standalone caller may source _lib.sh without fb_init, which is what
+    # creates FB_TMP. Degrade to a private temp dir rather than writing a cache
+    # path under a directory that does not exist.
+    if [[ -z "$dir" || ! -d "$dir" ]]; then
+        dir="$(mktemp -d)"
+    fi
+    cache="${dir}/gh-release-${repo//\//_}.json"
+
+    # -s, not -e: a zero-length file from an interrupted or failed write must not
+    # be mistaken for a successful fetch and served as a cache hit forever.
+    if [[ -s "$cache" ]]; then
+        printf '%s' "$cache"
+        return 0
+    fi
+
+    # A token lifts the limit from 60/hour to 5000. It is passed through curl's
+    # config file on STDIN, never as -H on the command line: argv is world
+    # readable in /proc and would put the token in `ps` output and in any
+    # `set -x` trace.
+    token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    if [[ -n "$token" ]]; then
+        if ! printf 'header = "Authorization: Bearer %s"\n' "$token" |
+             curl -fsSL --config - -o "$cache" "$url" >/dev/null; then
+            rm -f "$cache"
+            echo "Error: GitHub API request failed for ${repo} (authenticated)." >&2
+            echo "       Check that GH_TOKEN/GITHUB_TOKEN is valid and not expired." >&2
+            exit 1
+        fi
+    else
+        if ! curl -fsSL -o "$cache" "$url" >/dev/null; then
+            rm -f "$cache"
+            echo "Error: could not reach GitHub API for ${repo} (rate limited or offline?)." >&2
+            echo "       Unauthenticated GitHub allows 60 requests/hour per IP, and a full" >&2
+            echo "       installer pass spends roughly half of that. Export GH_TOKEN (or" >&2
+            echo "       GITHUB_TOKEN) to raise the limit to 5000/hour." >&2
+            exit 1
+        fi
+    fi
+
+    # A curl that exits 0 having written nothing leaves an empty cache that the
+    # -s test above would refetch forever, and hands this call site a path to an
+    # empty document that jq then fails on with a parse error several frames
+    # away from the cause. Fail here, where the cause is still visible.
+    #
+    # The `>/dev/null` on both requests above is the other half: with -o, curl
+    # writes the body to the file and nothing to stdout, but this function's
+    # OUTPUT is a path, so any byte curl emitted would be prepended to it and
+    # the caller would `cat` a filename with a JSON document glued to its front.
+    if [[ ! -s "$cache" ]]; then
+        rm -f "$cache"
+        echo "Error: GitHub API returned an empty document for ${repo}." >&2
         exit 1
     fi
+
+    printf '%s' "$cache"
+}
+
+gh_latest_tag_nojq() {
+    local repo="$1"
+    local json
+
+    # Shares gh_release_json's cache even though it cannot use jq: the cache is
+    # raw bytes on disk, and the jq-free parse below reads it the same way.
+    json="$(cat "$(gh_release_json "$repo")")"
 
     # GitHub returns this JSON minified on one line, so a bare `grep '"tag_name"'`
     # matches the WHOLE document (grep is line-based) and awk -F'"' '{print $4}'
@@ -401,15 +485,9 @@ fb_prune_versions() {
 
 gh_latest_tag() {
     local repo="$1"
-    local url="https://api.github.com/repos/${repo}/releases/latest"
-    local json tag
+    local tag
 
-    if ! json="$(curl -fsSL "$url")"; then
-        echo "Error: could not reach GitHub API (rate limited or offline?)." >&2
-        exit 1
-    fi
-
-    tag="$(printf '%s' "$json" | jq -r '.tag_name // empty')"
+    tag="$(jq -r '.tag_name // empty' < "$(gh_release_json "$repo")")"
     if [[ -z "$tag" ]]; then
         echo "Error: could not parse a release tag from the API response." >&2
         exit 1
@@ -420,16 +498,20 @@ gh_latest_tag() {
 gh_asset_url() {
     local repo="$1"
     local jq_filter="$2"
-    local url="https://api.github.com/repos/${repo}/releases/latest"
-    local json asset_url
+    local asset_url
 
-    json="$(curl -fsSL "$url")"
+    # Second consumer of the SAME cached document gh_latest_tag already paid for,
+    # which is the whole point: one request per repo per run, not one per helper.
+    # This call site also used to be the unguarded one — `json="$(curl …)"` with
+    # no status check, so a failure died on set -e with no message at all.
+    # gh_release_json owns the guard now.
+    #
     # jq_filter is a snippet like 'endswith(".tar.gz") and contains($arch)'.
     # $arch comes from $3 and $os from $4; both are always bound (empty when
     # not passed) so a filter may reference either without jq erroring.
-    asset_url="$(printf '%s' "$json" | jq -r --arg arch "${3:-}" --arg os "${4:-}" '
+    asset_url="$(jq -r --arg arch "${3:-}" --arg os "${4:-}" '
         .assets[] | select(.name | '"$jq_filter"') | .browser_download_url
-    ' | head -1)"
+    ' < "$(gh_release_json "$repo")" | head -1)"
 
     if [[ -z "$asset_url" ]]; then
         echo "Error: no matching asset for filter '$jq_filter' (arch=${3:-} os=${4:-})." >&2

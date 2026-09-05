@@ -1707,9 +1707,18 @@ assert "fetch_jq avoids the jq-dependent gh_ helpers" "! grep -Eq 'gh_asset_url|
 # download URL, embedding one URL inside another (404). Feed
 # gh_latest_tag_nojq a realistic minified fixture (url field first, tag_name
 # after) via a stubbed curl, offline, so this is caught without live network.
+# The stub honours -o because gh_release_json fetches to a cache FILE now; it
+# used to capture curl's stdout. Updated with that change, not around it.
 nojq_tag="$( . "$LIB" >/dev/null 2>&1
-    curl() { printf '%s' '{"url":"https://api.github.com/repos/jqlang/jq/releases/342331441","tag_name":"jq-1.8.2","name":"jq 1.8.2"}'; }
-    gh_latest_tag_nojq jqlang/jq )"
+    export FB_TMP="$(mktemp -d)"
+    curl() {
+        local out="" prev="" a
+        for a in "$@"; do [[ "$prev" == "-o" ]] && out="$a"; prev="$a"; done
+        local j='{"url":"https://api.github.com/repos/jqlang/jq/releases/342331441","tag_name":"jq-1.8.2","name":"jq 1.8.2"}'
+        if [[ -n "$out" ]]; then printf '%s' "$j" > "$out"; else printf '%s' "$j"; fi
+    }
+    gh_latest_tag_nojq jqlang/jq
+    rm -rf "$FB_TMP" )"
 assert "gh_latest_tag_nojq parses tag_name from minified JSON" "[[ \"\$nojq_tag\" == 'jq-1.8.2' ]]"
 assert "gh_latest_tag_nojq does not return the url field"      "[[ \"\$nojq_tag\" != *api.github.com* ]]"
 # fb_init must put ~/.local/bin on PATH, or a just-fetched jq is invisible to the
@@ -2238,6 +2247,120 @@ assert_eq "install_bin converts an unmanaged plain file into a managed symlink" 
              mkdir -p "$APP_DIR/src"; printf "#!/bin/sh\necho hi\n" > "$APP_DIR/src/t"; chmod +x "$APP_DIR/src/t"
              install_bin "$APP_DIR/src/t" t >/dev/null 2>&1 || true
              [[ -L "$BIN_DIR/t" ]] && echo SYMLINK || echo "STILL-PLAIN"')" "SYMLINK"
+
+# --- gh_release_json: one request per repo per run --------------------------
+# MEASURED, not asserted structurally. A cache you cannot see the effect of is a
+# cache you cannot prove, so `curl` is replaced by a counting stub that serves a
+# canned release document: these assertions count REQUESTS.
+ghsb() {
+    local _sb; _sb="$(mktemp -d)"; mkdir -p "$_sb/bin"
+    cat > "$_sb/bin/curl" <<'GHSTUB'
+#!/usr/bin/env bash
+echo call >> "$COUNTER"
+out=""; prev=""; cfg=0
+for a in "$@"; do
+  [ "$prev" = "-o" ] && out="$a"
+  [ "$a" = "--config" ] && cfg=1
+  # argv must never carry the token: record anything that looks like one
+  case "$a" in *Bearer*) echo "TOKEN-IN-ARGV" >> "$COUNTER";; esac
+  prev="$a"
+done
+[ "$cfg" = 1 ] && cat >/dev/null
+json='{"tag_name":"v9.9.9","assets":[{"name":"t-9.9.9-x86_64-unknown-linux-musl.tar.gz","browser_download_url":"https://example.invalid/t.tar.gz"}]}'
+if [ -n "$out" ]; then printf '%s' "$json" > "$out"; else printf '%s' "$json"; fi
+exit 0
+GHSTUB
+    chmod +x "$_sb/bin/curl"; : > "$_sb/count"
+    COUNTER="$_sb/count" PATH="$_sb/bin:$PATH" bash -c '
+        export FB_TMP="$(mktemp -d)" APP_DIR="'"$_sb"'/apps" BIN_DIR="'"$_sb"'/bin2"
+        mkdir -p "$APP_DIR" "$BIN_DIR"
+        . "$1" >/dev/null 2>&1; shift; eval "$@"; rm -rf "$FB_TMP"' \
+        bash "$REPO/$FBLIB" "$1" </dev/null >/dev/null 2>&1
+    grep -c '^call$' "$_sb/count" | tr -d ' '
+    rm -rf "$_sb"
+}
+# Same but reports whether the token ever reached argv.
+ghsb_argv() {
+    local _sb; _sb="$(mktemp -d)"; mkdir -p "$_sb/bin"
+    cat > "$_sb/bin/curl" <<'GHSTUB2'
+#!/usr/bin/env bash
+for a in "$@"; do case "$a" in *Bearer*|*ghp_*) echo LEAK >> "$COUNTER";; esac; done
+out=""; prev=""; cfg=0
+for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; [ "$a" = "--config" ] && cfg=1; prev="$a"; done
+[ "$cfg" = 1 ] && cat >/dev/null
+printf '{"tag_name":"v1"}' > "${out:-/dev/stdout}"
+exit 0
+GHSTUB2
+    chmod +x "$_sb/bin/curl"; : > "$_sb/count"
+    COUNTER="$_sb/count" PATH="$_sb/bin:$PATH" bash -c '
+        export FB_TMP="$(mktemp -d)" GH_TOKEN=ghp_secrettoken
+        . "$1" >/dev/null 2>&1; gh_release_json Foo/bar >/dev/null; rm -rf "$FB_TMP"' \
+        bash "$REPO/$FBLIB" </dev/null >/dev/null 2>&1
+    [[ -s "$_sb/count" ]] && echo LEAKED || echo CLEAN
+    rm -rf "$_sb"
+}
+
+assert "_lib.sh declares gh_release_json" "grep -qE '^gh_release_json\(\)' $FBLIB"
+# The census that keeps it collapsed: three helpers used to hit the same endpoint
+# independently. Exactly one call site may name it.
+assert_eq "only ONE api.github.com call site remains in _lib.sh" \
+    "$(grep -c 'api\.github\.com' "$FBLIB")" "1"
+# A normal slot resolves a tag and an asset: two requests before, one now.
+assert_eq "tag + asset on one repo costs ONE request" \
+    "$(ghsb 'gh_latest_tag Foo/bar >/dev/null; gh_asset_url Foo/bar "endswith(\".tar.gz\")" >/dev/null')" "1"
+# Slot 20's shape: it probes musl, then falls back to gnu, so it used to spend
+# three requests on one release.
+assert_eq "tag + TWO asset probes still costs ONE request (the delta shape)" \
+    "$(ghsb 'gh_latest_tag Foo/bar >/dev/null
+             gh_asset_url Foo/bar "contains(\"musl\")" >/dev/null
+             gh_asset_url Foo/bar "endswith(\".tar.gz\")" >/dev/null')" "1"
+# Anti-vacuity: a cache that returned one document for EVERY repo would also
+# score 1 above, and would hand slot 03 ripgrep's release for slot 18's fd.
+assert_eq "two different repos still cost one request EACH" \
+    "$(ghsb 'gh_latest_tag Foo/bar >/dev/null; gh_latest_tag Baz/qux >/dev/null')" "2"
+# The jq-free bootstrap path cannot parse with jq but reads the same bytes, so it
+# shares the cache rather than keeping a fourth copy of the curl.
+assert_eq "the jq-free path shares the same cache" \
+    "$(ghsb 'gh_latest_tag_nojq Foo/bar >/dev/null; gh_asset_url Foo/bar "endswith(\".tar.gz\")" >/dev/null')" "1"
+# -s, not -e: a zero-length file from an interrupted write must not be served as
+# a hit forever. Pre-create an empty cache and confirm the fetch still happens.
+assert_eq "an empty cache file is refetched, not served" \
+    "$(ghsb ': > "${FB_TMP}/gh-release-Foo_bar.json"; gh_latest_tag Foo/bar >/dev/null')" "1"
+# The token must never reach argv, which is world-readable in /proc and shows up
+# in ps and in any set -x trace. It goes through curl's config on stdin.
+assert_eq "a token is passed on stdin, never on the command line" \
+    "$(ghsb_argv)" "CLEAN"
+# A curl that exits 0 having written NOTHING is the nastiest case: the -s test
+# would refetch forever, and the path handed back points at an empty document
+# that jq fails on several frames from the cause. It must fail at the fetch.
+ghsb_empty() {
+    local _sb; _sb="$(mktemp -d)"; mkdir -p "$_sb/bin"
+    printf '#!/bin/sh\nexit 0\n' > "$_sb/bin/curl"; chmod +x "$_sb/bin/curl"
+    PATH="$_sb/bin:$PATH" bash -c '
+        export FB_TMP="$(mktemp -d)"
+        . "$1" >/dev/null 2>&1
+        gh_release_json Foo/bar >/dev/null 2>"$2"
+        rm -rf "$FB_TMP"' bash "$REPO/$FBLIB" "$_sb/err" </dev/null >/dev/null 2>&1
+    cat "$_sb/err" 2>/dev/null
+    rm -rf "$_sb"
+}
+assert_re "an empty API response fails at the fetch, not later inside jq" \
+    "$(ghsb_empty)" 'returned an empty document'
+
+# The rate limit is the whole reason this exists, so the failure has to name it
+# and name the way out.
+assert "the unauthenticated failure names the limit and GH_TOKEN" \
+    "grep -q '60 requests/hour' $FBLIB && grep -q 'GITHUB_TOKEN) to raise the limit' $FBLIB"
+# gh_asset_url used to run an UNGUARDED curl, so a failure died on set -e with no
+# message at all. The guard belongs to gh_release_json now; neither consumer may
+# reintroduce its own request.
+for _ghf in gh_latest_tag gh_asset_url gh_latest_tag_nojq; do
+    # Comment-stripped: gh_asset_url's header NAMES the unguarded `curl` it
+    # replaced, so a raw scan matches the prose describing the fix.
+    assert "$_ghf issues no request of its own" \
+        "[[ -z \$(nocomment $FBLIB | awk '/^'$_ghf'\(\)/{f=1} f&&/^}/{exit} f&&/curl /{print}') ]]"
+done
+unset _ghf
 
 assert "_lib.sh declares fb_pin"             "grep -qE '^fb_pin\(\)' $FBLIB"
 assert "_lib.sh declares fb_prune_versions"  "grep -qE '^fb_prune_versions\(\)' $FBLIB"

@@ -111,6 +111,29 @@ Key `_lib.sh` helpers:
   version, `install_bin` is a no-op forever once a tool is installed, so 17 slots
   can never upgrade in place and 11 re-download a payload only to discard it. The
   two helpers below are the first half of the fix.
+- `gh_release_json repo` — fetches `/releases/latest` **once per repo per run**
+  and prints the path of the cached document. `gh_latest_tag`, `gh_asset_url`
+  and `gh_latest_tag_nojq` all read it; none issues a request of its own, and
+  the suite asserts that.
+  - **Why it exists.** The three helpers each used to `curl` the identical
+    endpoint, so every GitHub-backed slot spent two requests to learn about one
+    release and slot 20 spent three. A full Phase-5 pass was **37 requests**
+    against GitHub's unauthenticated limit of **60/hour per IP** — two installer
+    runs in an hour exhausted it, which the installer header already records
+    happening. It is now **19**, one per distinct repo.
+  - **The cache is a file, and that is forced, not preferred.** Callers invoke
+    these helpers inside `$( )`, which runs them in a subshell, so a memo held in
+    a variable or an associative array is discarded the instant the substitution
+    closes — it would silently never hit. A file under `$FB_TMP` survives every
+    subshell and dies with the run: long enough to serve both consumers, short
+    enough that a fetcher never acts on a release list from a previous run.
+  - **`GH_TOKEN` / `GITHUB_TOKEN`** raise the limit to 5000/hour. The token is
+    passed through curl's config on **stdin**, never as `-H` on the command
+    line: argv is world-readable in `/proc`, so a header there shows up in `ps`
+    and in any `set -x` trace. Asserted.
+  - Cache hits test `-s`, not `-e`, and a curl that exits 0 having written
+    nothing is a hard error — otherwise an empty file is served as a hit forever
+    and `jq` fails several frames from the cause.
 - `fb_pin tool` — the one way to say "hold this tool at this version".
   `FB_PIN_<TOOL>=x.y.z`, with the tool name upper-cased and `-` mapped to `_`
   (`tree-sitter` → `FB_PIN_TREE_SITTER`), so the hyphenated slots are pinnable at
