@@ -2935,6 +2935,41 @@ assert "op fetcher defers via fb_system_bin" \
 assert "op fetcher does not key the skip on bare command -v" \
     "awk '/^[[:space:]]*#/{next} /command -v/{f=1} END{exit f?1:0}' $OP_FETCHER"
 assert "op fetcher offers a force override"         "grep -qF 'OP_FETCH_FORCE' $OP_FETCHER"
+
+# The deferral prevents CREATING a shadow; it cannot see one that already
+# exists, so the skip prints a note naming the shadowing symlink. This shipped
+# unasserted until 2026-09-05 — it could have been deleted, unguarded, or moved
+# below the exit and the suite would have stayed green. Comment-stripped: the
+# header discusses shadowing in prose at :20, so a raw grep would satisfy itself
+# off the rationale (the iter-44 trap).
+assert "op fetcher notes an existing shadow on skip" \
+    "nocomment $OP_FETCHER | grep -qF 'still shadows it; delete that symlink'"
+# GUARDED, not unconditional: a box with no user-local copy must not be told to
+# delete a symlink it does not have.
+assert "op shadow note is guarded on the symlink existing" \
+    "nocomment $OP_FETCHER | grep -qF '[[ -e \"\${BIN_DIR}/\${BIN_NAME}\" ]]; then'"
+# Reachability: a note below the deferral's exit 0 is dead code that greps green
+# forever. Same trap the slot-22 note is pinned against.
+assert "op shadow note precedes the deferral's exit 0" \
+    "[[ \$(nocomment $OP_FETCHER | grep -n 'still shadows it' | head -1 | cut -d: -f1) -lt \$(nocomment $OP_FETCHER | grep -n '^[[:space:]]*exit 0\$' | head -1 | cut -d: -f1) ]]"
+
+# THE ASYMMETRY IS LOAD-BEARING IN BOTH DIRECTIONS, so pin it from both ends.
+#
+# Slot 23 guards on PRESENCE ALONE and that is correct: it installs one binary
+# and its deferral probes THAT binary, so fb_system_bin has already returned 0
+# before the note prints. Slot 22 installs two binaries while probing only tsh,
+# so it must additionally prove a system counterpart per binary — otherwise a
+# box with a system tsh and no system tctl is told to delete a tctl symlink
+# nothing would replace.
+#
+# Either "cleanup" is plausible to a future reader: adding a redundant probe
+# here, or copying this simpler guard back into slot 22 where it would be wrong.
+assert "op shadow note needs no per-binary probe (one binary, and it is the probed one)" \
+    "[[ \$(nocomment $OP_FETCHER | grep -cE '^[[:space:]]*install_bin[[:space:]]') -eq 1 ]]"
+assert "op deferral probes the same binary it installs" \
+    "nocomment $OP_FETCHER | grep -qF 'fb_system_bin \"\$BIN_NAME\" --version'"
+assert "slot 22's note keeps the tighter per-binary guard slot 23 does not need" \
+    "nocomment $TSH_FETCHER | grep -qF 'fb_system_bin \"\$b\" version >/dev/null || continue'"
 assert "op system deferral precedes the CDN download" \
     "awk '/^[[:space:]]*#/{next} /fb_system_bin/{seen=1} /cache.agilebits.com/{exit seen?0:1}' $OP_FETCHER"
 assert "op fast path restores a missing PATH symlink onto APP_DIR payload" \

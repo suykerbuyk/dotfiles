@@ -76,6 +76,23 @@ if [[ "${OP_FETCH_FORCE:-0}" != "1" ]]; then
         echo "op: already provided system-wide at ${SYSTEM_OP} — skipping."
         echo "  $("$SYSTEM_OP" --version 2>&1 | head -1)"
         echo "  Set OP_FETCH_FORCE=1 to install a user-local copy anyway."
+        # The deferral prevents CREATING a shadow; it cannot see one that
+        # already exists. A box that installed our copy first and gained the
+        # `1password-cli` package later would otherwise be told the system copy
+        # provides op while `op` on PATH is still OURS -- the env layer puts
+        # ~/.local/bin first.
+        #
+        # PRESENCE ALONE IS SUFFICIENT HERE, and that is a decision, not an
+        # oversight: this slot installs exactly ONE binary and the deferral
+        # probes THAT binary, so fb_system_bin has already returned 0 for it
+        # above -- a working system counterpart is proven to exist by the time
+        # this line runs, and re-probing would re-ask an answered question.
+        #
+        # Slot 22 deliberately guards its equivalent note MORE tightly, with a
+        # per-binary fb_system_bin probe, because it installs two binaries while
+        # its deferral probes only tsh: a box with a system tsh and no system
+        # tctl must not be told to delete a tctl symlink nothing would replace.
+        # Do NOT harmonize the two shapes in either direction.
         if [[ -e "${BIN_DIR}/${BIN_NAME}" ]]; then
             echo "  note: ${BIN_DIR}/${BIN_NAME} still shadows it; delete that symlink to use the system binary."
         fi
