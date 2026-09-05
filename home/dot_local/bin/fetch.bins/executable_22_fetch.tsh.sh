@@ -7,7 +7,7 @@ set -euo pipefail
 
 # Teleport client tools (tsh, tctl) installer.
 #
-# Five ways this slot is unlike the ripgrep template. All five are measured, and
+# Six ways this slot is unlike the ripgrep template. All six are measured, and
 # every one of them will read as a bug to someone arriving from another fetcher.
 #
 # 1. NO GITHUB, AT ALL. Teleport publishes on cdn.teleport.dev, not as GitHub
@@ -45,6 +45,56 @@ set -euo pipefail
 #    is this tree's cautionary tale about completion naming; this is worse than
 #    a rename, so the honest move is to ship none until the output is fixed
 #    upstream or rewritten here on purpose.
+#
+# 6. IT BYPASSES install_bin AND KEEPS BOTH BINARIES IN ONE VERSIONED
+#    DIRECTORY: ${APP_DIR}/teleport-<version>/{tsh,tctl}.
+#
+#    install_bin's fb_check_bin gate is version-BLIND: once ~/.local/bin/tsh
+#    resolves to an executable it answers "already valid (skipping)" and
+#    returns, which would pin only the FIRST install of a cluster-pinned tool
+#    and then never move again.
+#
+#    This slot used to defeat that gate by PARSING the installed binary's
+#    version out of `tsh version`, which made one sed the single point of
+#    failure for the entire upgrade path. When the parse returned empty both
+#    downstream guards failed OPEN, in opposite directions: the fast path could
+#    not match (a ~207 MB re-download on EVERY Phase-5 pass) and the
+#    clear-the-links branch could not fire (a silent refusal to upgrade),
+#    because "" == "$VERSION" is false and [[ -n "" ]] is false. That is the
+#    iter-58 `realpath -m` shape -- empty-string-compares-equal, reading as
+#    healthy -- pointed at a different guard.
+#
+#    So the version lives in the PATH now and the filesystem answers "is this
+#    current?", exactly as slot 16 (ghostty) and slot 24 (proxmox-mcp) do.
+#
+#    A DIRECTORY, NOT TWO VERSIONED FILES, because tsh and tctl come out of ONE
+#    tarball and must never drift apart. Two independent versioned paths can be
+#    left at two different versions by an interrupted run, which puts the
+#    both-or-neither problem straight back into the fast path; one directory
+#    either exists whole or does not exist. Same reasoning as podman's
+#    podman-<ver>/ userland tree.
+#
+#    THE STAGING DIRECTORY LIVES UNDER $APP_DIR, NOT $FB_TMP, AND THAT IS
+#    LOAD-BEARING. FB_TMP is `mktemp -d` -> /tmp, which is tmpfs on this host
+#    while ~/.local/apps is btrfs. A cross-device `mv` is copy-then-unlink, NOT
+#    an atomic rename, so moving straight out of FB_TMP leaves a window in
+#    which the payload directory exists half-populated and a later fast path
+#    could accept it. Staging beside the final path makes the last step a
+#    same-filesystem rename(2): atomic, all or nothing.
+#
+#    WHAT THIS REMOVES IS THE PARSE, NOT THE INVOCATION. The fast path still
+#    RUNS the payload (`tsh version`), because that probe is what replaces
+#    install_bin's verification gate -- nothing else establishes that the file
+#    on disk is a working binary. Measured cost of `tsh version`: 27 ms with no
+#    profile, 221 ms against a reachable proxy, and 5.03 s (bounded, rc 0,
+#    tsh's own "context deadline exceeded") when a profile names an UNREACHABLE
+#    proxy. That last branch needs the cluster to answer the curl below while
+#    the PROFILE's proxy does not; it is not a hang, and it is not new.
+#
+#    THE SYMLINK NAMES ARE LOAD-BEARING. home/private_dot_ssh/private_config
+#    carries `ProxyCommand "tsh" proxy ssh ...` in its portable, PATH-resolved
+#    form, so ${BIN_DIR}/tsh and ${BIN_DIR}/tctl must keep exactly those names.
+#    ONLY the $APP_DIR payload carries a version.
 
 . "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/_lib.sh"
 
@@ -79,6 +129,24 @@ if [[ "${TSH_FETCH_FORCE:-0}" != "1" ]]; then
         echo "tsh: already provided system-wide at ${SYSTEM_TSH} — skipping."
         echo "  $("$SYSTEM_TSH" version 2>&1 | head -1)"
         echo "  Set TSH_FETCH_FORCE=1 to install a user-local copy anyway."
+        # A user-local copy installed BEFORE the system one appeared still
+        # SHADOWS it: the env layer puts ~/.local/bin ahead of /usr/bin, so
+        # `tsh` resolves to OURS and the version line printed above describes a
+        # binary the caller will not get. Measured 2026-09-05 with the system
+        # copy in /bin: this announced v18.10.0 while v18.10.1 actually ran.
+        # The deferral prevents CREATING a shadow; it cannot see one that
+        # already exists. Slot 23 carries the same note for the same reason.
+        #
+        # Checked PER BINARY, and via fb_system_bin rather than by assuming
+        # $SYSTEM_TSH's directory holds both: this slot installs two binaries
+        # while the deferral probes only tsh, so a box with a system tsh and no
+        # system tctl must not be told to delete a tctl symlink that nothing
+        # would replace.
+        for b in tsh tctl; do
+            [[ -e "${BIN_DIR}/${b}" ]] || continue
+            fb_system_bin "$b" version >/dev/null || continue
+            echo "  note: ${BIN_DIR}/${b} still shadows it; delete that symlink to use the system binary."
+        done
         exit 0
     fi
 fi
@@ -111,67 +179,119 @@ if [[ -z "$VERSION" ]]; then
     exit 1
 fi
 
-# install_bin's fb_check_bin gate is version-BLIND: once ~/.local/bin/tsh
-# resolves to an executable it reports "already valid" and returns. For a
-# cluster-pinned tool that would pin only the FIRST install and then never move
-# again, leaving a header that claims pinning above code that stopped doing it.
-# So compare versions here and clear the links when they differ.
+PAYLOAD_DIR="${APP_DIR}/teleport-${VERSION}"
+
+# Retire older versions so ~/.local/apps does not accumulate ~234 MB per
+# release. The symlinks point into $keep, so any other teleport-* directory is
+# dead weight. Called from BOTH the fast path and the install path: the normal
+# upgrade run prunes as a side effect of installing, but a run interrupted
+# between the move and the prune would otherwise strand the old payload
+# forever, since every later run takes the fast path and never reaches this.
 #
-# This is an UPGRADE path, never a gate: a mismatch is never a refusal. Skew is
-# a tidiness goal, not a correctness one — v18.10.4 clients and an 18.10.1 proxy
-# interoperated cleanly when measured on 2026-08-20, including headless SSH.
-installed_version() {
-    local p="${BIN_DIR}/$1"
-    [[ -x "$p" ]] || return 1
-    "$p" version 2>/dev/null | sed -n '1s/^Teleport v\([^ ]*\).*/\1/p'
+# The glob also catches an abandoned staging directory (teleport-<ver>.new.$$)
+# left by a crashed run, which is exactly what should happen to it.
+prune_old_versions() {
+    local keep="$1" old
+    for old in "${APP_DIR}/teleport"-*; do
+        [[ -d "$old" && "$old" != "$keep" ]] || continue
+        rm -rf "$old"
+        echo "  pruned old version: $(basename "$old")"
+    done
 }
 
-CURRENT_TSH="$(installed_version tsh   || true)"
-CURRENT_TCTL="$(installed_version tctl || true)"
+# MIGRATION, and it must run on every pass, not only on an install.
+#
+# Before the versioned layout this slot installed through install_bin, which
+# placed the payloads at the BARE paths ${APP_DIR}/tsh and ${APP_DIR}/tctl.
+# Those names match no teleport-* glob, so prune_old_versions cannot see them
+# and they would sit there forever: 234 MB measured (tsh 127.6 MB, tctl
+# 105.8 MB). Every machine that ran this fetcher before the change has a pair.
+#
+# It runs on the FAST path too, deliberately: a box already holding the right
+# version never reaches the install path again, and would keep both copies.
+#
+# `-f` and a regular-file test, never -rf: these are files, and a directory at
+# either name is not ours to delete.
+remove_legacy_unversioned() {
+    local f
+    for f in "${APP_DIR}/tsh" "${APP_DIR}/tctl"; do
+        [[ -f "$f" && ! -L "$f" ]] || continue
+        rm -f "$f"
+        echo "  removed legacy unversioned payload: $(basename "$f") (pre-versioned layout)"
+    done
+}
 
-# Fast path, and it is load-bearing: the installer runs every fetcher on every
-# Phase-5 pass, and the asset is ~207 MB. Deciding this AFTER gh_download would
-# re-pull a fifth of a gigabyte on each run only for install_bin to answer
-# "already valid (skipping)". This is the same reason slot 16 keeps a versioned
-# ghostty AppImage. Both tools are checked: a present tsh with a missing tctl
-# must still reach the install below, not exit here.
-if [[ "$CURRENT_TSH" == "$VERSION" && "$CURRENT_TCTL" == "$VERSION" ]]; then
+# Fast path: this exact version is already installed and both binaries run.
+# Re-assert the symlinks (cheap, and self-heals a hand-deleted link), prune,
+# drop any legacy payload, and exit WITHOUT re-downloading. Not an optimization
+# — the installer runs every fetcher on EVERY Phase-5 pass and the asset is
+# ~207 MB, so deciding this after gh_download would re-pull a fifth of a
+# gigabyte each run.
+#
+# BOTH binaries are probed: a present tsh with a missing or broken tctl must
+# fall through to the install below, not exit here.
+if [[ -x "${PAYLOAD_DIR}/tsh" && -x "${PAYLOAD_DIR}/tctl" ]] \
+   && "${PAYLOAD_DIR}/tsh"  version >/dev/null 2>&1 \
+   && "${PAYLOAD_DIR}/tctl" version >/dev/null 2>&1; then
     echo "tsh/tctl ${VERSION} already installed and matching ${PROXY} — nothing to do."
+    ln -sfn "${PAYLOAD_DIR}/tsh"  "${BIN_DIR}/tsh"
+    ln -sfn "${PAYLOAD_DIR}/tctl" "${BIN_DIR}/tctl"
+    prune_old_versions "$PAYLOAD_DIR"
+    remove_legacy_unversioned
     exit 0
-fi
-
-if [[ -n "${CURRENT_TSH}${CURRENT_TCTL}" ]]; then
-    echo "→ installed tsh=${CURRENT_TSH:-none} tctl=${CURRENT_TCTL:-none}, cluster wants ${VERSION} — replacing."
-    # Clear BOTH links and BOTH payloads: install_bin's fb_check_bin gate is
-    # version-blind, so a surviving same-named binary would be reported "already
-    # valid" and the upgrade would silently no-op.
-    rm -f "${BIN_DIR}/tsh" "${BIN_DIR}/tctl" \
-          "${APP_DIR}/tsh"  "${APP_DIR}/tctl"
 fi
 
 ASSET_URL="https://cdn.teleport.dev/teleport-v${VERSION}-${OS}-${ARCH}-bin.tar.gz"
 
 TARBALL="${FB_TMP}/teleport.tar.gz"
+echo "→ Downloading Teleport client tools ${VERSION} (${OS}/${ARCH}, ~207 MB)..."
 gh_download "$ASSET_URL" "$TARBALL"
 
-# Extract ONLY the two client binaries. The tarball is ~207 MB and carries the
-# server (teleport, tbot, fdpass-teleport), a root system installer, and the
-# whole examples/ tree; unpacking all of that to keep two files is pure waste.
-# Naming both members explicitly also means a future tarball that DROPS one
-# fails here, loudly and by name, instead of at install_bin's verify gate.
+# Stage INSIDE $APP_DIR so the final move is a same-filesystem rename(2). See
+# header note 6: FB_TMP is on tmpfs and $APP_DIR is not, so a move out of
+# FB_TMP would be copy-then-unlink and could leave a half-populated payload.
+mkdir -p "$APP_DIR"
+STAGE="${PAYLOAD_DIR}.new.$$"
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+trap 'rm -rf "$STAGE"; rm -rf "$FB_TMP"' EXIT
+
+# Extract ONLY the two client binaries, straight into the staging directory.
+# The tarball is ~207 MB and carries the server (teleport, tbot,
+# fdpass-teleport), a root system installer, and the whole examples/ tree;
+# unpacking all of that to keep two files is pure waste. Naming both members
+# explicitly also means a future tarball that DROPS one fails here, loudly and
+# by name, rather than at the verification gate below.
 #
 # NEVER run the bundled teleport/install script: it is a root, system-wide
 # installer, and this tree is rootless-by-contract (see slot 12, podman).
-tar -xzf "$TARBALL" -C "$FB_TMP" teleport/tsh teleport/tctl
-SRC_DIR="${FB_TMP}/teleport"
+tar -xzf "$TARBALL" -C "$STAGE" --strip-components=1 teleport/tsh teleport/tctl
+chmod +x "${STAGE}/tsh" "${STAGE}/tctl"
 
-# `version` is a SUBCOMMAND, not a flag. install_bin uses this argv both for its
-# verification gate and for the version line it prints, so passing --version
-# here would fail the install outright.
+# Verification gate BEFORE anything is placed on PATH. This is install_bin's
+# contract, reproduced here because the versioned destination bypasses it.
 #
-# tctl comes along because update.teleport.sh calls it and it is client-side
-# admin tooling. The server binaries deliberately stay in the tarball.
-install_bin "${SRC_DIR}/tsh"  tsh  version
-install_bin "${SRC_DIR}/tctl" tctl version
+# `version` is a SUBCOMMAND, not a flag: `tsh --version` is a hard error, so a
+# probe written with the flag form would reject a perfectly good binary.
+for t in tsh tctl; do
+    if ! "${STAGE}/${t}" version >/dev/null 2>&1; then
+        echo "Error: the downloaded ${t} is not runnable (verification failed)." >&2
+        exit 1
+    fi
+done
+
+# Atomic publish. rm -rf first: `mv dir existing-dir` moves the source INTO the
+# target rather than replacing it, and the only way to reach here with the
+# target present is a payload that already failed the fast path's probes.
+rm -rf "$PAYLOAD_DIR"
+mv "$STAGE" "$PAYLOAD_DIR"
+trap 'rm -rf "$FB_TMP"' EXIT
+
+ln -sfn "${PAYLOAD_DIR}/tsh"  "${BIN_DIR}/tsh"
+ln -sfn "${PAYLOAD_DIR}/tctl" "${BIN_DIR}/tctl"
+
+prune_old_versions "$PAYLOAD_DIR"
+remove_legacy_unversioned
 
 echo "Installed Teleport client tools v${VERSION} (pinned to ${PROXY}) -> ${BIN_DIR}/{tsh,tctl}"
+echo "  version: $("${BIN_DIR}/tsh" version 2>&1 | head -1)"

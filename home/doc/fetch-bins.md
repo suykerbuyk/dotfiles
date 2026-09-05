@@ -371,9 +371,9 @@ Key `_lib.sh` helpers:
   because Teleport names assets `amd64`/`arm64`, exactly what `fb_arch` emits;
   "correcting" it to raw `uname -m` 404s on arm64 and is invisible from x86_64.
   And `version` is a **subcommand**: `tsh --version` is a hard error, so that
-  argv is what `install_bin` receives.
+  is the argv the fetcher's own verification gate uses.
 
-  Two behaviours are specific to this slot:
+  Three behaviours are specific to this slot:
   - **It defers to a system-wide `tsh`.** Teleport's vendor installer writes
     `/usr/local/bin/tsh`, and a box provisioned that way needs nothing from us
     — a second copy in `~/.local/bin` would only *shadow* it, since the env
@@ -383,12 +383,50 @@ Key `_lib.sh` helpers:
     first install. `fb_system_bin` strips `$BIN_DIR`, rejects anything
     resolving into `$APP_DIR`, and probes **operability** rather than presence.
     `TSH_FETCH_FORCE=1` overrides the deferral.
+
+    The deferral prevents *creating* a shadow; it cannot see one that already
+    exists. A box that installed our copy first and gained a system `tsh` later
+    gets the skip message **plus the system's version line**, while `tsh` on
+    PATH is still ours — measured 2026-09-05 as "announced v18.10.0, ran
+    v18.10.1". So the skip also prints a per-binary `note:` naming any
+    `~/.local/bin` symlink that shadows the system copy, as slot 23 does. It is
+    checked **per binary against `fb_system_bin`**, not by assuming the system
+    directory holds both: this slot installs two binaries while the deferral
+    probes only `tsh`, and a box with a system `tsh` and no system `tctl` must
+    not be told to delete a `tctl` symlink nothing would replace.
   - **It checks the installed version before downloading.** The asset is
     ~207 MB — the whole Teleport suite, of which only `tsh` and `tctl` are
     extracted — and the installer runs every fetcher on every Phase-5 pass.
     Leaving that decision to `install_bin` would re-pull a fifth of a gigabyte
     each run only to be told "already valid". Same reasoning as the versioned
     ghostty AppImage in slot 16.
+  - **It bypasses `install_bin` for a versioned payload directory**,
+    `~/.local/apps/teleport-<version>/{tsh,tctl}`. Until 2026-09-05 it defeated
+    `fb_check_bin`'s version-blindness by *parsing* the installed binary's
+    version out of `tsh version`, which made one `sed` the single point of
+    failure for the entire upgrade path: an empty parse failed **open in both
+    directions**, missing the fast path (a ~207 MB re-download every pass) and
+    skipping the clear-the-links branch (a silent refusal to upgrade), because
+    `"" == "$VERSION"` is false and `[[ -n "" ]]` is false. That is the iter-58
+    `realpath -m` shape aimed at a different guard. The version lives in the
+    path now and the filesystem answers "is this current?", as in slots 16
+    and 24. Three details are load-bearing:
+    - **A directory, not two versioned files.** `tsh` and `tctl` come out of
+      one tarball and must never drift apart; two independent paths can be left
+      at two versions by an interrupted run, one directory cannot.
+    - **The staging directory lives under `$APP_DIR`, not `$FB_TMP`.**
+      `FB_TMP` is `mktemp -d` → `/tmp`, a different filesystem, so a move out of
+      it is copy-then-unlink rather than an atomic rename. Staging beside the
+      final path makes the publish a same-filesystem `rename(2)`.
+    - **The `~/.local/bin/{tsh,tctl}` symlink names stay unversioned.**
+      `~/.ssh/config` carries the portable, PATH-resolved
+      `ProxyCommand "tsh" proxy ssh` form; only the payload carries a version.
+
+    It also removes the **pre-versioned** `~/.local/apps/{tsh,tctl}` payloads on
+    every pass, including the fast path — no `teleport-*` glob matches those
+    bare names, and every machine that ran the old fetcher has a 234 MB pair.
+    For the same reason `tsh`/`tctl` are **not** `remove_bin` loop entries in
+    `update-user-home-dir.sh` but a special case beside ghostty's and podman's.
 
   It installs **no completions**, deliberately: `tsh --completion-script-zsh`
   emits a `#compdef` directive with no command name and a function named

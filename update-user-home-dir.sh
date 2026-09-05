@@ -94,7 +94,7 @@ if $UNINSTALL; then
     # gone, so the tool is no longer on PATH. Keep this list in lockstep with the
     # fetch.bins/ scripts (every 0N_fetch.<tool>.sh must map to an entry here, a
     # special case below, or the rust block).
-    for b in jq rg go gofmt broot fzf nvim ninja starship chezmoi age age-keygen tree-sitter herdr fd bat xh tsh tctl op; do
+    for b in jq rg go gofmt broot fzf nvim ninja starship chezmoi age age-keygen tree-sitter herdr fd bat xh op; do
         if $FORCE; then remove_bin "$b"; else echo "  would remove_bin $b"; fi
     done
     # Slots 18-21 (fd, bat, delta, xh) also install SHELL COMPLETIONS into the
@@ -205,6 +205,29 @@ if $UNINSTALL; then
         echo "  removed proxmox-mcp (versioned payload + symlink)"
     else
         echo "  would remove proxmox-mcp (~/.local/apps/proxmox-mcp-* + symlink)"
+    fi
+    # tsh/tctl need a special case for the same reason proxmox-mcp and ghostty
+    # do, plus one they do not have. The fetcher installs a VERSIONED payload
+    # DIRECTORY (~/.local/apps/teleport-<ver>/{tsh,tctl}) because the two
+    # binaries come out of one tarball and must never drift apart, so the bare
+    # ~/.local/apps/tsh path remove_bin looks for does not exist. remove_bin
+    # would delete only the symlinks and STILL REPORT SUCCESS -- its symlink
+    # branch already set removed=1 -- while 234 MB of payload survived
+    # (measured: tsh 127.6 MB, tctl 105.8 MB).
+    #
+    # The bare paths are removed too, and that is NOT redundant: every machine
+    # that ran this fetcher before the versioned layout has a pre-migration
+    # pair at those names, and no teleport-* glob matches them.
+    #
+    # rm -rf for the versioned directory (it is a directory), rm -f for the
+    # legacy files and the symlinks.
+    if $FORCE; then
+        rm -rf "$HOME"/.local/apps/teleport-*
+        rm -f  "$HOME/.local/apps/tsh" "$HOME/.local/apps/tctl"
+        rm -f  "$HOME/.local/bin/tsh"  "$HOME/.local/bin/tctl"
+        echo "  removed tsh/tctl (versioned teleport-* payload + legacy unversioned payloads + symlinks)"
+    else
+        echo "  would remove tsh/tctl (~/.local/apps/teleport-* + legacy ~/.local/apps/{tsh,tctl} + symlinks)"
     fi
     # Rust is not a remove_bin tool: rustup owns ~/.cargo and ~/.rustup, so let
     # it tear itself down cleanly (removes toolchains, cargo, and the homes).

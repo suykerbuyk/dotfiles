@@ -2729,8 +2729,12 @@ assert "22_fetch.tsh.sh is valid bash"              "bash -n $TSH_FETCHER"
 assert "22_fetch.tsh.sh sources _lib.sh"            "grep -q '_lib.sh' $TSH_FETCHER"
 assert "22_fetch.tsh.sh carries the SPDX banner" \
     "grep -q 'SPDX-License-Identifier: MIT OR Apache-2.0' $TSH_FETCHER"
-assert "tsh fetcher goes through install_bin" \
-    "grep -qE '^[[:space:]]*install_bin[[:space:]]' $TSH_FETCHER"
+# Trap 6 — this slot BYPASSES install_bin. Its fb_check_bin gate is
+# version-blind, so it would pin only the first install of a cluster-pinned
+# tool. Same reason slot 16 and slot 24 bypass it; the assert is theirs, at the
+# other polarity from the herdr/op slots.
+assert "tsh fetcher bypasses install_bin" \
+    "[[ -z \$(nocomment $TSH_FETCHER | grep -E '^[[:space:]]*install_bin[[:space:]]') ]]"
 
 # Trap 1 — the fb_arch inversion. Assert the CALL, on comment-stripped source:
 # the header explains the inversion at length and a raw grep would match its own
@@ -2759,12 +2763,16 @@ assert "tsh fetcher queries /v1/webapi/find"        "grep -qF '/v1/webapi/find' 
 assert "tsh fetcher hardcodes no version fallback" \
     "awk '/^[[:space:]]*#/{next} /teleport-v[0-9]+\\./{f=1} END{exit f?1:0}' $TSH_FETCHER"
 
-# Trap 4 — `version` is a subcommand. Pin both install_bin call sites: passing
-# --version fails the verification gate outright and takes the install with it.
-assert "tsh fetcher verifies with the 'version' subcommand" \
-    "[[ \$(nocomment $TSH_FETCHER | grep -cE '^[[:space:]]*install_bin .* version\$') -eq 2 ]]"
-assert "tsh fetcher never passes --version to install_bin" \
-    "awk '/^[[:space:]]*#/{next} /install_bin/ && /--version/{f=1} END{exit f?1:0}' $TSH_FETCHER"
+# Trap 4 — `version` is a SUBCOMMAND and `tsh --version` is a hard error. With
+# install_bin gone, the verification gate is this fetcher's own, so pin it here:
+# both binaries are probed before anything reaches BIN_DIR, and the flag form
+# appears nowhere in executable source (it would reject a working binary).
+assert "tsh fetcher verifies both binaries with the 'version' subcommand" \
+    "[[ \$(nocomment $TSH_FETCHER | grep -cE '\"\\\$\\{STAGE\\}/\\\$\\{t\\}\" version') -eq 1 ]]"
+assert "tsh fetcher probes tsh AND tctl in the verify loop" \
+    "grep -qE '^for t in tsh tctl; do\$' $TSH_FETCHER"
+assert "tsh fetcher never uses the --version flag form" \
+    "awk '/^[[:space:]]*#/{next} /--version/{f=1} END{exit f?1:0}' $TSH_FETCHER"
 
 # Defers to a system-wide tsh. fb_system_bin is what makes that safe on run
 # 2..n — a bare `command -v` would find our OWN symlink, because fb_init puts
@@ -2774,6 +2782,30 @@ assert "tsh fetcher defers via fb_system_bin" \
 assert "tsh fetcher does not key the skip on bare command -v" \
     "awk '/^[[:space:]]*#/{next} /command -v/{f=1} END{exit f?1:0}' $TSH_FETCHER"
 assert "tsh fetcher offers a force override"        "grep -qF 'TSH_FETCH_FORCE' $TSH_FETCHER"
+
+# The deferral prevents CREATING a shadow; it cannot see one that already
+# exists. A box that installed our copy first and gained a system tsh later
+# gets "already provided system-wide ... skipping" plus the SYSTEM's version
+# line, while `tsh` on PATH is still OURS -- measured 2026-09-05: announced
+# v18.10.0 while v18.10.1 ran. Slot 23 prints a note for exactly this and is
+# itself unasserted; these are the first asserts on that behaviour.
+assert "tsh fetcher notes an existing shadow on skip" \
+    "nocomment $TSH_FETCHER | grep -qF 'still shadows it; delete that symlink'"
+# GUARDED, not unconditional: a fresh box has no symlink and must not be told
+# to delete one.
+assert "tsh shadow note is guarded on the symlink existing" \
+    "nocomment $TSH_FETCHER | grep -qF '[[ -e \"\${BIN_DIR}/\${b}\" ]] || continue'"
+# PER BINARY, against fb_system_bin: this slot installs two binaries while the
+# deferral probes only tsh, so a box with a system tsh and no system tctl must
+# not be told to delete a tctl symlink nothing would replace.
+assert "tsh shadow note checks each binary has a system counterpart" \
+    "nocomment $TSH_FETCHER | grep -qF 'fb_system_bin \"\$b\" version >/dev/null || continue'"
+assert "tsh shadow note covers both tsh and tctl" \
+    "nocomment $TSH_FETCHER | grep -qE '^[[:space:]]*for b in tsh tctl; do\$'"
+# Reachability: the note must sit INSIDE the deferral block, above its exit 0.
+# A note after the exit is dead code that greps green forever.
+assert "tsh shadow note precedes the deferral's exit 0" \
+    "[[ \$(nocomment $TSH_FETCHER | grep -n 'still shadows it' | head -1 | cut -d: -f1) -lt \$(nocomment $TSH_FETCHER | grep -n '^[[:space:]]*exit 0\$' | head -1 | cut -d: -f1) ]]"
 
 # The version fast path must precede the download, or every Phase-5 installer
 # run re-pulls ~207 MB only for install_bin to answer "already valid". ORDERING
@@ -2793,9 +2825,90 @@ assert "tsh fetcher never runs the bundled install script" \
 assert "tsh fetcher installs NO completions" \
     "awk '/^[[:space:]]*#/{next} /fb_install_completions/{f=1} END{exit f?1:0}' $TSH_FETCHER"
 
+# ---------------------------------------------------------------------------
+# Versioned payload DIRECTORY (the 2026-09-05 change).
+#
+# The parse this slot used to rely on -- `tsh version | sed -n '1s/^Teleport
+# v...'` -- was the single point of failure for the whole upgrade path: an
+# empty parse made the fast path miss (~207 MB re-downloaded every Phase-5
+# pass) AND the clear-the-links branch skip (a silent refusal to upgrade),
+# because "" == "$VERSION" is false and [[ -n "" ]] is false. The first assert
+# below is this task's regression guard, and it reads comment-stripped source
+# because the header explains the deleted mechanism at length.
+assert "tsh fetcher no longer parses the installed binary's version" \
+    "[[ -z \$(nocomment $TSH_FETCHER | grep -E 'installed_version|1s/\^Teleport') ]]"
+assert "tsh payload path carries the version" \
+    "nocomment $TSH_FETCHER | grep -qF '\${APP_DIR}/teleport-\${VERSION}'"
+
+# ONE directory, not two versioned files: tsh and tctl come out of one tarball
+# and must never drift apart. Pin both binaries living under the same payload.
+assert "tsh and tctl share one versioned payload directory" \
+    "[[ \$(nocomment $TSH_FETCHER | grep -cF '\${PAYLOAD_DIR}/tsh') -ge 2 && \$(nocomment $TSH_FETCHER | grep -cF '\${PAYLOAD_DIR}/tctl') -ge 2 ]]"
+
+# The staging directory MUST live under APP_DIR. FB_TMP is mktemp -d -> /tmp,
+# a different filesystem from ~/.local/apps, so a move out of FB_TMP is
+# copy-then-unlink and can leave a half-populated payload a later fast path
+# would accept. Staging beside the final path makes the publish an atomic
+# same-filesystem rename(2). This is the assert that keeps High 4 of the
+# 2026-09-05 review from being undone by a "tidier" refactor.
+assert "tsh staging directory is under APP_DIR, not FB_TMP" \
+    "nocomment $TSH_FETCHER | grep -qF 'STAGE=\"\${PAYLOAD_DIR}.new.\$\$\"'"
+assert "tsh fetcher never moves a payload out of FB_TMP" \
+    "[[ -z \$(nocomment $TSH_FETCHER | grep -E '^[[:space:]]*mv .*FB_TMP') ]]"
+# `mv dir existing-dir` moves INTO the target instead of replacing it, so the
+# target must be cleared first. ORDERING assert on stripped source.
+assert "tsh fetcher clears the payload dir before the atomic move" \
+    "[[ \$(nocomment $TSH_FETCHER | grep -n 'rm -rf \"\$PAYLOAD_DIR\"' | tail -1 | cut -d: -f1) -lt \$(nocomment $TSH_FETCHER | grep -n 'mv \"\$STAGE\" \"\$PAYLOAD_DIR\"' | head -1 | cut -d: -f1) ]]"
+# tail -1, not head -1: the FAST path symlinks first (line ~219) and is allowed
+# to, because it has already probed both binaries. What must not be reordered is
+# the INSTALL path's gate, so compare against the last ln -sfn. Slot 24's assert
+# reads the same way for the same reason.
+assert "tsh fetcher verifies before it symlinks" \
+    "[[ \$(nocomment $TSH_FETCHER | grep -n 'verification failed' | head -1 | cut -d: -f1) -lt \$(nocomment $TSH_FETCHER | grep -n 'ln -sfn' | tail -1 | cut -d: -f1) ]]"
+
+# Both paths prune AND migrate: a box already holding the right version never
+# reaches the install path again, so a fast path that skipped either would
+# strand the old payload (234 MB) forever. Same reasoning as slot 24's prune,
+# with the migration added because this slot HAS a pre-versioned predecessor.
+assert "tsh prunes from both the fast path and the install path" \
+    "[[ \$(nocomment $TSH_FETCHER | grep -cE '^[[:space:]]*prune_old_versions[[:space:]]') -ge 2 ]]"
+assert "tsh drops the legacy unversioned payload from both paths" \
+    "[[ \$(nocomment $TSH_FETCHER | grep -cE '^[[:space:]]*remove_legacy_unversioned\$') -ge 2 ]]"
+assert "tsh legacy cleanup names both bare payload paths" \
+    "nocomment $TSH_FETCHER | grep -qF '\"\${APP_DIR}/tsh\" \"\${APP_DIR}/tctl\"'"
+
+# The fast path must probe BOTH binaries. A present tsh with a broken tctl has
+# to fall through to the install, not exit green -- the invariant the old
+# two-variable compare stated at :136-137 and which the directory layout is
+# meant to make structural rather than hand-maintained.
+assert "tsh fast path probes tsh AND tctl" \
+    "nocomment $TSH_FETCHER | grep -qF '\"\${PAYLOAD_DIR}/tctl\" version >/dev/null 2>&1; then'"
+
+# The PATH symlink names must stay UNVERSIONED: ~/.ssh/config carries the
+# portable ProxyCommand \"tsh\" form, resolved through PATH. Only the payload
+# under APP_DIR carries a version.
+assert "tsh PATH symlinks keep their unversioned names" \
+    "[[ \$(nocomment $TSH_FETCHER | grep -cF 'ln -sfn \"\${PAYLOAD_DIR}/tsh\"  \"\${BIN_DIR}/tsh\"') -ge 1 && \$(nocomment $TSH_FETCHER | grep -cF 'ln -sfn \"\${PAYLOAD_DIR}/tctl\" \"\${BIN_DIR}/tctl\"') -ge 1 ]]"
+assert "ssh config keeps the portable PATH-resolved tsh ProxyCommand" \
+    "grep -qF 'ProxyCommand \"tsh\" proxy ssh' home/private_dot_ssh/private_config"
+
 assert "doctor registry lists tsh"                  "grep -q 'tsh|tsh|' lib/doctor-registry.sh"
-assert "installer uninstall covers tsh"             "grep -qE '^[[:space:]]*for b in .*\\btsh\\b' update-user-home-dir.sh"
-assert "installer uninstall covers tctl"            "grep -qE '^[[:space:]]*for b in .*\\btctl\\b' update-user-home-dir.sh"
+# tsh/tctl are NOT remove_bin loop entries, and asserting that they are is what
+# would ship the leak. remove_bin deletes ~/.local/apps/<name>; the payload is
+# ~/.local/apps/teleport-<ver>/, which that path does not match — so remove_bin
+# would drop the symlinks, report success (its symlink branch already set
+# removed=1) and strand 234 MB. Pin the special case, and pin the ABSENCE of
+# the loop entry so a well-meaning "restore" is caught.
+assert "installer uninstall does NOT loop-remove tsh" \
+    "! grep -qE '^[[:space:]]*for b in .*\\btsh\\b' update-user-home-dir.sh"
+assert "installer uninstall does NOT loop-remove tctl" \
+    "! grep -qE '^[[:space:]]*for b in .*\\btctl\\b' update-user-home-dir.sh"
+assert "installer uninstall removes the versioned teleport payload" \
+    "grep -qF 'rm -rf \"\$HOME\"/.local/apps/teleport-*' update-user-home-dir.sh"
+assert "installer uninstall removes the legacy unversioned tsh/tctl payloads" \
+    "grep -qF 'rm -f  \"\$HOME/.local/apps/tsh\" \"\$HOME/.local/apps/tctl\"' update-user-home-dir.sh"
+assert "installer uninstall removes the tsh/tctl symlinks" \
+    "grep -qF 'rm -f  \"\$HOME/.local/bin/tsh\"  \"\$HOME/.local/bin/tctl\"' update-user-home-dir.sh"
 assert "installer uninstall covers op"              "grep -qE '^[[:space:]]*for b in .*\\bop\\b' update-user-home-dir.sh"
 
 # ===========================================================================
