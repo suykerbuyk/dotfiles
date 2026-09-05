@@ -2362,6 +2362,76 @@ for _ghf in gh_latest_tag gh_asset_url gh_latest_tag_nojq; do
 done
 unset _ghf
 
+# --- versioned payload staging and publish ----------------------------------
+# The rule slot 22 had and slots 16/24 did not: stage BESIDE the destination so
+# the publish is a same-filesystem rename(2). FB_TMP is tmpfs on a normal Linux
+# box while APP_DIR is not, so a move out of FB_TMP is copy-then-unlink and an
+# interruption can leave a half-written payload live.
+assert "_lib.sh declares fb_stage_payload"   "grep -qE '^fb_stage_payload\(\)' $FBLIB"
+assert "_lib.sh declares fb_publish_payload" "grep -qE '^fb_publish_payload\(\)' $FBLIB"
+assert "_lib.sh declares fb_prev_payload"    "grep -qE '^fb_prev_payload\(\)' $FBLIB"
+
+assert_eq "the staging path sits beside its destination" \
+    "$(fbsb 'S="$(fb_stage_payload "$APP_DIR/tool-1.0")"; [[ "$(dirname "$S")" == "$APP_DIR" ]] && echo BESIDE || echo "$S"')" "BESIDE"
+# A tree payload: the caller mkdirs and untars into the stage.
+assert_eq "a staged tree publishes into place" \
+    "$(fbsb 'F="$APP_DIR/tool-1.0"; S="$(fb_stage_payload "$F")"; mkdir -p "$S/bin"; : > "$S/bin/tool"
+             fb_publish_payload "$S" "$F" >/dev/null; [[ -f "$F/bin/tool" ]] && echo OK || echo MISSING')" "OK"
+# A single-file payload: the stage is NOT pre-created as a directory, because
+# curl -o fails outright on a path that is already one.
+assert_eq "a staged single file publishes into place" \
+    "$(fbsb 'F="$APP_DIR/bin-2.0"; S="$(fb_stage_payload "$F")"; printf x > "$S"
+             fb_publish_payload "$S" "$F" >/dev/null; [[ -f "$F" ]] && echo OK || echo MISSING')" "OK"
+# THE nesting hazard: `mv dir existing-dir` moves the source INTO the target
+# rather than replacing it, which would bury the new payload one level down
+# (teleport-18.10.1/teleport-18.10.1.new.4242) and leave the broken one live.
+assert_eq "publishing over an existing payload replaces it rather than nesting" \
+    "$(fbsb 'F="$APP_DIR/tool-1.0"; mkdir -p "$F/bin"; : > "$F/bin/OLD"
+             S="$(fb_stage_payload "$F")"; mkdir -p "$S/bin"; : > "$S/bin/NEW"
+             fb_publish_payload "$S" "$F" >/dev/null; ls "$F/bin"')" "NEW"
+# The guard this helper exists for. A stage in FB_TMP is on another filesystem,
+# so the move would silently degrade to copy-then-unlink.
+assert_re "publish REFUSES a stage that is not beside its destination" \
+    "$(fbsb 'T="$(mktemp -d)/elsewhere"; printf x > "$T"
+             fb_publish_payload "$T" "$APP_DIR/x-1.0" 2>&1 || true')" \
+    'not beside its destination'
+assert_eq "a refused publish creates nothing at the destination" \
+    "$(fbsb 'T="$(mktemp -d)/elsewhere"; printf x > "$T"
+             (fb_publish_payload "$T" "$APP_DIR/x-1.0") >/dev/null 2>&1 || true
+             [[ -e "$APP_DIR/x-1.0" ]] && echo LEAKED || echo CLEAN')" "CLEAN"
+assert_re "publish REFUSES a stage that was never created" \
+    "$(fbsb 'fb_publish_payload "$APP_DIR/z.new.1" "$APP_DIR/z" 2>&1 || true')" 'nothing staged'
+assert_re "stage REFUSES an empty destination" \
+    "$(fbsb 'fb_stage_payload "" 2>&1 || true')" 'needs a destination'
+
+# fb_prev_payload — the spare fb_prune_versions defers a delete for. Six slots
+# used to derive this by hand; the readlink trap below is why that was a bad idea.
+assert_eq "prev payload resolves a tree through its bin/ suffix" \
+    "$(fbsb 'mkdir -p "$APP_DIR/nvim-0.12.4/bin"; : > "$APP_DIR/nvim-0.12.4/bin/nvim"
+             chmod +x "$APP_DIR/nvim-0.12.4/bin/nvim"
+             ln -sfn "$APP_DIR/nvim-0.12.4/bin/nvim" "$BIN_DIR/nvim"
+             basename "$(fb_prev_payload nvim /bin/nvim)"')" "nvim-0.12.4"
+assert_eq "prev payload resolves a bare-file payload with no suffix" \
+    "$(fbsb ': > "$APP_DIR/ghostty-1.0.AppImage"; chmod +x "$APP_DIR/ghostty-1.0.AppImage"
+             ln -sfn "$APP_DIR/ghostty-1.0.AppImage" "$BIN_DIR/ghostty"
+             basename "$(fb_prev_payload ghostty)"')" "ghostty-1.0.AppImage"
+# THE trap, and the reason this is a helper rather than six copies. GNU
+# `readlink -f` resolves a path whose final component does not exist and prints
+# it anyway, so on a machine with no prior install the hand-rolled version
+# returned "$HOME/.local/bin/<tool>", matched */bin/<tool>, and yielded a
+# "previous payload" of "$HOME/.local". BSD readlink differs again.
+assert_eq "prev payload is EMPTY on a machine with no prior install" \
+    "$(fbsb 'echo "[$(fb_prev_payload nvim /bin/nvim)]"')" "[]"
+# The intermediate directories are CREATED on purpose. With them missing,
+# readlink -f fails and returns nothing, so the -n test alone would pass this and
+# the -x guard would never be reached — the case would look covered while
+# testing something else. With them present, readlink -f happily resolves a
+# final component that does not exist, and only -x saves us.
+assert_eq "prev payload is EMPTY when the symlink target is gone" \
+    "$(fbsb 'mkdir -p "$APP_DIR/nvim-9.9.9/bin"
+             ln -sfn "$APP_DIR/nvim-9.9.9/bin/nvim" "$BIN_DIR/nvim"
+             echo "[$(fb_prev_payload nvim /bin/nvim)]"')" "[]"
+
 assert "_lib.sh declares fb_pin"             "grep -qE '^fb_pin\(\)' $FBLIB"
 assert "_lib.sh declares fb_prune_versions"  "grep -qE '^fb_prune_versions\(\)' $FBLIB"
 
@@ -2468,12 +2538,12 @@ for f in "$GO_FETCHER" "$NVIM_FETCHER2"; do
     # itself is gutted. Mutation testing caught exactly that.
     assert "$b resolves its version through fb_pin" \
         "nocomment $f | grep -q 'fb_pin '"
-    # GNU readlink -f resolves a path whose final component does not exist, so
-    # without the -x test a fresh machine captured "$HOME/.local" as "the previous
-    # payload". Harmless as a spare, false as a value, and BSD readlink differs
-    # again. The guard is what makes both platforms agree.
-    assert "$b guards the previous-payload capture on -x" \
-        "nocomment $f | grep -q '\-n \"\$_prev_bin\" && -x \"\$_prev_bin\"'"
+    # INVERTED 2026-09-05 (phase 4): the hand-rolled capture, and the -x guard
+    # inside it, moved into fb_prev_payload — six copies became one. The guard
+    # itself is asserted on the library below; here we only pin that the slot
+    # goes through the helper rather than re-deriving it.
+    assert "$b captures the previous payload via the shared helper" \
+        "nocomment $f | grep -q 'fb_prev_payload '"
 done
 unset f b
 # Slot 04 is the ONLY payload with no tool prefix: go.dev's version string is
@@ -2484,17 +2554,45 @@ assert "go fetcher prunes on the go1.* glob, not go-*, on BOTH paths" \
 assert "nvim fetcher passes BOTH the current and legacy globs" \
     "[[ \$(nocomment $NVIM_FETCHER2 | grep -cF \"'nvim.appimage-*'\") -eq 2 ]]"
 
-# Census. Phase 2 introduced the shared prune and wired the two slots that had
-# NONE — which is where the 1.6 GB was. Slots 12/16/22/24 still carry their own
-# prune_old_versions and are migrated in phase 4, when those files are opened
-# anyway. This assert pins that split so the migration cannot half-happen
-# silently: when a slot moves, its row moves with it.
-assert "exactly 2 slots use the shared prune (04, 07)" \
-    "[[ \$(grep -lE '^[[:space:]]*fb_prune_versions[[:space:]]' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | wc -l) -eq 2 ]]"
-assert "exactly 4 slots still define a local prune (12, 16, 22, 24)" \
-    "[[ \$(grep -lE '^prune_old_versions\(\)' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | wc -l) -eq 4 ]]"
-assert "no slot both defines a local prune AND calls the shared one" \
-    "[[ -z \$(comm -12 <(grep -lE '^prune_old_versions\(\)' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | sort) <(grep -lE '^[[:space:]]*fb_prune_versions[[:space:]]' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | sort)) ]]"
+# Census, UPDATED in phase 4. Phase 2 wired the two slots that had no prune at
+# all and left 12/16/22/24 on their own copies, asserting that 2/4 split so the
+# migration could not half-happen silently. Phase 4 completed it: six versioned
+# slots, one implementation, zero local copies. The census moves with the code —
+# that is what it is for.
+assert "all SIX versioned slots use the shared prune" \
+    "[[ \$(grep -lE '^[[:space:]]*fb_prune_versions[[:space:]]' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | wc -l) -eq 6 ]]"
+assert "no slot defines a local prune any more" \
+    "[[ \$(grep -lE '^prune_old_versions\(\)' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | wc -l) -eq 0 ]]"
+FB_VERSIONED="$(echo home/dot_local/bin/fetch.bins/executable_{04,07,12,16,22,24}_fetch.*.sh)"
+# Every versioned slot prunes on BOTH paths, so two call sites each, twelve in
+# total. A slot that prunes only on install strands its predecessor forever the
+# moment a run is interrupted before the prune.
+# Every versioned slot must OBTAIN its staging path from the helper rather than
+# spelling one itself. Without this the only thing stopping a slot drifting back
+# to FB_TMP is fb_publish_payload refusing at runtime — a real guard, but one
+# that fails on the user's machine instead of in the suite.
+# Per-slot and COMMENT-STRIPPED. A file-count over raw source matched the
+# rationale comments that NAME these helpers, so gutting a call site left the
+# census green -- mutation testing caught it twice, once per helper.
+for _vf in $FB_VERSIONED; do
+    assert "$(basename "$_vf") stages through the helper" \
+        "nocomment $_vf | grep -q 'fb_stage_payload '"
+    assert "$(basename "$_vf") publishes through the helper" \
+        "nocomment $_vf | grep -q 'fb_publish_payload '"
+done
+unset _vf
+# Scoped to the SIX versioned slots, not the whole tree: the install_bin slots
+# use $FB_TMP legitimately and by contract -- install_bin owns the copy into
+# APP_DIR and explicitly requires a source outside it. The narrower rule pinned
+# here is that a slot publishing its OWN versioned payload must not build that
+# payload in $FB_TMP. A download tarball there is still fine: it is unpacked,
+# never published.
+assert "no versioned slot builds a payload path in FB_TMP" \
+    "[[ -z \$(cat \$FB_VERSIONED | sed 's/#.*//' | grep -E '^[A-Z_]+=\"\\\$\{?FB_TMP' | grep -v '^TARBALL=') ]]"
+assert "no versioned slot moves a payload out of FB_TMP" \
+    "[[ -z \$(cat \$FB_VERSIONED | sed 's/#.*//' | grep -E '^[[:space:]]*mv .*FB_TMP') ]]"
+assert "each of the six prunes from BOTH paths (12 call sites)" \
+    "[[ \$(cat home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | grep -cE '^[[:space:]]*fb_prune_versions[[:space:]]') -eq 12 ]]"
 
 #   3. an UNDECLARED tool is a hard error. There is no default arm in the
 #      table, because a permissive default silently restores the 404s this
@@ -2580,10 +2678,10 @@ assert "podman fetcher emits podman-rootless-setup" "grep -q 'podman-rootless-se
 # run takes the fast path, which until now exited without ever reaching
 # prune_old_versions. Count CALLS, not the definition — `prune_old_versions()`
 # carries `() {` and cannot match a bare-call pattern.
-assert "podman fetcher defines prune_old_versions" \
-    "grep -qE '^prune_old_versions\(\) \{' $PODMAN_FETCHER"
+assert "podman fetcher uses the shared prune" \
+    "nocomment $PODMAN_FETCHER | grep -q 'fb_prune_versions '"
 assert "podman fetcher calls prune from BOTH paths" \
-    "[[ \$(nocomment $PODMAN_FETCHER | grep -cE '^[[:space:]]*prune_old_versions[[:space:]]*\$') -eq 2 ]]"
+    "[[ \$(nocomment $PODMAN_FETCHER | grep -cE '^[[:space:]]*fb_prune_versions[[:space:]]') -eq 2 ]]"
 # Ordering, not just presence: the fast-path call is the INDENTED one, and it must
 # land before that path's `exit 0` or it is dead code below a branch that already
 # returned.
@@ -2595,7 +2693,7 @@ assert "podman fetcher calls prune from BOTH paths" \
 # empty-compares-equal shape as the iter-62 tsh parse. Prove the call EXISTS
 # before comparing its position.
 assert "podman prunes before the fast-path exit" \
-    "[[ \$(nocomment $PODMAN_FETCHER | grep -cE '^[[:space:]]+prune_old_versions[[:space:]]*\$') -eq 1 ]] && [[ \$(nocomment $PODMAN_FETCHER | grep -nE '^[[:space:]]+prune_old_versions[[:space:]]*\$' | head -1 | cut -d: -f1) -lt \$(nocomment $PODMAN_FETCHER | grep -n 'exit 0' | head -1 | cut -d: -f1) ]]"
+    "[[ \$(nocomment $PODMAN_FETCHER | grep -cE '^[[:space:]]+fb_prune_versions[[:space:]]') -eq 1 ]] && [[ \$(nocomment $PODMAN_FETCHER | grep -nE '^[[:space:]]+fb_prune_versions[[:space:]]' | head -1 | cut -d: -f1) -lt \$(nocomment $PODMAN_FETCHER | grep -n 'exit 0' | head -1 | cut -d: -f1) ]]"
 # The generated setup script must itself be valid bash. Extract the quoted-heredoc
 # body (between the `<<'SETUP_EOF'` open line and the bare `SETUP_EOF` close) and
 # bash -n it, so a typo in the generated helper fails here, not at the user's sudo.
@@ -2650,7 +2748,9 @@ assert "ghostty fetcher gates on a display"         "grep -q 'require_display_or
 assert "ghostty fetcher never CALLS install_bin"    "! grep -qE '^[[:space:]]*install_bin[[:space:]]' $GH_FETCHER"
 assert "ghostty fetcher installs a versioned image" "grep -q 'BIN_NAME}-\${VERSION}.AppImage' $GH_FETCHER"
 assert "ghostty fetcher has a no-redownload path"   "grep -q 'already installed' $GH_FETCHER"
-assert "ghostty fetcher prunes old versions"        "grep -q 'pruned old version' $GH_FETCHER"
+# INVERTED phase 4: the "pruned old version" line now belongs to the library, so
+# grepping the SLOT for it would fail while the behaviour is intact. Pin the call.
+assert "ghostty fetcher prunes old versions"        "nocomment $GH_FETCHER | grep -q 'fb_prune_versions '"
 assert "ghostty fetcher carries a no-FUSE fallback" "grep -q 'APPIMAGE_EXTRACT_AND_RUN' $GH_FETCHER"
 assert "ghostty fetcher probes for FUSE"            "grep -q '/dev/fuse' $GH_FETCHER"
 # Pattern extraction keeps this to ~4 KB; a bare --appimage-extract unpacks 153 MB.
@@ -3318,14 +3418,21 @@ assert "tsh and tctl share one versioned payload directory" \
 # would accept. Staging beside the final path makes the publish an atomic
 # same-filesystem rename(2). This is the assert that keeps High 4 of the
 # 2026-09-05 review from being undone by a "tidier" refactor.
-assert "tsh staging directory is under APP_DIR, not FB_TMP" \
-    "nocomment $TSH_FETCHER | grep -qF 'STAGE=\"\${PAYLOAD_DIR}.new.\$\$\"'"
+# INVERTED phase 4: this slot's staging rule became the shared one. The slot no
+# longer spells the path itself; fb_stage_payload does, and fb_publish_payload
+# REFUSES a stage that is not beside its destination — which is a stronger
+# guarantee than this grep ever was, and it now covers slots 16 and 24 too.
+assert "tsh stages through the shared helper" \
+    "nocomment $TSH_FETCHER | grep -q 'fb_stage_payload '"
 assert "tsh fetcher never moves a payload out of FB_TMP" \
     "[[ -z \$(nocomment $TSH_FETCHER | grep -E '^[[:space:]]*mv .*FB_TMP') ]]"
 # `mv dir existing-dir` moves INTO the target instead of replacing it, so the
 # target must be cleared first. ORDERING assert on stripped source.
-assert "tsh fetcher clears the payload dir before the atomic move" \
-    "[[ \$(nocomment $TSH_FETCHER | grep -n 'rm -rf \"\$PAYLOAD_DIR\"' | tail -1 | cut -d: -f1) -lt \$(nocomment $TSH_FETCHER | grep -n 'mv \"\$STAGE\" \"\$PAYLOAD_DIR\"' | head -1 | cut -d: -f1) ]]"
+# INVERTED phase 4: the rm-then-mv, and the nesting hazard it guards, moved into
+# fb_publish_payload. Asserted behaviourally on the library instead — see
+# "publishing over an existing payload replaces it rather than nesting".
+assert "tsh publishes through the shared helper" \
+    "nocomment $TSH_FETCHER | grep -q 'fb_publish_payload '"
 # tail -1, not head -1: the FAST path symlinks first (line ~219) and is allowed
 # to, because it has already probed both binaries. What must not be reordered is
 # the INSTALL path's gate, so compare against the last ln -sfn. Slot 24's assert
@@ -3338,7 +3445,7 @@ assert "tsh fetcher verifies before it symlinks" \
 # strand the old payload (234 MB) forever. Same reasoning as slot 24's prune,
 # with the migration added because this slot HAS a pre-versioned predecessor.
 assert "tsh prunes from both the fast path and the install path" \
-    "[[ \$(nocomment $TSH_FETCHER | grep -cE '^[[:space:]]*prune_old_versions[[:space:]]') -ge 2 ]]"
+    "[[ \$(nocomment $TSH_FETCHER | grep -cE '^[[:space:]]*fb_prune_versions[[:space:]]') -ge 2 ]]"
 assert "tsh drops the legacy unversioned payload from both paths" \
     "[[ \$(nocomment $TSH_FETCHER | grep -cE '^[[:space:]]*remove_legacy_unversioned\$') -ge 2 ]]"
 assert "tsh legacy cleanup names both bare payload paths" \
@@ -3510,7 +3617,7 @@ assert "proxmox-mcp payload path carries the version" \
 # Both paths prune: a run interrupted between download and prune would otherwise
 # strand the old payload forever, since every later run takes the fast path.
 assert "proxmox-mcp prunes from both the fast path and the install path" \
-    "[[ \$(nocomment $PMX_FETCHER | grep -cE '^[[:space:]]*prune_old_versions[[:space:]]') -ge 2 ]]"
+    "[[ \$(nocomment $PMX_FETCHER | grep -cE '^[[:space:]]*fb_prune_versions[[:space:]]') -ge 2 ]]"
 assert "proxmox-mcp verifies before it symlinks" \
     "[[ \$(nocomment $PMX_FETCHER | grep -n 'verification failed' | head -1 | cut -d: -f1) -lt \$(nocomment $PMX_FETCHER | grep -n 'ln -sfn' | tail -1 | cut -d: -f1) ]]"
 

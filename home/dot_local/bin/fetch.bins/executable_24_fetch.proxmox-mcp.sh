@@ -73,14 +73,6 @@ ARCH="$(fb_arch)"    # amd64 | arm64  — likewise
 # a side effect of installing, but a run interrupted between download and prune
 # would otherwise strand the old payload forever, since every later run takes
 # the fast path and never reaches this.
-prune_old_versions() {
-    local keep="$1" old
-    for old in "${APP_DIR}/${BIN_NAME}"-*; do
-        [[ -e "$old" && "$old" != "$keep" ]] || continue
-        rm -f "$old"
-        echo "  pruned old version: $(basename "$old")"
-    done
-}
 
 TAG_NAME="$(gh_latest_tag "$REPO")"
 VERSION="${TAG_NAME#v}"
@@ -93,7 +85,7 @@ PAYLOAD="${APP_DIR}/${BIN_NAME}-${VERSION}"
 if [[ -x "$PAYLOAD" ]] && "$PAYLOAD" --help >/dev/null 2>&1; then
     echo "proxmox-mcp $VERSION already installed; symlink ensured."
     ln -sfn "$PAYLOAD" "${BIN_DIR}/${BIN_NAME}"
-    prune_old_versions "$PAYLOAD"
+    fb_prune_versions "$PAYLOAD" "" "${BIN_NAME}-*"
     exit 0
 fi
 
@@ -101,8 +93,14 @@ fi
 ASSET_URL="$(gh_asset_url "$REPO" \
     '. == ("proxmox-mcp_" + $os + "_" + $arch)' "$ARCH" "$OS")"
 
+PMCP_PREV="$(fb_prev_payload "$BIN_NAME")"
+
 echo "→ Downloading proxmox-mcp $VERSION (${OS}/${ARCH}, ~9.5 MB)..."
-TMP_BIN="${FB_TMP}/${BIN_NAME}"
+# Staged beside the payload, not in FB_TMP: that directory is tmpfs while
+# APP_DIR is not, so the old `mv -f` out of it was copy-then-unlink rather than
+# an atomic rename. fb_publish_payload refuses a cross-filesystem stage.
+TMP_BIN="$(fb_stage_payload "$PAYLOAD")"
+trap 'rm -f "$TMP_BIN"; rm -rf "$FB_TMP"' EXIT
 gh_download "$ASSET_URL" "$TMP_BIN"
 chmod +x "$TMP_BIN"
 
@@ -114,12 +112,12 @@ if ! "$TMP_BIN" --help >/dev/null 2>&1; then
 fi
 
 # Place the verified binary at its versioned path, then link.
-mkdir -p "$APP_DIR"
-mv -f "$TMP_BIN" "$PAYLOAD"
+fb_publish_payload "$TMP_BIN" "$PAYLOAD"
+trap 'rm -rf "$FB_TMP"' EXIT
 chmod +x "$PAYLOAD"
 ln -sfn "$PAYLOAD" "${BIN_DIR}/${BIN_NAME}"
 
-prune_old_versions "$PAYLOAD"
+fb_prune_versions "$PAYLOAD" "$PMCP_PREV" "${BIN_NAME}-*"
 
 echo "Installed proxmox-mcp ${VERSION} (${OS}/${ARCH}) -> ${BIN_DIR}/${BIN_NAME}"
 echo "  note: needs PROXMOX_API_URL, PROXMOX_TOKEN_ID and PROXMOX_TOKEN_SECRET;"

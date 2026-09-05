@@ -134,6 +134,36 @@ Key `_lib.sh` helpers:
   - Cache hits test `-s`, not `-e`, and a curl that exits 0 having written
     nothing is a hard error — otherwise an empty file is served as a hit forever
     and `jq` fails several frames from the cause.
+- `fb_stage_payload final` / `fb_publish_payload stage final` — the versioned
+  slots' staging rule, shared. Stage BESIDE the destination inside `~/.local/apps`
+  and the publish is a same-filesystem `rename(2)`; stage in `$FB_TMP` and it is
+  copy-then-unlink, because that is tmpfs on a normal Linux box, so an
+  interruption can leave a half-written payload live. Slot 22 had this right;
+  slots 16 and 24 both moved out of `$FB_TMP`.
+  - `fb_publish_payload` **refuses** a stage that is not beside its destination,
+    which turns a silent degradation into a loud one, and `rm -rf`s the target
+    before the move because `mv dir existing-dir` moves the source INTO the
+    target rather than replacing it — burying the new payload one level down and
+    leaving the broken one live.
+  - `fb_stage_payload` deliberately does **not** create the path: a tree caller
+    wants to `mkdir` it and untar into it, while a single-file caller wants
+    `curl -o` to create it, and `curl -o` fails outright on an existing directory.
+  - This is **not** the `install_versioned_bin` the plan sketched. The six
+    payload shapes are a toolchain tree with a `bin/` subdir, a runtime tree, a
+    whole userland tree with generated configs, a bare AppImage, a directory of
+    two binaries, and a single bare binary — and their fast paths do different
+    extra work (terminfo and a desktop entry, config regeneration, a legacy
+    migration). A helper that also derived the payload path and did the linking
+    would need about five callbacks, which is a framework, not an abstraction.
+    Because the CALLER supplies the path, slot 04's prefix-less `go1.26.5` costs
+    nothing and does **not** need renaming to `go-1.26.5`.
+- `fb_prev_payload bin [suffix]` — the payload the PATH symlink currently
+  resolves to, or nothing. Call it BEFORE relinking; it is what gets passed as
+  `fb_prune_versions`' `<spare>`. The `suffix` is the part below the payload root
+  (`""` for proxmox-mcp and ghostty, `/bin/nvim`, `/bin/go`, `/tsh`,
+  `/usr/local/bin/podman`). Its `-x` guard is load-bearing: GNU `readlink -f`
+  resolves a path whose final component does not exist and prints it anyway, so
+  without it a fresh machine yields a "previous payload" of `$HOME/.local`.
 - `fb_pin tool` — the one way to say "hold this tool at this version".
   `FB_PIN_<TOOL>=x.y.z`, with the tool name upper-cased and `-` mapped to `_`
   (`tree-sitter` → `FB_PIN_TREE_SITTER`), so the hyphenated slots are pinnable at

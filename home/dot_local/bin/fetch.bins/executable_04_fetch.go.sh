@@ -79,37 +79,28 @@ fi
 # that replaced it is `rm -rf` on files a running process may still lazily load,
 # and POSIX keeps already-open files alive so nothing fails at the moment of
 # deletion — it fails later, intermittently, and not under test.
-GO_PREV_DIR=""
-_prev_bin="$(readlink -f "${BIN_DIR}/go" 2>/dev/null || true)"
-# The -x test is NOT redundant with the case match. GNU `readlink -f` resolves a
-# path whose final component does not exist and prints it anyway, so on a machine
-# with no prior install this yielded "$HOME/.local/bin/go", matched the pattern,
-# and left PREV_DIR = "$HOME/.local" — a variable whose name claims "the previous
-# payload" while holding the parent of BIN_DIR. Harmless as a SPARE, since a
-# spare is only ever compared and never deleted, but false, and one refactor away
-# from being passed somewhere that does delete. BSD readlink differs again on a
-# missing path, so the guard is what makes both platforms agree.
-if [[ -n "$_prev_bin" && -x "$_prev_bin" ]]; then
-    case "$_prev_bin" in
-        */bin/go) GO_PREV_DIR="${_prev_bin%/bin/go}" ;;
-    esac
-fi
-unset _prev_bin
-
-# Remove any partial/old extraction of this version dir before re-extracting.
-rm -rf "$VERSION_DIR"
+GO_PREV_DIR="$(fb_prev_payload go /bin/go)"
 
 TARBALL="${FB_TMP}/go.tar.gz"
 gh_download "$ASSET_URL" "$TARBALL"  # reuses helper (works for any URL)
 
-mkdir -p "$VERSION_DIR"
-tar -C "$VERSION_DIR" -xzf "$TARBALL" --strip-components=1
+# Extract into a staging dir BESIDE the payload, never straight into it: a tar
+# that dies partway used to leave a half-populated toolchain at the live path,
+# which the next run then had to detect and re-extract. Staging inside APP_DIR
+# keeps the publish a same-filesystem rename.
+STAGE="$(fb_stage_payload "$VERSION_DIR")"
+trap 'rm -rf "$STAGE"; rm -rf "$FB_TMP"' EXIT
+mkdir -p "$STAGE"
+tar -C "$STAGE" -xzf "$TARBALL" --strip-components=1
 
-# Verify in place (GOROOT = $VERSION_DIR) before linking.
-if ! "$GO_BIN" version >/dev/null 2>&1; then
-    echo "Error: extracted go is not runnable at $GO_BIN" >&2
+# Verify the STAGED tree, before it is published (GOROOT is the tree itself).
+if ! "${STAGE}/bin/go" version >/dev/null 2>&1; then
+    echo "Error: extracted go is not runnable at ${STAGE}/bin/go" >&2
     exit 1
 fi
+
+fb_publish_payload "$STAGE" "$VERSION_DIR"
+trap 'rm -rf "$FB_TMP"' EXIT
 link_go
 fb_prune_versions "$VERSION_DIR" "$GO_PREV_DIR" 'go1.*'
 

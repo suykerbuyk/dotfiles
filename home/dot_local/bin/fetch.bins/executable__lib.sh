@@ -410,6 +410,99 @@ fb_pin() {
 }
 
 # ----------------------------------------------------------------------
+# Versioned payload: staging and atomic publish
+# ----------------------------------------------------------------------
+#   fb_stage_payload   <final>          -> prints "<final>.new.$$", cleared
+#   fb_publish_payload <stage> <final>  -> replaces <final> with <stage>
+#
+# This is slot 22's staging rule, extracted so the other versioned slots stop
+# each getting it slightly wrong. It is deliberately NOT the "install_versioned
+# _bin" the plan sketched: the six payload shapes are a toolchain tree with a
+# bin/ subdir, a runtime tree, a whole userland tree with generated configs, a
+# bare AppImage file, a directory of two binaries, and a single bare binary —
+# and their fast paths do different extra work (terminfo and a desktop entry,
+# config regeneration, a legacy-layout migration). A helper that also derived
+# the payload path and did the linking would need about five callbacks, which is
+# a framework rather than an abstraction. What is genuinely common, and was
+# genuinely wrong in three of the six, is the publish.
+#
+# A consequence worth stating, because it settles an open question: since the
+# CALLER supplies the final path, slot 04's prefix-less `go1.26.5` costs nothing
+# and does not need renaming to `go-1.26.5`. Uniform naming only mattered for a
+# helper that derived the path; this one does not.
+#
+# THE RULE. Stage inside $APP_DIR, never in $FB_TMP. FB_TMP is mktemp -d, which
+# lands on tmpfs on a normal Linux box, while APP_DIR is on the root filesystem:
+# `mv` across that boundary is copy-then-unlink, not rename(2), so an interrupted
+# publish can leave a half-written payload at the live path. Staging beside the
+# destination makes the move a same-filesystem rename, which is atomic.
+# Slots 16 and 24 both moved out of FB_TMP; only slot 22 got this right.
+fb_stage_payload() {
+    local final="$1" stage
+
+    if [[ -z "$final" ]]; then
+        echo "Error: fb_stage_payload needs a destination payload path." >&2
+        exit 1
+    fi
+
+    # Beside the destination, so the publish below is a rename within one
+    # filesystem. $$ scopes it to this process, so two fetchers racing on the
+    # same tool cannot scribble on each other's staging area.
+    stage="${final}.new.$$"
+
+    # APP_DIR may not exist yet on a fresh machine, and the caller is about to
+    # write into this path rather than into APP_DIR directly.
+    mkdir -p "$(dirname "$final")"
+    rm -rf "$stage"
+
+    # Deliberately NOT created here: a tree caller wants to `mkdir` it and untar
+    # into it, while a single-file caller wants curl to CREATE it — and curl -o
+    # fails outright if the path is already a directory.
+    printf '%s' "$stage"
+}
+
+fb_publish_payload() {
+    local stage="$1" final="$2"
+
+    if [[ -z "$stage" || -z "$final" ]]; then
+        echo "Error: fb_publish_payload needs <stage> <final>." >&2
+        exit 1
+    fi
+    if [[ ! -e "$stage" ]]; then
+        echo "Error: nothing staged at ${stage}; refusing to publish." >&2
+        exit 1
+    fi
+
+    # The guard that catches the actual bug this helper exists for. A stage in
+    # FB_TMP is on another filesystem, so the move would silently degrade to
+    # copy-then-unlink. Compare directories rather than device numbers: `stat`
+    # has no portable spelling (GNU -c vs BSD -f), and "beside the destination"
+    # is the property actually wanted.
+    if [[ "$(dirname "$stage")" != "$(dirname "$final")" ]]; then
+        echo "Error: staged payload is not beside its destination." >&2
+        echo "       stage: ${stage}" >&2
+        echo "       final: ${final}" >&2
+        echo "       Stage inside \$APP_DIR (fb_stage_payload does this); a move" >&2
+        echo "       across a filesystem boundary is copy-then-unlink, not an" >&2
+        echo "       atomic rename, and can publish a half-written payload." >&2
+        exit 1
+    fi
+
+    # rm -rf first: `mv dir existing-dir` moves the source INTO the target
+    # rather than replacing it, which would bury the new payload one level down
+    # (teleport-18.10.1/teleport-18.10.1.new.4242) and leave the broken one
+    # live. The only way to reach here with the target present is a payload that
+    # already failed its verification probe, so removing it is right.
+    rm -rf "$final"
+    mv "$stage" "$final"
+
+    if [[ ! -e "$final" ]]; then
+        echo "Error: publish failed; nothing at ${final}." >&2
+        exit 1
+    fi
+}
+
+# ----------------------------------------------------------------------
 # Shared version prune
 # ----------------------------------------------------------------------
 #   fb_prune_versions <keep> <spare|""> <glob> [glob...]
@@ -445,6 +538,44 @@ fb_pin() {
 #
 # Best-effort by contract: it warns and returns 0 rather than failing, because a
 # prune must never abort a fetcher whose install already succeeded.
+#   fb_prev_payload <binname> [suffix]
+#
+# Prints the payload the PATH symlink currently resolves to, or nothing. Call it
+# BEFORE relinking: that is the payload this run is about to supersede, and it is
+# what gets passed as fb_prune_versions' <spare>.
+#
+# <suffix> is the part of the resolved path BELOW the payload root, because the
+# symlink rarely points at the payload itself:
+#   proxmox-mcp  ""                       the payload IS the binary
+#   ghostty      ""                       likewise (an AppImage file)
+#   nvim         "/bin/nvim"
+#   go           "/bin/go"
+#   tsh          "/tsh"
+#   podman       "/usr/local/bin/podman"
+#
+# The -x test is NOT redundant with the suffix match. GNU `readlink -f` resolves
+# a path whose final component does not exist and prints it anyway, so on a
+# machine with no prior install this returned "$HOME/.local/bin/<tool>", matched
+# the pattern, and yielded a "previous payload" of "$HOME/.local" — a value whose
+# name lies. Harmless as a spare, since a spare is only compared and never
+# deleted, but one refactor from being passed somewhere that does delete. BSD
+# readlink differs again on a missing path; the guard makes both agree.
+fb_prev_payload() {
+    local bin="$1" suffix="${2:-}" resolved
+
+    resolved="$(readlink -f "${BIN_DIR}/${bin}" 2>/dev/null || true)"
+    [[ -n "$resolved" && -x "$resolved" ]] || return 0
+
+    if [[ -z "$suffix" ]]; then
+        printf '%s' "$resolved"
+        return 0
+    fi
+    case "$resolved" in
+        *"$suffix") printf '%s' "${resolved%"$suffix"}" ;;
+    esac
+    return 0
+}
+
 fb_prune_versions() {
     local keep="$1" spare="$2"; shift 2
     local pat old n=0

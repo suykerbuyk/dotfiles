@@ -190,20 +190,12 @@ PAYLOAD_DIR="${APP_DIR}/teleport-${VERSION}"
 #
 # The glob also catches an abandoned staging directory (teleport-<ver>.new.$$)
 # left by a crashed run, which is exactly what should happen to it.
-prune_old_versions() {
-    local keep="$1" old
-    for old in "${APP_DIR}/teleport"-*; do
-        [[ -d "$old" && "$old" != "$keep" ]] || continue
-        rm -rf "$old"
-        echo "  pruned old version: $(basename "$old")"
-    done
-}
 
 # MIGRATION, and it must run on every pass, not only on an install.
 #
 # Before the versioned layout this slot installed through install_bin, which
 # placed the payloads at the BARE paths ${APP_DIR}/tsh and ${APP_DIR}/tctl.
-# Those names match no teleport-* glob, so prune_old_versions cannot see them
+# Those names match no teleport-* glob, so fb_prune_versions cannot see them
 # and they would sit there forever: 234 MB measured (tsh 127.6 MB, tctl
 # 105.8 MB). Every machine that ran this fetcher before the change has a pair.
 #
@@ -236,10 +228,12 @@ if [[ -x "${PAYLOAD_DIR}/tsh" && -x "${PAYLOAD_DIR}/tctl" ]] \
     echo "tsh/tctl ${VERSION} already installed and matching ${PROXY} — nothing to do."
     ln -sfn "${PAYLOAD_DIR}/tsh"  "${BIN_DIR}/tsh"
     ln -sfn "${PAYLOAD_DIR}/tctl" "${BIN_DIR}/tctl"
-    prune_old_versions "$PAYLOAD_DIR"
+    fb_prune_versions "$PAYLOAD_DIR" "" 'teleport-*'
     remove_legacy_unversioned
     exit 0
 fi
+
+TSH_PREV_DIR="$(fb_prev_payload tsh /tsh)"
 
 ASSET_URL="https://cdn.teleport.dev/teleport-v${VERSION}-${OS}-${ARCH}-bin.tar.gz"
 
@@ -250,9 +244,10 @@ gh_download "$ASSET_URL" "$TARBALL"
 # Stage INSIDE $APP_DIR so the final move is a same-filesystem rename(2). See
 # header note 6: FB_TMP is on tmpfs and $APP_DIR is not, so a move out of
 # FB_TMP would be copy-then-unlink and could leave a half-populated payload.
-mkdir -p "$APP_DIR"
-STAGE="${PAYLOAD_DIR}.new.$$"
-rm -rf "$STAGE"
+# This slot's staging rule, now shared: fb_stage_payload places the staging dir
+# beside the payload inside $APP_DIR, and fb_publish_payload refuses any stage
+# that is not, so slots 16 and 24 cannot drift back to moving out of FB_TMP.
+STAGE="$(fb_stage_payload "$PAYLOAD_DIR")"
 mkdir -p "$STAGE"
 trap 'rm -rf "$STAGE"; rm -rf "$FB_TMP"' EXIT
 
@@ -280,17 +275,17 @@ for t in tsh tctl; do
     fi
 done
 
-# Atomic publish. rm -rf first: `mv dir existing-dir` moves the source INTO the
-# target rather than replacing it, and the only way to reach here with the
-# target present is a payload that already failed the fast path's probes.
-rm -rf "$PAYLOAD_DIR"
-mv "$STAGE" "$PAYLOAD_DIR"
+# Atomic publish. The rm-then-mv, and the reason for it, now live in
+# fb_publish_payload: `mv dir existing-dir` moves the source INTO the target
+# rather than replacing it, and the only way to reach here with the target
+# present is a payload that already failed the fast path's probes.
+fb_publish_payload "$STAGE" "$PAYLOAD_DIR"
 trap 'rm -rf "$FB_TMP"' EXIT
 
 ln -sfn "${PAYLOAD_DIR}/tsh"  "${BIN_DIR}/tsh"
 ln -sfn "${PAYLOAD_DIR}/tctl" "${BIN_DIR}/tctl"
 
-prune_old_versions "$PAYLOAD_DIR"
+fb_prune_versions "$PAYLOAD_DIR" "$TSH_PREV_DIR" 'teleport-*'
 remove_legacy_unversioned
 
 echo "Installed Teleport client tools v${VERSION} (pinned to ${PROXY}) -> ${BIN_DIR}/{tsh,tctl}"

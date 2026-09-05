@@ -74,34 +74,27 @@ fi
 # that replaced it is `rm -rf` on files a running process may still lazily load,
 # and POSIX keeps already-open files alive so nothing fails at the moment of
 # deletion — it fails later, intermittently, and not under test.
-NVIM_PREV_DIR=""
-_prev_bin="$(readlink -f "${BIN_DIR}/nvim" 2>/dev/null || true)"
-# The -x test is NOT redundant with the case match. GNU `readlink -f` resolves a
-# path whose final component does not exist and prints it anyway, so on a machine
-# with no prior install this yielded "$HOME/.local/bin/nvim", matched the pattern,
-# and left PREV_DIR = "$HOME/.local" — a variable whose name claims "the previous
-# payload" while holding the parent of BIN_DIR. Harmless as a SPARE, since a
-# spare is only ever compared and never deleted, but false, and one refactor away
-# from being passed somewhere that does delete. BSD readlink differs again on a
-# missing path, so the guard is what makes both platforms agree.
-if [[ -n "$_prev_bin" && -x "$_prev_bin" ]]; then
-    case "$_prev_bin" in
-        */bin/nvim) NVIM_PREV_DIR="${_prev_bin%/bin/nvim}" ;;
-    esac
-fi
-unset _prev_bin
+NVIM_PREV_DIR="$(fb_prev_payload nvim /bin/nvim)"
 
 
 gh_download "$ASSET_URL" "$TARBALL"
-rm -rf "$INSTALL_DIR"
-mkdir -p "$INSTALL_DIR"
-tar -xzf "$TARBALL" -C "$INSTALL_DIR" --strip-components=1
+
+# Staged beside the payload, not extracted straight into it: an interrupted tar
+# otherwise leaves a half-populated VIMRUNTIME at the live path. Same filesystem,
+# so the publish below is a rename.
+STAGE="$(fb_stage_payload "$INSTALL_DIR")"
+trap 'rm -rf "$STAGE"; rm -rf "$FB_TMP"' EXIT
+mkdir -p "$STAGE"
+tar -xzf "$TARBALL" -C "$STAGE" --strip-components=1
 
 # Verify in place (runtime resolves inside $INSTALL_DIR) before linking.
-if ! "$NVIM_BIN" --version >/dev/null 2>&1; then
-    echo "Error: extracted nvim is not runnable at $NVIM_BIN" >&2
+if ! "${STAGE}/bin/nvim" --version >/dev/null 2>&1; then
+    echo "Error: extracted nvim is not runnable at ${STAGE}/bin/nvim" >&2
     exit 1
 fi
+
+fb_publish_payload "$STAGE" "$INSTALL_DIR"
+trap 'rm -rf "$FB_TMP"' EXIT
 link_nvim
 fb_prune_versions "$INSTALL_DIR" "$NVIM_PREV_DIR" 'nvim-*' 'nvim.appimage-*'
 

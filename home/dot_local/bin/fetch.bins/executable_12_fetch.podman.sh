@@ -209,15 +209,6 @@ print_rootless_state() {
 # normal upgrade run prunes as a side effect of installing, but a run interrupted
 # between extraction and this call would otherwise strand the old tree forever,
 # since every later run takes the fast path and never reaches the install path.
-prune_old_versions() {
-    local d
-    for d in "${APP_DIR}"/podman-*; do
-        [[ -d "$d" ]] || continue
-        [[ "$d" == "$VERSION_DIR" ]] && continue
-        echo "  pruning old podman version dir: $d"
-        rm -rf "$d"
-    done
-}
 
 # ------------------------------------------------------------------------------
 # Fast path: this exact version is already extracted and runnable. Re-assert the
@@ -226,35 +217,44 @@ prune_old_versions() {
 if [[ -x "$APP/bin/podman" ]] && "$APP/bin/podman" --version >/dev/null 2>&1; then
     echo "podman $ver already installed; symlink + config ensured -> $APP/bin/podman"
     link_podman
-    prune_old_versions
+    fb_prune_versions "$VERSION_DIR" "" 'podman-*'
     gen_configs
     gen_setup_script
     print_rootless_state
     exit 0
 fi
 
-# Fresh install: remove any partial/old extraction of THIS version dir first.
-rm -rf "$VERSION_DIR"
+PODMAN_PREV_DIR="$(fb_prev_payload podman /usr/local/bin/podman)"
 
 TARBALL="${FB_TMP}/podman.tar.gz"
 gh_download "$ASSET_URL" "$TARBALL"
 
-mkdir -p "$VERSION_DIR"
+# Staged beside the payload rather than extracted into it. This tree matters
+# more than most: gen_configs writes absolute paths INTO the version dir, so a
+# half-extracted userland at the live path is one a later run can wire configs
+# against. Same filesystem, so the publish is a rename.
+STAGE="$(fb_stage_payload "$VERSION_DIR")"
+trap 'rm -rf "$STAGE"; rm -rf "$FB_TMP"' EXIT
+mkdir -p "$STAGE"
 # Top dir podman-linux-<arch>/ wraps usr/ + etc/ + README.md; strip it.
-tar -C "$VERSION_DIR" -xzf "$TARBALL" --strip-components=1
+tar -C "$STAGE" -xzf "$TARBALL" --strip-components=1
 
-# Verify in place — version check only (no info/run; see header).
-if ! "$APP/bin/podman" --version >/dev/null 2>&1; then
-    echo "Error: extracted podman is not runnable at $APP/bin/podman" >&2
+# Verify the STAGED tree — version check only (no info/run; see header).
+if ! "${STAGE}/usr/local/bin/podman" --version >/dev/null 2>&1; then
+    echo "Error: extracted podman is not runnable at ${STAGE}/usr/local/bin/podman" >&2
     exit 1
 fi
+
+fb_publish_payload "$STAGE" "$VERSION_DIR"
+trap 'rm -rf "$FB_TMP"' EXIT
 
 link_podman
 gen_configs
 gen_setup_script
 
-# Only after a successful NEW install: drop other podman-* version dirs.
-prune_old_versions
+# Drop other podman-* version dirs, sparing the one just superseded: this is a
+# whole userland tree and a running container's conmon resolves out of it.
+fb_prune_versions "$VERSION_DIR" "$PODMAN_PREV_DIR" 'podman-*' 
 
 echo "Installed podman $ver (mgoltzsche/podman-static) to $VERSION_DIR"
 echo "  version: $("$APP/bin/podman" --version)"

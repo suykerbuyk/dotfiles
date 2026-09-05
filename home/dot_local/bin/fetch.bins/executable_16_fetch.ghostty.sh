@@ -163,14 +163,6 @@ link_ghostty() {
 # effect of installing, but a run interrupted between download and prune would
 # otherwise strand the old image forever, since every later run takes the fast
 # path and never reaches this.
-prune_old_versions() {
-    local keep="$1" old
-    for old in "${APP_DIR}/${BIN_NAME}"-*.AppImage; do
-        [[ -e "$old" && "$old" != "$keep" ]] || continue
-        rm -f "$old"
-        echo "  pruned old version: $(basename "$old")"
-    done
-}
 
 # ---------------------------------------------------------------------------
 # Resolve the latest release and its asset.
@@ -187,7 +179,7 @@ APPIMAGE="${APP_DIR}/${BIN_NAME}-${VERSION}.AppImage"
 if [[ -x "$APPIMAGE" ]] && "$APPIMAGE" --version >/dev/null 2>&1; then
     echo "ghostty $VERSION already installed; symlink + payloads ensured."
     link_ghostty "$APPIMAGE"
-    prune_old_versions "$APPIMAGE"
+    fb_prune_versions "$APPIMAGE" "" 'ghostty-*.AppImage' 
     install_terminfo "$APPIMAGE"
     install_desktop "$APPIMAGE"
     exit 0
@@ -199,8 +191,16 @@ fi
 ASSET_URL="$(gh_asset_url "$REPO" \
     '. == ("Ghostty-'"$VERSION"'-" + $arch + ".AppImage")' "$ARCH")"
 
+GHOSTTY_PREV="$(fb_prev_payload "$BIN_NAME")"
+
 echo "→ Downloading ghostty $VERSION ($ARCH AppImage, ~48 MB)..."
-TMP_IMG="${FB_TMP}/ghostty.AppImage"
+# Downloaded straight into a staging path BESIDE the payload, not into FB_TMP.
+# FB_TMP is tmpfs and APP_DIR is not, so the old `mv -f` out of FB_TMP was
+# copy-then-unlink rather than rename(2) — a publish that could be interrupted
+# half-written. fb_publish_payload refuses a stage that is not beside its
+# destination, so this cannot silently regress.
+TMP_IMG="$(fb_stage_payload "$APPIMAGE")"
+trap 'rm -f "$TMP_IMG"; rm -rf "$FB_TMP"' EXIT
 gh_download "$ASSET_URL" "$TMP_IMG"
 chmod +x "$TMP_IMG"
 
@@ -219,12 +219,12 @@ if ! "$TMP_IMG" --version >/dev/null 2>&1; then
 fi
 
 # Place the verified image at its versioned path, then link.
-mkdir -p "$APP_DIR"
-mv -f "$TMP_IMG" "$APPIMAGE"
+fb_publish_payload "$TMP_IMG" "$APPIMAGE"
+trap 'rm -rf "$FB_TMP"' EXIT
 chmod +x "$APPIMAGE"
 link_ghostty "$APPIMAGE"
 
-prune_old_versions "$APPIMAGE"
+fb_prune_versions "$APPIMAGE" "$GHOSTTY_PREV" 'ghostty-*.AppImage'
 install_terminfo "$APPIMAGE"
 install_desktop "$APPIMAGE"
 
