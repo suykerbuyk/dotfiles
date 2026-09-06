@@ -927,7 +927,7 @@ if [[ -n "$CHEZMOI" ]]; then
 
     sec "idempotency"
     chz apply --force >/dev/null 2>&1
-    n="$(chz status 2>/dev/null | wc -l)"
+    n="$(chz status 2>/dev/null | wc -l | tr -d ' ')"
     assert "second apply leaves 'chezmoi status' empty" "[[ $n -eq 0 ]]"
 
     # -----------------------------------------------------------------------
@@ -978,9 +978,9 @@ if [[ -n "$CHEZMOI" ]]; then
     # silently changes which line is compared.
     _probe_evid() {
         { printf '=== probe: %s %s\n--- script: %s\n' "$1" "$2" "$3"
-          printf -- '--- raw stdout (%s bytes):\n' "$(wc -c <"$EVID/probe.out")"
+          printf -- '--- raw stdout (%s bytes):\n' "$(wc -c <"$EVID/probe.out" | tr -d ' ')"
           sed 's/^/    /' "$EVID/probe.out"
-          printf -- '\n--- raw stderr (%s bytes):\n' "$(wc -c <"$EVID/probe.err")"
+          printf -- '\n--- raw stderr (%s bytes):\n' "$(wc -c <"$EVID/probe.err" | tr -d ' ')"
           sed 's/^/    /' "$EVID/probe.err"
           printf '\n'
         } >>"$EVID_LOG"
@@ -2898,7 +2898,13 @@ unset _pf _pfile _pb
 # from) FB_PHASE5 is covered without anyone remembering to write asserts for it
 # — the same way fb_require_os's coverage comes free from the per-slot loop.
 FB_PHASE5="$(echo home/dot_local/bin/fetch.bins/executable_{03,05,06,11,13,15,17,18,19,20,21}_fetch.*.sh)"
-assert_eq "phases 5b/5c cover eleven slots" "$(echo $FB_PHASE5 | wc -w)" "11"
+# `| tr -d ' '` is REQUIRED, not decoration: BSD `wc` pads its output with
+# leading whitespace and GNU `wc` on a pipe does not, so a STRING comparison
+# against raw wc output passes on Linux and fails on FreeBSD. Lines 524-525
+# already carry this fix; these asserts shipped without it and were caught by the
+# first FreeBSD run after phase 5. Arithmetic contexts ([[ n -eq 1 ]]) tolerate
+# the padding, which is why most counts in this file are immune.
+assert_eq "phases 5b/5c cover eleven slots" "$(echo $FB_PHASE5 | wc -w | tr -d ' ')" "11"
 for _5f in $FB_PHASE5; do
     _5b="$(basename "$_5f")"
     # NEGATIVE, so comment-stripped: every one of these files now EXPLAINS in its
@@ -2983,7 +2989,7 @@ assert "ripgrep fetcher reclaims its abandoned naming scheme" \
 # Naming them makes the remaining gap visible instead of forgotten, and makes a
 # THIRD slot appearing here a regression rather than a quiet decision.
 assert_eq "install_bin has exactly two remaining callers" \
-    "$(grep -l '^[[:space:]]*install_bin[[:space:]]' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | wc -l)" "2"
+    "$(grep -l '^[[:space:]]*install_bin[[:space:]]' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | wc -l | tr -d ' ')" "2"
 assert_eq "install_bin's remaining callers are slots 08 and 23" \
     "$(grep -l '^[[:space:]]*install_bin[[:space:]]' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | xargs -n1 basename | sort | tr '\n' ' ')" \
     "executable_08_fetch.zed.sh executable_23_fetch.op.sh "
@@ -3027,6 +3033,26 @@ for _fbf in home/dot_local/bin/fetch.bins/executable_[0-9]*.sh; do
     # never match df_os. Pin the vocabulary.
     assert "declares only known OS tokens: $_fbn" \
         "[[ -z \"\$(fbreq 'fb_supported_os '$_fbtool | tr ' ' '\\n' | grep -vxE 'linux|darwin|freebsd|')\" ]]"
+    # A slot DECLARED for FreeBSD must not hardcode a foreign OS token in its
+    # asset selection. The table saying a tool is supported there, while the
+    # fetcher can only ever select a Linux build, is the table and the code
+    # disagreeing — and it fails on a platform this suite is rarely run on.
+    #
+    # fzf did exactly that: OS="$(fb_os)" sat two lines above a filter reading
+    # contains("linux"), computed and never compared to anything (slot 23's dead
+    # OP_FETCH_VERSION shape). On FreeBSD 15.1 it downloaded
+    # fzf-<ver>-linux_amd64.tar.gz, installed a Linux ELF, and the verification
+    # probe rejected it, while upstream had been shipping a freebsd_amd64 tarball
+    # the fetcher never looked at. Measured on vault01, 2026-09-05.
+    #
+    # Comment-stripped, because several of these files DISCUSS platform tokens in
+    # prose. Scoped to FreeBSD-declared slots only: darwin has never been
+    # exercised in this tree, so asserting anything about it would be a claim the
+    # repo has not earned.
+    if fbreq "fb_supported_os $_fbtool" 2>/dev/null | grep -q freebsd; then
+        assert "freebsd-declared slot hardcodes no foreign OS token: $_fbn" \
+            "[[ -z \$(nocomment '$_fbf' | grep -oE '\"(linux|darwin)\"|contains\\(\"(linux|darwin)') ]]"
+    fi
 done
 unset _fbf _fbn _fbtool
 
@@ -4188,7 +4214,11 @@ assert "PROXMOX_ALLOW_DESTRUCTIVE is never set in shipped shell code" \
 # The slot count in the docs drifted silently before (it read 23 while 23 slots
 # existed only by coincidence of nobody adding one). Derive it instead: this is
 # the assert that keeps High 1 of the 2026-09-04 review from recurring.
-_fb_slots=$(ls home/dot_local/bin/fetch.bins/executable_[0-9]*.sh 2>/dev/null | wc -l)
+# Trimmed, and that is load-bearing: this count is interpolated into a grep
+# PATTERN and into the assert's own name, so BSD wc's leading padding produced
+# `currently **      24 slots**` and a failure whose message showed the padding.
+# Latent since it was written -- the last FreeBSD run predates this assert.
+_fb_slots=$(ls home/dot_local/bin/fetch.bins/executable_[0-9]*.sh 2>/dev/null | wc -l | tr -d ' ')
 assert "fetch-bins.md slot count matches the slots on disk ($_fb_slots)" \
     "grep -qF 'currently **$_fb_slots slots**' home/doc/fetch-bins.md"
 unset _fb_slots
@@ -4995,9 +5025,33 @@ unset _f _sb _interp _prog _sb_hard _sb_unres
 # class this suite exists to prevent.
 _sb_seen=$(git ls-files | grep -v nvim-kickstart | while read -r _f; do
     [[ -f "$_f" ]] && head -1 "$_f" 2>/dev/null | grep -q '^#!' && echo x
-done | wc -l)
+done | wc -l | tr -d ' ')
 assert "the shebang census actually scanned files (>= 45)" "[[ $_sb_seen -ge 45 ]]"
 unset _sb_seen _f
+
+# ---------------------------------------------------------------------------
+# The harness's OWN portability: every `wc` capture is trimmed or arithmetic.
+#
+# BSD `wc` pads its output with leading whitespace; GNU `wc` on a pipe does not.
+# A count captured with $( ) and then STRING-compared, or interpolated into a
+# grep pattern, therefore passes on Linux and fails on FreeBSD — a GNU-userland
+# assumption inside the instrument, which is iter 59's "the harness lies" class
+# aimed at the harness itself. Three asserts shipped with it; the first FreeBSD
+# run after phase 5 found all three, one of them latent since before iter 62.
+#
+# Arithmetic contexts ([[ n -eq 1 ]], -ge, -lt) evaluate the padding away, so
+# they are immune and are the preferred form. Anything else must `tr -d ' '`.
+# A census rather than three fixes, because the fix is invisible at the call site
+# and the failure only ever appears on a platform this suite is not usually run on.
+_wc_bare=$(grep -n 'wc -[lwcm]' test-update-user-home-dir.sh \
+    | grep -vE '^[0-9]+:[[:space:]]*#' \
+    | grep -vE 'tr -d|-eq |-ge |-le |-lt |-gt ' || true)
+assert "every wc capture in the harness is trimmed or arithmetic" \
+    "[[ -z \"\$_wc_bare\" ]]"
+# Anti-vacuity: the scan must actually be finding wc call sites to judge.
+assert "the wc portability census actually scanned something" \
+    "[[ \$(grep -c 'wc -[lwcm]' test-update-user-home-dir.sh) -ge 8 ]]"
+unset _wc_bare
 
 # Several scripts print their own header comment block as --help. The SPDX banner
 # sits ABOVE that block, so a naive line-anchored extractor prints the banner and

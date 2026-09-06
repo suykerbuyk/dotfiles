@@ -51,8 +51,23 @@ if fb_versioned_current "$BIN_NAME" "$VERSION" --version; then
     exit 0
 fi
 
-# Asset pattern: fzf-${VERSION}-linux_${arch}.tar.gz
-ASSET_URL="$(gh_asset_url junegunn/fzf 'contains("linux") and contains($arch)' "$ARCH_FOR_FZF" "" "$PIN_TAG")"
+# Asset pattern: fzf-${VERSION}-${os}_${arch}.tar.gz
+#
+# $os IS RESOLVED, not hardcoded, and that is a fix (2026-09-05). This filter
+# read contains("linux") while OS="$(fb_os)" sat two lines above it, computed and
+# never compared to anything — the same dead-value shape as slot 23's
+# OP_FETCH_VERSION. fb_supported_os declares fzf `linux darwin freebsd`, so on
+# FreeBSD the slot downloaded fzf-<ver>-linux_amd64.tar.gz, installed a Linux
+# ELF, and the verification probe rejected it. Upstream ships
+# fzf-<ver>-freebsd_amd64.tar.gz; nothing was ever selecting it. Measured on
+# FreeBSD 15.1 (vault01), where it is the only FreeBSD-declared GitHub slot that
+# hardcoded an OS token — 04, 09 and 13 all resolve theirs.
+#
+# endswith(".tar.gz") is the fd/bat/xh anchor, for the same reason: upstream also
+# publishes fzf_<ver>_<arch>.deb. No .deb carries an OS token today, so the os
+# clause alone excludes them — but that is luck, not a guard.
+ASSET_URL="$(gh_asset_url junegunn/fzf \
+    'endswith(".tar.gz") and contains($os) and contains($arch)' "$ARCH_FOR_FZF" "$OS" "$PIN_TAG")"
 
 TARBALL="${FB_TMP}/fzf.tar.gz"
 gh_download "$ASSET_URL" "$TARBALL"
