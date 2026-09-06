@@ -16,30 +16,75 @@
 # - Idempotent: can be sourced multiple times safely
 # - Non-breaking: only sets if not already functional
 
-# 1Password agent detection — FIRST and unconditional (per user guidance)
-# Only activates on desktops where both the socket and `op` CLI exist.
-# Safe on headless/WSL/servers (neither will be present). Overrides any
-# prior SSH_AUTH_SOCK to prevent hangs with tsh/teleport.
+# A path that is not a socket is unusable whoever set it. Drop it up front so
+# every branch below only has to reason about "unset, or a real socket".
+if [[ -n "${SSH_AUTH_SOCK:-}" && ! -S "$SSH_AUTH_SOCK" ]]; then
+    unset SSH_AUTH_SOCK
+fi
+
+# The socket the shell ARRIVED with wins over anything selected below.
+#
+# This block used to sit BELOW the 1Password one, which made 1Password an
+# unconditional override rather than a default: on any machine with the app
+# installed, `ssh -A` had its forwarded agent silently replaced by a local agent
+# that may be locked. Measured — an inherited, live /run/user/1000/openssh_agent
+# came back as ~/.1password/agent.sock. The guard was unreachable, so the header's
+# "only sets if not already functional" was false for the file's whole life, and
+# agent forwarding got dismissed twice on evidence this bug produced.
+#
+# A forwarded socket is also the one agent we could not recreate if we guessed
+# wrong, and repointing it fails three commands later, nowhere near this file.
+#
+# Two paths are exempt, because THIS FILE or its env-layer twin put them there,
+# not the session: the 1Password socket and the systemd user socket that
+# ~/.config/shell/env.sh sets before any rc file runs. Falling through for those
+# costs nothing — the blocks below re-select the identical socket — and it is what
+# keeps a 1Password desktop preferring 1Password. It also means the probe never
+# runs on the desktop fast path (zero forks) and never asks a LOCKED 1Password
+# vault to enumerate identities.
+case "${SSH_AUTH_SOCK:-}" in
+"" | */.1password/agent.sock | "${XDG_RUNTIME_DIR:-/nonexistent}/openssh_agent")
+    : # nothing of the session's own to defend; fall through to selection
+    ;;
+*)
+    # -S is true for the stale inode a dead agent leaves behind, so ask. Same rc
+    # convention as the stale-socket branch below: ssh-add exits 2 for "cannot
+    # connect", 1 for "connected, no identities", 0 for "has identities" — test
+    # for NOT 2. Bounded where timeout(1) exists, because a wedged agent must not
+    # wedge every new shell. Two branches rather than a "$TIMEOUT" prefix variable
+    # because zsh does not word-split an unquoted expansion and would look for a
+    # command literally named "timeout 2".
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 2 ssh-add -l >/dev/null 2>&1
+        _agent_rc=$?
+    else
+        ssh-add -l >/dev/null 2>&1
+        _agent_rc=$?
+    fi
+    # 127 (no ssh-add) and 124 (timed out) are both "not 2", deliberately: when we
+    # cannot answer the question, keep what we were given. Fail open — discarding a
+    # forwarded agent we merely failed to probe is the worse error.
+    if [[ $_agent_rc -ne 2 ]]; then
+        unset _agent_rc
+        export SSH_AUTH_SOCK
+        return 0 2>/dev/null || true
+    fi
+    unset _agent_rc
+    # Nothing answered. Drop it rather than leave a corpse exported, which would
+    # make ssh fail on it instead of falling back to a key file.
+    unset SSH_AUTH_SOCK
+    ;;
+esac
+
+# 1Password agent — the DEFAULT for a shell that arrived with no agent of its own
+# (the guard above already returned if one did). Desktop-only: both the socket and
+# the `op` CLI must exist, so headless/WSL/FreeBSD skip it. Sets
+# TELEPORT_USE_LOCAL_SSH_AGENT because tsh hangs against this particular agent.
 OP_AGENT_SOCK="${HOME}/.1password/agent.sock"
 if [[ -S "$OP_AGENT_SOCK" ]] && command -v op >/dev/null 2>&1; then
     export SSH_AUTH_SOCK="$OP_AGENT_SOCK"
     export TELEPORT_USE_LOCAL_SSH_AGENT=false
-    # Optional: ensure 1Password app is running (non-blocking)
-    true
     return 0 2>/dev/null || true
-fi
-
-# Safety / Init style from _lib.sh (early guard, no-op if already good)
-# (1Password check above already returned if applicable)
-if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
-    # Existing sock — quick validation (dry-run style check)
-    if [[ -S "$SSH_AUTH_SOCK" ]]; then
-        # Already have a working agent socket (systemd, keychain, manual)
-        # Idempotent: do nothing
-        return 0 2>/dev/null || true  # works in both bash/zsh
-    fi
-    # Sock path exists but not a socket — unset to allow fallback (rare)
-    unset SSH_AUTH_SOCK
 fi
 
 # Prefer systemd user socket (from the new ssh-agent.socket unit)
@@ -50,7 +95,18 @@ fi
 # a fork per shell for a value the shell already had. It fired on exactly the
 # machines with no XDG_RUNTIME_DIR to short-circuit it first — headless boxes and
 # FreeBSD, where there is no systemd socket to find at the end of it.
-SYSTEMD_SOCK="${XDG_RUNTIME_DIR:-${TMPDIR:-/run/user/${UID:-$(id -u)}}}/openssh_agent"
+# 🔴 NOT $TMPDIR. The old expression was
+#     ${XDG_RUNTIME_DIR:-${TMPDIR:-/run/user/${UID}}}/openssh_agent
+# so with XDG_RUNTIME_DIR unset and TMPDIR set — cron, a container, macOS, CI —
+# it resolved to $TMPDIR/openssh_agent. With TMPDIR=/tmp that is a PREDICTABLE
+# name in a WORLD-WRITABLE directory that another local user can pre-create, and
+# this file accepts it on `-S` alone. Measured exploitable: a foreign socket
+# placed there was exported as SSH_AUTH_SOCK. It is the exact attack the comment
+# at the DF_AGENT_SOCK block below forbids, and the harness asserted against for
+# DF_AGENT_* but never for this variable.
+# The systemd socket only ever lives under XDG_RUNTIME_DIR, so the fallback bought
+# nothing: an unreachable sentinel is the correct expression.
+SYSTEMD_SOCK="${XDG_RUNTIME_DIR:-/nonexistent}/openssh_agent"
 if [[ -S "$SYSTEMD_SOCK" ]]; then
     export SSH_AUTH_SOCK="$SYSTEMD_SOCK"
     # Optional: ensure ssh-agent service is started if socket active
@@ -147,13 +203,26 @@ if [[ -z "${SSH_AUTH_SOCK:-}" ]] && [[ -d "$DF_AGENT_DIR" ]] && command -v ssh-a
 fi
 
 # Final guard: if we have a sock now, ensure it's exported and valid
+#
+# 🔴 NO `ssh-add -q` HERE. This block used to end with "if the agent holds no
+# identities, try adding some", which ran on every freshly spawned agent — that
+# agent is empty by construction, so the branch was guaranteed.
+#
+# `ssh-add` with no argument does NOT resolve ~/.ssh through $HOME. It uses
+# getpwuid(), so it reads the PASSWD user's key regardless of the environment:
+# measured, `env -i HOME=<sandbox> ssh-add -q` prompted for the real
+# /home/johns/.ssh/id_ed25519 and ignored the sandbox key entirely. Two
+# consequences, both bad. On a tty it BLOCKS on a passphrase prompt at shell
+# startup — `2>/dev/null` suppresses the error, never the prompt, because
+# readpassphrase writes to /dev/tty (measured: rc=124 against a held-open pty).
+# And in the test harness it reached outside the sandbox into the developer's
+# real key on every run.
+#
+# Loading identities is a deliberate, on-demand act, not something an rc fragment
+# does behind the user's back. Deleting the branch also drops a second `ssh-add -l`
+# fork against a socket already probed a few lines above.
 if [[ -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]]; then
     export SSH_AUTH_SOCK
-    # Optional: add identities if none loaded (non-destructive)
-    if ! ssh-add -l >/dev/null 2>&1; then
-        # Only attempt add if no keys listed; don't prompt
-        ssh-add -q 2>/dev/null || true
-    fi
 fi
 
 # End of script — always succeeds (non-breaking)

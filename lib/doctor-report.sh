@@ -136,6 +136,65 @@ df_doctor_report() {
 		printf '  %-9s %-5s %s\n' 'tool-init' 'n/a' 'no stamp (non-interactive shell)'
 	fi
 
+	# Which ssh-agent did this environment actually select, and does it answer?
+	#
+	# There was no row for this, and that is why an agent outage read as a broken
+	# vault for an afternoon: every failure in this area is silent. Two layers pick
+	# the socket independently — env.sh for every shell, bashrc.d/10-ssh-agent.sh
+	# for interactive ones — so "which agent am I using" genuinely is not something
+	# a user can answer by reading one file.
+	#
+	# REACHABILITY, never signability. `ssh-add -l` answers instantly even against
+	# a LOCKED 1Password agent (measured: rc 0, 13 identities listed). `ssh-add -T`
+	# is the one that queues a GUI approval and blocks indefinitely on a display
+	# nobody is watching — so it must never appear in a health report. What this row
+	# can prove is that a socket exists and something answers on it; whether that
+	# something will consent to sign is not knowable without risking the hang.
+	#
+	# Bounded anyway, where timeout(1) exists: a socket that listen()s but never
+	# accepts makes `ssh-add -l` block forever, and doctor must degrade rather than
+	# hang. Same posture as mnt.vault.sh's probe.
+	_agent_sock=${SSH_AUTH_SOCK:-}
+	if [ -z "${_agent_sock}" ]; then
+		printf '  %-9s %-5s %s\n' 'agent' 'n/a' \
+			'SSH_AUTH_SOCK unset — no agent in this environment'
+	elif [ ! -S "${_agent_sock}" ]; then
+		printf '  %-9s %-5s %s\n' 'agent' 'MISS' \
+			"SSH_AUTH_SOCK names a non-socket: ${_agent_sock}"
+	elif ! df_have ssh-add; then
+		printf '  %-9s %-5s %s\n' 'agent' 'n/a' \
+			"socket present but no ssh-add on PATH: ${_agent_sock}"
+	else
+		case "${_agent_sock}" in
+		*/.1password/agent.sock) _agent_via='1Password app' ;;
+		*/openssh_agent)         _agent_via='systemd ssh-agent.socket' ;;
+		*/ssh-agent-*.sock)      _agent_via='plain ssh-agent (rc layer)' ;;
+		/tmp/ssh-*/agent.*)      _agent_via='forwarded over ssh' ;;
+		*/.keychain/*)           _agent_via='keychain' ;;
+		*)                       _agent_via='unrecognised origin' ;;
+		esac
+		if df_have timeout; then
+			_agent_out=$(SSH_AUTH_SOCK="${_agent_sock}" timeout 5 ssh-add -l 2>/dev/null)
+		else
+			_agent_out=$(SSH_AUTH_SOCK="${_agent_sock}" ssh-add -l 2>/dev/null)
+		fi
+		_agent_rc=$?
+		# BSD wc pads; trim at the point of capture or a string compare skews.
+		_agent_n=$(printf '%s\n' "${_agent_out}" | grep -c '^[0-9]' | tr -d ' ')
+		case ${_agent_rc} in
+		0) printf '  %-9s %-5s %s\n' 'agent' 'ok' \
+			"${_agent_n} identities via ${_agent_via}" ;;
+		1) printf '  %-9s %-5s %s\n' 'agent' 'ok' \
+			"no identities loaded — via ${_agent_via}" ;;
+		2) printf '  %-9s %-5s %s\n' 'agent' 'MISS' \
+			"stale socket, nothing answers: ${_agent_sock}" ;;
+		124) printf '  %-9s %-5s %s\n' 'agent' 'MISS' \
+			"${_agent_via} did not answer within 5s: ${_agent_sock}" ;;
+		*) printf '  %-9s %-5s %s\n' 'agent' 'MISS' \
+			"ssh-add exited ${_agent_rc} against ${_agent_via}" ;;
+		esac
+	fi
+
 	# Secrets triad (see ./keys or dotfiles-keys).
 	if [ -r "${HOME}/.keys" ]; then
 		printf '  %-9s %-5s %s\n' 'keys' 'ok' \

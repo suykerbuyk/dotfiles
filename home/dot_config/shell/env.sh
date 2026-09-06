@@ -95,7 +95,20 @@ unset _e
 # ssh-add — is fork-heavy and stays in the rc layer's
 # ~/.config/bashrc.d/10-ssh-agent.sh, whose own fast path returns immediately when
 # we have already set a working socket here.
-if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -S "$XDG_RUNTIME_DIR/openssh_agent" ]; then
+#
+# 🔴 The -z clause is the load-bearing one, and it matters MORE than the rc-layer
+# twin. sshd exports a forwarded SSH_AUTH_SOCK before any rc file runs, and this
+# assignment used to overwrite it unconditionally. For `ssh -A host cmd` the rc
+# layer never runs at all — dot_bashrc returns on the interactivity gate, zsh
+# reaches only zshenv — so THIS line was the only code touching the variable, and
+# it destroyed the forwarded agent every time. Measured: a forwarded socket came
+# back as the local systemd one. Agent forwarding was dismissed twice on evidence
+# this bug produced.
+# Fill a gap, never override a choice.
+# POSIX test primaries only: this file is parsed with `dash -n` and a [[ ]] here
+# is caught by the harness's "empty stderr" assert.
+if [ -z "${SSH_AUTH_SOCK:-}" ] && [ -n "${XDG_RUNTIME_DIR:-}" ] &&
+    [ -S "$XDG_RUNTIME_DIR/openssh_agent" ]; then
     export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/openssh_agent"
 fi
 

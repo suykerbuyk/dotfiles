@@ -284,9 +284,18 @@ KEEP_EVID=0
 # Matched on the SANDBOX PATH, so it can only ever match agents this run created —
 # never the user's real agent. By PID rather than `pkill -f`, because that pattern
 # can match the command line of the shell running it.
+#
+# `.*-a` and not `-a`: pgrep -f matches an unanchored ERE against the command line
+# procps rebuilds from /proc/PID/cmdline, so a literal `ssh-agent -a ` demands that
+# the flag be ADJACENT to the binary name. keychain invokes `ssh-agent -s -a <path>`,
+# and the interposed `-s ` made every keychain-spawned agent invisible to this
+# reaper — 232 of them had accumulated on the developer's box before anyone looked,
+# each holding a socket in an already-deleted $SB. The guarantee this function
+# advertises above is about false POSITIVES; it said nothing about the false
+# negatives it actually had.
 reap_sandbox_agents() {
     local _p
-    for _p in $(pgrep -f "ssh-agent -a $SB" 2>/dev/null); do
+    for _p in $(pgrep -f "ssh-agent .*-a .*$SB" 2>/dev/null); do
         [[ "$_p" == "$$" || "$_p" == "$PPID" ]] && continue
         kill "$_p" 2>/dev/null || true
     done
@@ -1972,6 +1981,45 @@ if [[ -x "$AGT/bin/ssh-agent" && -x "$AGT/bin/bash" ]]; then
     # shell's agent rather than spawn a parallel keyless one.
     sock2="$(agent_probe)"
     assert_eq "a second shell REUSES the first shell's agent" "$sock2" "$sock1"
+
+    # ---- the INHERITED-agent arm -------------------------------------------
+    # `agent_probe` uses `env -i`, so SSH_AUTH_SOCK arrives UNSET and the inherited
+    # arm is never entered by it. That arm had ZERO coverage, and the reuse assert
+    # above passes through a different code path entirely (the DF_AGENT_SOCK stale
+    # check), so it would stay green whether the inherited arm were correct,
+    # inverted, or absent. These probes seed the variable on purpose.
+    inherit_probe() {
+        env -i HOME="$AGT" XDG_RUNTIME_DIR="$AGT" PATH="$AGT/bin" \
+            SSH_AUTH_SOCK="$1" \
+            "$AGT/bin/bash" -c '. "$1" >/dev/null 2>&1; printf "%s" "${SSH_AUTH_SOCK:-UNSET}"' \
+            bash "$REPO/home/dot_config/bashrc.d/10-ssh-agent.sh" 2>/dev/null </dev/null
+    }
+    # A LIVE foreign socket is the forwarded-agent case: it must survive untouched.
+    # This is the regression test for the bug that made `ssh -A` unusable.
+    mkdir -p "$AGT/fwd"
+    if "$AGT/bin/ssh-agent" -a "$AGT/fwd/agent.sock" >/dev/null 2>&1; then
+        assert_eq "a LIVE inherited socket survives (forwarded agent)" \
+            "$(inherit_probe "$AGT/fwd/agent.sock")" "$AGT/fwd/agent.sock"
+        # Kill it with SIGKILL: SIGTERM unlinks the socket, SIGKILL leaves the
+        # inode, which is exactly the stale-corpse shape we need. Never a socket
+        # that listen()s and never accepts — `ssh-add -l` blocks on one forever.
+        for _fp in $(pgrep -f "ssh-agent .*-a .*$AGT/fwd" 2>/dev/null); do
+            [[ "$_fp" == "$$" || "$_fp" == "$PPID" ]] && continue
+            kill -9 "$_fp" 2>/dev/null || true
+        done
+        unset _fp
+        assert "the stale inode really did survive the kill" "[[ -S \"$AGT/fwd/agent.sock\" ]]"
+        assert_ne "a DEAD inherited socket is discarded, not kept" \
+            "$(inherit_probe "$AGT/fwd/agent.sock")" "$AGT/fwd/agent.sock"
+    else
+        skip "a LIVE inherited socket survives (forwarded agent) — could not start a probe agent"
+        skip "the stale inode really did survive the kill — could not start a probe agent"
+        skip "a DEAD inherited socket is discarded, not kept — could not start a probe agent"
+    fi
+    # An inherited path that is not a socket at all must be dropped up front.
+    : > "$AGT/notasocket"
+    assert_ne "an inherited NON-socket is discarded" \
+        "$(inherit_probe "$AGT/notasocket")" "$AGT/notasocket"
     # NO silence probe here, deliberately. Capturing this file's output through a
     # PIPE is unsafe: it spawns a daemon, the daemon survives the command
     # substitution, and this suite is self-capturing — a daemon holding the capture
@@ -1983,7 +2031,7 @@ if [[ -x "$AGT/bin/ssh-agent" && -x "$AGT/bin/bash" ]]; then
     # Reap what this section started: a test that leaks daemons degrades the machine
     # it runs on. By PID, never `pkill -f`: that pattern can match the command line
     # of the very shell running it, which is a self-terminating test.
-    for _ap in $(pgrep -f "ssh-agent -a $AGT" 2>/dev/null); do
+    for _ap in $(pgrep -f "ssh-agent .*-a .*$AGT" 2>/dev/null); do
         [[ "$_ap" == "$$" || "$_ap" == "$PPID" ]] && continue
         kill "$_ap" 2>/dev/null || true
     done
@@ -2020,6 +2068,67 @@ assert "the agent socket falls back to a private dir" \
 assert "the runtime dir uses \$UID, not a fork per shell" \
     "[[ -z \$(nocomment $SSHAGT | grep -F '/run/user/\$(id -u)') ]]"
 unset _sc_calls _sc_guards
+
+# This file is `#!/usr/bin/env bash`, so it is in NEITHER POSIX parse set: SET A
+# enrols by `#!/bin/sh` shebang and SET B is a hand list that omits it. Nothing
+# parsed it at all. That gap is not theoretical — deleting the `ssh-add -q` line
+# while leaving its `if` wrapper would have left an empty block and a syntax error
+# at `fi`, and the behavioural probe below would STILL have passed all four
+# asserts, because bash executes incrementally and the agent is exported before
+# the parse aborts, with the error swallowed by two layers of redirection.
+assert "the ssh-agent drop-in parses" "bash -n $SSHAGT"
+
+# 🔴 No `ssh-add` may run without an explicit key path.
+#
+# `ssh-add` with no argument resolves ~/.ssh through getpwuid(), NOT $HOME, so it
+# reads the PASSWD user's key whatever the environment says — measured, under
+# `env -i HOME=<sandbox>` it prompted for the real /home/johns/.ssh/id_ed25519.
+# On a tty that BLOCKS at shell startup (rc=124 against a held-open pty);
+# `2>/dev/null` hides the error, never the prompt, because readpassphrase writes
+# straight to /dev/tty. It also meant the harness's own sandboxed probe reached
+# outside the sandbox into real key material on every run.
+# -l and -L only list, take no passphrase, and are the probes this file needs.
+_bare_add=$(nocomment $SSHAGT | grep -oE 'ssh-add[^|&;)]*' | grep -vE 'ssh-add +-[lL]\b' || true)
+assert "no ssh-add in the drop-in can prompt for a passphrase" \
+    "[[ -z \"\$_bare_add\" ]]"
+# Anti-vacuity: the scan must be finding ssh-add call sites to judge.
+assert "the ssh-add passphrase scan actually scanned something" \
+    "[[ \$(nocomment $SSHAGT | grep -c 'ssh-add') -ge 2 ]]"
+unset _bare_add
+
+# The inherited-agent guard must precede the 1Password block, which is the whole
+# point of the reorder: below it, 1Password is an unconditional OVERRIDE and any
+# forwarded agent is destroyed; above it, 1Password is the DEFAULT for a shell
+# that arrived with nothing. Nothing structural pinned the order before, so the
+# blocks could swap back silently.
+# 🔴 Both line numbers are proved non-empty BEFORE comparing: a missing match is
+# the empty string, and [[ "" -lt N ]] is TRUE in arithmetic context, so the
+# ordering assert would fail OPEN (the iter-63 shape).
+_ln_guard=$(nocomment $SSHAGT | grep -n 'case "\${SSH_AUTH_SOCK:-}" in' | head -1 | cut -d: -f1)
+_ln_op=$(nocomment $SSHAGT | grep -n 'OP_AGENT_SOCK=' | head -1 | cut -d: -f1)
+assert "both anchors for the ordering assert were found" \
+    "[[ -n \"\$_ln_guard\" && -n \"\$_ln_op\" ]]"
+assert "the inherited-agent guard precedes the 1Password block" \
+    "[[ -n \"\$_ln_guard\" && -n \"\$_ln_op\" && \$_ln_guard -lt \$_ln_op ]]"
+unset _ln_guard _ln_op
+
+# The systemd socket path must never fall back to $TMPDIR. With XDG_RUNTIME_DIR
+# unset and TMPDIR set — cron, a container, macOS, CI — the old expression became
+# $TMPDIR/openssh_agent, a predictable name in a world-writable directory that
+# this file then accepts on `-S` alone. Measured exploitable. The DF_AGENT_*
+# assert above forbids exactly this shape and never covered SYSTEMD_SOCK.
+assert "the systemd socket path never falls back to TMPDIR" \
+    "[[ -z \$(nocomment $SSHAGT | grep -E 'SYSTEMD_SOCK=' | grep -F 'TMPDIR') ]]"
+
+# env.sh fills a GAP, never overrides an inherited agent. For `ssh -A host cmd`
+# the rc layer never runs at all, so this line is the only code touching the
+# variable — it destroyed every forwarded agent before the guard landed. The
+# harness had ZERO coverage of env.sh's SSH_AUTH_SOCK handling: `openssh_agent`
+# appeared nowhere in this file.
+ENVSH="home/dot_config/shell/env.sh"
+assert "env.sh guards SSH_AUTH_SOCK on emptiness before assigning" \
+    "nocomment $ENVSH | grep -qE '\\[ -z \"\\\$\\{SSH_AUTH_SOCK:-\\}\" \\]'"
+unset ENVSH
 
 # setup-ssh-agent.sh: a deliberate, named skip exits 0. Phase 3 settled this shape
 # for the fetchers (fb_require_os), and the same reasoning applies to a
@@ -4015,6 +4124,54 @@ assert "tsh PATH symlinks keep their unversioned names" \
 assert "ssh config keeps the portable PATH-resolved tsh ProxyCommand" \
     "grep -qF 'ProxyCommand \"tsh\" proxy ssh' home/private_dot_ssh/private_config"
 
+# ---------------------------------------------------------------------------
+# ssh_config is FIRST-WINS, and the `Host *` block is line 1.
+#
+# Measured on OpenSSH 10.5p1: the first value seen for a keyword wins, with no
+# specificity ranking — a later, narrower block loses. An `IdentityAgent` in
+# `Host *` therefore captures EVERY host: measured, adding one made github.com
+# resolve to the 1Password socket, so a locked app breaks git over ssh on a machine
+# that never asked for 1Password. It also makes the per-host block at the foot of
+# the config dead code — invisibly, because today both name the same socket, so
+# that half only surfaces the day the two values differ.
+#
+# ssh reports none of this at any verbosity; `ssh -G` is the only thing that shows
+# it. That is what makes it worth pinning — the failure mode is silent everywhere.
+#
+# Structural half — read the `Host *` block alone, not the whole file, or the
+# legitimate IdentityAgent at the foot of the file satisfies the grep forever.
+SSHCFG="home/private_dot_ssh/private_config"
+_hoststar=$(awk '/^Host \*$/{f=1;next} /^Host /{f=0} f' "$SSHCFG" | sed 's/#.*//')
+assert "ssh config: the Host * block carries no IdentityAgent" \
+    "[[ -z \$(printf '%s\n' \"\$_hoststar\" | grep -iE '^[[:space:]]*IdentityAgent') ]]"
+# Anti-vacuity: the extractor must actually have found the block it judges.
+assert "ssh config: the Host * extractor found the block" \
+    "[[ -n \$(printf '%s\n' \"\$_hoststar\" | grep -iE '^[[:space:]]*ControlMaster') ]]"
+unset _hoststar
+
+# Behavioural half — resolve the APPLIED copy with `ssh -G`. This is a pure parse:
+# no socket, no daemon, no network, ~3.7 ms per call (measured, 10 runs in 0.037 s).
+# It is the only mechanism that sees what ssh will actually do, and the repo had
+# no `ssh -G` anywhere before this.
+#
+# NOTE: `ssh -G` emits an `identityagent` line ONLY when config sets one. With the
+# keyword unset the output is byte-identical whether SSH_AUTH_SOCK is set or not,
+# so "this host uses the ambient agent" is assertable only as an ABSENCE.
+# `command -v`, not df_have: df_have lives in lib/df-common.sh and lib/doctor-report.sh
+# and is NOT defined in this harness. Calling it here exits 127, the guard fails, and
+# both asserts SKIP while looking like deliberate platform gating — a false skip is
+# the one outcome worse than a failure, because it reads as coverage.
+if command -v ssh >/dev/null 2>&1 && [[ -r "$SB/.ssh/config" ]]; then
+    _g_gh=$(ssh -F "$SB/.ssh/config" -G github.com 2>/dev/null | grep -ci '^identityagent ' | tr -d ' ')
+    assert_eq "ssh -G: github.com resolves to the ambient agent (no IdentityAgent)" "$_g_gh" "0"
+    _g_syke=$(ssh -F "$SB/.ssh/config" -G syketech.com 2>/dev/null | grep -i '^identityagent ' | sed 's/^[Ii]dentity[Aa]gent //')
+    assert_glob "ssh -G: syketech.com resolves to the 1Password agent" "$_g_syke" *1password/agent.sock
+    unset _g_gh _g_syke
+else
+    skip "ssh -G: github.com resolves to the ambient agent (no IdentityAgent) — no ssh on PATH or no applied config"
+    skip "ssh -G: syketech.com resolves to the 1Password agent — no ssh on PATH or no applied config"
+fi
+
 assert "doctor registry lists tsh"                  "grep -q 'tsh|tsh|' lib/doctor-registry.sh"
 # tsh/tctl are NOT remove_bin loop entries, and asserting that they are is what
 # would ship the leak. remove_bin deletes ~/.local/apps/<name>; the payload is
@@ -5052,6 +5209,32 @@ assert "every wc capture in the harness is trimmed or arithmetic" \
 assert "the wc portability census actually scanned something" \
     "[[ \$(grep -c 'wc -[lwcm]' test-update-user-home-dir.sh) -ge 8 ]]"
 unset _wc_bare
+
+# The harness's OWN agent reaping: every pgrep pattern tolerates an interposed flag.
+#
+# `pgrep -f` matches an unanchored ERE against the command line procps rebuilds
+# from /proc/PID/cmdline, so `ssh-agent -a $DIR` demands the flag be ADJACENT to
+# the binary name. keychain — reachable from any sandboxed shell probe, because
+# it sits on the real PATH — spawns `ssh-agent -s -a <path>`, and that one
+# interposed `-s ` made every such agent invisible to both reapers. 232 had
+# accumulated on the developer's box, each holding a socket under an already
+# deleted sandbox. Measured: the old pattern matched 1 of the 2 argv shapes, the
+# `.*-a` form matches both.
+#
+# A census, not two fixes: a third reaper added later would reintroduce the same
+# blind spot silently, and the failure is invisible until someone runs `ps`.
+# `ssh[-]agent` and not `ssh-agent`: this scan reads the file it lives in, so a
+# plain literal would match its OWN source line and fail forever — the iter-44
+# trap wearing a census costume. The bracket makes the pattern match real call
+# sites and not the two lines that spell it out.
+_reap_adjacent=$(grep -nE 'pgrep -f "ssh[-]agent -a' test-update-user-home-dir.sh \
+    | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+assert "every ssh-agent reaper pattern tolerates an interposed flag" \
+    "[[ -z \"\$_reap_adjacent\" ]]"
+# Anti-vacuity: prove the scan is looking at real reaper call sites, not zero.
+assert "the reaper census actually scanned something" \
+    "[[ \$(grep -cE 'pgrep -f \"ssh[-]agent' test-update-user-home-dir.sh) -ge 2 ]]"
+unset _reap_adjacent
 
 # Several scripts print their own header comment block as --help. The SPDX banner
 # sits ABOVE that block, so a naive line-anchored extractor prints the banner and

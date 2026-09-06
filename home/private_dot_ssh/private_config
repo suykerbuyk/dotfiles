@@ -1,3 +1,24 @@
+# 🔴 ssh_config is FIRST-WINS per keyword, with no specificity ranking: the first
+# value seen for a keyword wins, even if a later block matches the host more
+# narrowly. Measured with `ssh -G` on OpenSSH 10.5p1, for IdentityAgent
+# specifically, in both block orderings.
+#
+# So this block must NEVER gain an `IdentityAgent`. Two things happen if it does,
+# and the first is the one that bites:
+#
+#   1. EVERY host inherits that agent. Measured: adding it here made github.com
+#      resolve to the 1Password socket, so a locked app breaks git over ssh on a
+#      machine that never asked for 1Password.
+#   2. The per-host block at the foot of this file becomes dead code — it can no
+#      longer change the value. Today both name the same socket, so that half is
+#      INVISIBLE; it only surfaces the day the two values differ.
+#
+# ssh reports none of this at any verbosity. `ssh -G` is the only thing that shows
+# it, which is why the harness asserts the absence.
+#
+# A per-host agent opt-in therefore goes ABOVE this block, never below it.
+# Note also that IdentityFile is CUMULATIVE where IdentityAgent is first-wins, so
+# a per-host IdentityFile does not displace the one below — both get offered.
 Host *
 ControlMaster auto
 ControlPath ~/.ssh/sockets/%r@%h-%p
