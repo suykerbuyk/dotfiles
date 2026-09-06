@@ -217,7 +217,7 @@ print_rootless_state() {
 if [[ -x "$APP/bin/podman" ]] && "$APP/bin/podman" --version >/dev/null 2>&1; then
     echo "podman $ver already installed; symlink + config ensured -> $APP/bin/podman"
     link_podman
-    fb_prune_versions "$VERSION_DIR" "" 'podman-*'
+    fb_prune_versions "$VERSION_DIR" "" 'podman-[0-9]*'
     gen_configs
     gen_setup_script
     print_rootless_state
@@ -254,7 +254,7 @@ gen_setup_script
 
 # Drop other podman-* version dirs, sparing the one just superseded: this is a
 # whole userland tree and a running container's conmon resolves out of it.
-fb_prune_versions "$VERSION_DIR" "$PODMAN_PREV_DIR" 'podman-*' 
+fb_prune_versions "$VERSION_DIR" "$PODMAN_PREV_DIR" 'podman-[0-9]*' 
 
 echo "Installed podman $ver (mgoltzsche/podman-static) to $VERSION_DIR"
 echo "  version: $("$APP/bin/podman" --version)"

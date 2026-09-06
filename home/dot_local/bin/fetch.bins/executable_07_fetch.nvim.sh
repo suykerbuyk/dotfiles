@@ -80,7 +80,7 @@ if [[ -x "$NVIM_BIN" ]] && "$NVIM_BIN" --version >/dev/null 2>&1; then
     # payload `nvim.appimage-<ver>`, and `nvim-*` does not match that. Two such
     # trees are resident on this host right now, stranded by the rename. A helper
     # deriving one glob from BIN_NAME would reclaim neither.
-    fb_prune_versions "$INSTALL_DIR" "" 'nvim-*' 'nvim.appimage-*'
+    fb_prune_versions "$INSTALL_DIR" "" 'nvim-[0-9]*' 'nvim.appimage-[0-9]*'
     exit 0
 fi
 # The payload the PATH symlink currently resolves to — captured BEFORE relinking,
@@ -111,7 +111,7 @@ fi
 fb_publish_payload "$STAGE" "$INSTALL_DIR"
 trap 'rm -rf "$FB_TMP"' EXIT
 link_nvim
-fb_prune_versions "$INSTALL_DIR" "$NVIM_PREV_DIR" 'nvim-*' 'nvim.appimage-*'
+fb_prune_versions "$INSTALL_DIR" "$NVIM_PREV_DIR" 'nvim-[0-9]*' 'nvim.appimage-[0-9]*'
 
 echo "Installed nvim $VERSION -> ${BIN_DIR}/${BIN_NAME}"
 echo "  target: ${NVIM_BIN} (versioned tarball)"

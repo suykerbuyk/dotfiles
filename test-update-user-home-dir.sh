@@ -2643,7 +2643,7 @@ unset f b
 assert "go fetcher prunes on the go1.* glob, not go-*, on BOTH paths" \
     "[[ \$(nocomment $GO_FETCHER | grep -cF \"'go1.*'\") -eq 2 ]]"
 assert "nvim fetcher passes BOTH the current and legacy globs" \
-    "[[ \$(nocomment $NVIM_FETCHER2 | grep -cF \"'nvim.appimage-*'\") -eq 2 ]]"
+    "[[ \$(nocomment $NVIM_FETCHER2 | grep -cF \"'nvim.appimage-[0-9]*'\") -eq 2 ]]"
 
 # Census, UPDATED in phase 4. Phase 2 wired the two slots that had no prune at
 # all and left 12/16/22/24 on their own copies, asserting that 2/4 split so the
@@ -2803,6 +2803,43 @@ assert_eq "remove_bin age leaves age-keygen alone" \
 assert_re "remove_bin names the versioned payloads it removed" \
     "$(fbsb 'mkdir -p "$APP_DIR"/t-1.0.0; remove_bin t 2>&1')" \
     'removed versioned payload: t-1\.0\.0'
+
+# --- remove_bin's EXTRA GLOBS (phase 6) -------------------------------------
+# The 2026-09-05 ruling was that ONE glob serves both the prune and the teardown.
+# That only holds if both sides accept the same explicit, plural, caller-supplied
+# patterns — so remove_bin takes them the way fb_prune_versions does, and the
+# three odd slots pass teardown exactly the globs they already pass the prune.
+# A derived "${name}-*" reclaims none of them:
+#   go     $APP_DIR/go1.27.1        no separator at all
+#   rg     ripgrep-15.1.0-x86_64-…  an abandoned scheme
+#   nvim   nvim.appimage-0.11.6     a superseded scheme, dot not dash
+assert_eq "remove_bin takes extra globs for a non-conforming payload name" \
+    "$(fbsb_ls 'mkdir -p "$APP_DIR"/go1.27.1 "$APP_DIR"/go1.26.5; ln -sfn "$APP_DIR/go1.27.1/bin/go" "$BIN_DIR/go"
+                remove_bin go "go1.*" >/dev/null')" ""
+# THE one that was actually stranding disk. Seven Go toolchains (1.8 GB)
+# accumulated here before phase 2, and teardown removed the two symlinks while
+# leaving every tree — because neither `go` nor `go-[0-9]*` matches `go1.27.1`.
+assert_eq "without the glob, a go toolchain tree survives teardown" \
+    "$(fbsb_ls 'mkdir -p "$APP_DIR"/go1.27.1; remove_bin go >/dev/null')" "go1.27.1 "
+assert_eq "remove_bin accepts SEVERAL extra globs" \
+    "$(fbsb_ls 'mkdir -p "$APP_DIR"/nvim-0.12.5 "$APP_DIR"/nvim.appimage-0.11.6 "$APP_DIR"/keepme
+                remove_bin nvim "nvim.appimage-[0-9]*" >/dev/null')" "keepme "
+# An extra glob must not become a licence to delete unrelated payloads: it is
+# still anchored under APP_DIR and still matches only what it names.
+assert_eq "an extra glob leaves non-matching payloads alone" \
+    "$(fbsb_ls 'mkdir -p "$APP_DIR"/ripgrep-15.1.0-x86_64 "$APP_DIR"/other-1.0
+                remove_bin rg "ripgrep-[0-9]*" >/dev/null')" "other-1.0 "
+# Unmatched globs stay literal in bash, so the -e guard is what keeps this from
+# reporting the removal of a payload that never existed — the same shape
+# fb_prune_versions pins, and the same one mutation testing caught there.
+assert_eq "an unmatched extra glob is harmless and silent" \
+    "$(fbsb 'mkdir -p "$APP_DIR"/t-1.0.0
+             remove_bin t "nosuchtool-*" 2>&1 | grep -c "nosuchtool" || true')" "0"
+# Calling with no extra globs must still work under set -u: the array is empty,
+# and a bare "${arr[@]}" on an empty array is an unbound-variable error in older
+# bash. Pin the no-arg path so that expansion is never "simplified".
+assert_eq "remove_bin still works with no extra globs" \
+    "$(fbsb_ls ': > "$APP_DIR/t"; mkdir -p "$APP_DIR"/t-1.0.0; remove_bin t >/dev/null')" ""
 
 # --- FB_PIN reaches the downloaded bytes (phase 5) ---------------------------
 # The pin used to be decorative on every GitHub-backed slot: slot 07 computed
@@ -3094,8 +3131,16 @@ assert "chezmoiremove retires the protoc payload by glob" \
 # could take it for something still installed.
 assert "protoc is named nowhere in fetch.bins sources" \
     "! grep -rqi protoc home/dot_local/bin/fetch.bins/"
-# Installer uninstall special-case for podman (versioned dir + generated helper).
-assert "installer uninstall handles podman versioned dir" "grep -q 'podman-\*' update-user-home-dir.sh"
+# Installer uninstall special-case for podman. RETARGETED 2026-09-05 (phase 6):
+# this used to grep for the literal 'podman-*', which matched the DRY-RUN ECHO
+# as readily as the code, so it would have stayed green with the removal itself
+# deleted. The versioned tree is remove_bin's job now, so pin that call — on
+# comment-stripped source, since the block explains the change in prose — and
+# keep pinning the generated helper, which remove_bin knows nothing about.
+assert "installer uninstall removes the podman payload via remove_bin" \
+    "nocomment update-user-home-dir.sh | grep -qE '^[[:space:]]*remove_bin podman\$'"
+assert "installer uninstall no longer hand-removes the podman payload" \
+    "[[ -z \$(nocomment update-user-home-dir.sh | grep -E '^[[:space:]]*rm .*apps/podman-') ]]"
 assert "installer uninstall removes podman-rootless-setup" "grep -q 'podman-rootless-setup' update-user-home-dir.sh"
 
 # ===========================================================================
@@ -3130,13 +3175,68 @@ assert "ghostty fetcher verifies before symlink"    "grep -q 'verification faile
 assert "doctor registry lists ghostty"              "grep -q 'ghostty|ghostty|' lib/doctor-registry.sh"
 # Uninstall lockstep: a bare remove_bin would strand the versioned image, the
 # desktop entry, the icon and the terminfo entry.
-assert "installer uninstall handles ghostty image"  "grep -q 'ghostty-\*.AppImage' update-user-home-dir.sh"
+# RETARGETED 2026-09-05 (phase 6), same reason as podman's: the old grep for
+# 'ghostty-*.AppImage' matched the DRY-RUN ECHO, so it would have stayed green
+# with the removal deleted. remove_bin's <name>-[0-9]* glob matches
+# ghostty-<ver>.AppImage, so the payload is its job now; the desktop entry, icon
+# and terminfo are what genuinely still need the special case.
+assert "installer uninstall removes the ghostty payload via remove_bin" \
+    "nocomment update-user-home-dir.sh | grep -qE '^[[:space:]]*remove_bin ghostty\$'"
+assert "installer uninstall no longer hand-removes the ghostty AppImage" \
+    "[[ -z \$(nocomment update-user-home-dir.sh | grep -E '^[[:space:]]*rm .*apps/ghostty-') ]]"
 assert "installer uninstall removes ghostty desktop" "grep -q 'com.mitchellh.ghostty.desktop' update-user-home-dir.sh"
 assert "installer uninstall removes ghostty terminfo" "grep -q 'terminfo/x/xterm-ghostty' update-user-home-dir.sh"
 # Regression: tree-sitter shipped as slot 15 in iter 30 but was never added to
 # the removal loop, so --uninstall --force stranded it. Every fetcher must map
 # to the loop, a special case, or the rust block.
 assert "installer uninstall covers tree-sitter"     "grep -qE '^[[:space:]]*for b in .*tree-sitter' update-user-home-dir.sh"
+
+# --- phase 6: the three slots whose payload name remove_bin cannot derive -----
+# They left the loop and take an explicit glob instead. Asserted in BOTH
+# directions per slot: pinning only the glob call would let a later edit add a
+# STRANDING loop entry back alongside it, which is the shape that let go's
+# toolchain trees survive teardown in the first place.
+#
+# The globs are the same strings the fetchers hand fb_prune_versions, which is
+# the point of the shared vocabulary — prune and teardown cannot disagree about
+# what a payload is called.
+assert "teardown removes the go toolchain tree by its go1.* glob" \
+    "nocomment update-user-home-dir.sh | grep -qF \"remove_bin go   'go1.*'\""
+assert "teardown reclaims ripgrep's abandoned naming scheme" \
+    "nocomment update-user-home-dir.sh | grep -qF \"remove_bin rg   'ripgrep-[0-9]*'\""
+assert "teardown reclaims nvim's superseded appimage scheme" \
+    "nocomment update-user-home-dir.sh | grep -qF \"remove_bin nvim 'nvim.appimage-[0-9]*'\""
+for _t6 in go rg nvim; do
+    assert "$_t6 is NOT a bare loop entry (its payload needs the glob)" \
+        "[[ -z \$(nocomment update-user-home-dir.sh | grep -E '^[[:space:]]*for b in .*\\b${_t6}\\b') ]]"
+done
+unset _t6
+# gofmt stays IN the loop, and that is not an oversight: it is a symlink into the
+# go tree and owns no payload, so it needs no glob of its own.
+assert "gofmt stays a bare loop entry" \
+    "grep -qE '^[[:space:]]*for b in .*\\bgofmt\\b' update-user-home-dir.sh"
+
+# THE property the shared vocabulary exists for, asserted rather than asserted
+# ABOUT: for each of the three, the glob teardown passes remove_bin is the SAME
+# STRING the fetcher passes fb_prune_versions. Pinning the two sides separately
+# would let them drift into disagreeing about what a payload is called -- which
+# is precisely how a payload ends up pruned by one path and stranded by the
+# other. Compared as extracted text, so it holds whatever the globs become.
+for _g6 in "04:go1.*" "03:ripgrep-[0-9]*" "07:nvim.appimage-[0-9]*"; do
+    _gs="${_g6%%:*}"; _gg="${_g6#*:}"
+    _gf="$(echo home/dot_local/bin/fetch.bins/executable_${_gs}_fetch.*.sh)"
+    assert "slot $_gs's prune glob and teardown glob are the same string" \
+        "[[ -n \"\$(nocomment $_gf | grep -F \"'$_gg'\")\" && -n \"\$(nocomment update-user-home-dir.sh | grep -F \"'$_gg'\")\" ]]"
+done
+unset _g6 _gs _gg _gf
+
+# Every versioned payload glob in the tree anchors its version component on a
+# digit, or is go's prefix-less go1.* which is digit-anchored by construction.
+# A bare <name>-* is the age-*/age-keygen trap waiting for a second tool whose
+# name is a prefix of another (podman/podman-compose, tree-sitter/tree-sitter-cli
+# are both one upstream decision away).
+assert "no fetcher prunes on a bare <name>-* glob" \
+    "[[ -z \$(cat home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | sed 's/#.*//' | grep -E 'fb_prune_versions .*[A-Za-z0-9]-\\*') ]]"
 
 # The ghostty config is chezmoi-managed (NOT a uruntime portable sidecar), so a
 # fresh machine reproduces it. It must stay coherent with the repo-wide theme
@@ -3901,7 +4001,7 @@ assert "installer uninstall does NOT loop-remove tsh" \
 assert "installer uninstall does NOT loop-remove tctl" \
     "! grep -qE '^[[:space:]]*for b in .*\\btctl\\b' update-user-home-dir.sh"
 assert "installer uninstall removes the versioned teleport payload" \
-    "grep -qF 'rm -rf \"\$HOME\"/.local/apps/teleport-*' update-user-home-dir.sh"
+    "grep -qF 'rm -rf \"\$HOME\"/.local/apps/teleport-[0-9]*' update-user-home-dir.sh"
 assert "installer uninstall removes the legacy unversioned tsh/tctl payloads" \
     "grep -qF 'rm -f  \"\$HOME/.local/apps/tsh\" \"\$HOME/.local/apps/tctl\"' update-user-home-dir.sh"
 assert "installer uninstall removes the tsh/tctl symlinks" \
@@ -4058,15 +4158,18 @@ assert "proxmox-mcp selector hardcodes no OS token" \
 assert "proxmox-mcp uses fb_arch, not raw uname -m" \
     "nocomment $PMX_FETCHER | grep -qF 'fb_arch'"
 
-# Teardown lockstep. remove_bin looks for the BARE ~/.local/apps/proxmox-mcp,
-# would not find it, would remove only the symlink — and would still report
-# success, because the symlink branch sets removed=1. Both directions asserted:
-# only pinning the special case would let a later edit ADD the stranding loop
-# entry alongside it.
-assert "installer uninstall handles the proxmox-mcp versioned payload" \
-    "grep -q 'proxmox-mcp-\*' update-user-home-dir.sh"
-assert "proxmox-mcp is NOT in the remove_bin loop" \
-    "! grep -qE '^[[:space:]]*for b in .*proxmox-mcp' update-user-home-dir.sh"
+# INVERTED 2026-09-05 (phase 6), in both directions. These pinned the OPPOSITE
+# arrangement: a hand-written special case, and proxmox-mcp deliberately kept OUT
+# of the loop. That was correct while remove_bin looked only for the bare
+# ~/.local/apps/proxmox-mcp — it removed the symlink, reported success because
+# its symlink branch had already set removed=1, and left the versioned payload on
+# disk forever. remove_bin sweeps <name>-[0-9]* now, which is exactly that case,
+# so the special case is deleted rather than shrunk and the loop entry is right.
+# Per iter 62 the asserts are inverted, not satisfied.
+assert "proxmox-mcp IS in the remove_bin loop" \
+    "grep -qE '^[[:space:]]*for b in .*\\bproxmox-mcp\\b' update-user-home-dir.sh"
+assert "proxmox-mcp no longer needs a teardown special case" \
+    "[[ -z \$(nocomment update-user-home-dir.sh | grep -E '^[[:space:]]*rm .*apps/proxmox-mcp-') ]]"
 assert "doctor registry lists proxmox-mcp" \
     "grep -q 'proxmox-mcp|proxmox-mcp|' lib/doctor-registry.sh"
 
@@ -4330,11 +4433,42 @@ assert "shadow PATH still provides git"  "( PATH=\"$NODELTA\"; command -v git >/
 # does `rm -rf $XDG_CONFIG_HOME/chezmoi` and fb_remove_completions works off
 # $XDG_DATA_HOME, so inheriting the outer sandbox's values would wipe state the
 # rest of this suite depends on.
+#
+# It also seeds the FOUR payload NAMING SHAPES this tree contains, so the real
+# uninstall is measured against all of them rather than against delta alone:
+#   conforming    proxmox-mcp-0.11.1, ghostty-1.3.1.AppImage, podman-6.1.1/
+#                 -> remove_bin's own <name>-[0-9]* glob
+#   no separator  go1.27.1/            -> needs the explicit 'go1.*'
+#   abandoned     ripgrep-15.1.0-…/    -> needs 'ripgrep-[0-9]*'
+#   superseded    nvim.appimage-0.11.6 -> needs 'nvim.appimage-[0-9]*'
+# APP_DIR/BIN_DIR are assigned but never EXPORTED by this harness, so the child
+# installer derives them from the redirected HOME rather than from the outer
+# sandbox — which is what makes seeding here safe.
 uninstall_case() {
     UC_HOME="$(mktemp -d)"
     mkdir -p "$UC_HOME/.local/bin" "$UC_HOME/.local/apps"
     printf '#!/bin/sh\nexit 0\n' > "$UC_HOME/.local/bin/delta"; chmod +x "$UC_HOME/.local/bin/delta"
     : > "$UC_HOME/.local/apps/delta"
+    local ua="$UC_HOME/.local/apps" ub="$UC_HOME/.local/bin"
+    mkdir -p "$ua/go1.27.1/bin" "$ua/ripgrep-15.1.0-x86_64-unknown-linux-musl" \
+             "$ua/podman-6.1.1/usr/local/bin"
+    : > "$ua/go1.27.1/bin/go"; : > "$ua/go1.27.1/bin/gofmt"
+    : > "$ua/ripgrep-15.1.0-x86_64-unknown-linux-musl/rg"
+    : > "$ua/podman-6.1.1/usr/local/bin/podman"
+    : > "$ua/nvim.appimage-0.11.6"
+    : > "$ua/proxmox-mcp-0.11.1"
+    : > "$ua/ghostty-1.3.1.AppImage"
+    # Anti-vacuity control: nothing in the tree installs this, so nothing may
+    # remove it. An uninstall that cleared ~/.local/apps wholesale would pass
+    # every reclamation assert while being a far worse bug.
+    : > "$ua/keepme"
+    ln -sfn "$ua/go1.27.1/bin/go"    "$ub/go"
+    ln -sfn "$ua/go1.27.1/bin/gofmt" "$ub/gofmt"
+    ln -sfn "$ua/ripgrep-15.1.0-x86_64-unknown-linux-musl/rg" "$ub/rg"
+    ln -sfn "$ua/nvim.appimage-0.11.6" "$ub/nvim"
+    ln -sfn "$ua/proxmox-mcp-0.11.1"   "$ub/proxmox-mcp"
+    ln -sfn "$ua/ghostty-1.3.1.AppImage" "$ub/ghostty"
+    ln -sfn "$ua/podman-6.1.1/usr/local/bin/podman" "$ub/podman"
     UC_GC="$UC_HOME/.gitconfig"; : > "$UC_GC"; seed_keys "$UC_GC"
     HOME="$UC_HOME" \
     XDG_CONFIG_HOME="$UC_HOME/.config" XDG_CACHE_HOME="$UC_HOME/.cache" \
@@ -4354,6 +4488,34 @@ assert "uninstall(no delta): our binary removed"     "[[ ! -e \"$UC_HOME/.local/
 assert "uninstall(no delta): git keys removed"       "[[ \$(nkeys \"$UC_GC\") -eq 0 ]]"
 assert "uninstall(no delta): sibling settings survive" \
     "[[ -n \"\$(GIT_CONFIG_GLOBAL=\"$UC_GC\" git config --global --get core.excludesfile)\" ]]"
+
+# --- phase 6: teardown actually RECLAIMS every payload shape -----------------
+# The real `--uninstall --force`, in a throwaway HOME, against all four naming
+# shapes. This is the assert the structural greps above cannot make: they prove a
+# glob is WRITTEN, this proves the disk is empty afterwards.
+#
+# go is the one that mattered. Its payload is $APP_DIR/go1.27.1 — no separator at
+# all — so teardown removed the go and gofmt symlinks and left ~250 MB of
+# toolchain behind, every time. Seven of them accumulated here (1.8 GB) before
+# phase 2 gave slot 04 a prune, and until this phase nothing reclaimed them on
+# uninstall either.
+for _p6 in go1.27.1 ripgrep-15.1.0-x86_64-unknown-linux-musl nvim.appimage-0.11.6 \
+           proxmox-mcp-0.11.1 ghostty-1.3.1.AppImage podman-6.1.1; do
+    assert "uninstall reclaims the payload: $_p6" \
+        "[[ ! -e \"$UC_HOME/.local/apps/$_p6\" ]]"
+done
+unset _p6
+for _p6 in go gofmt rg nvim proxmox-mcp ghostty podman; do
+    assert "uninstall removes the symlink: $_p6" \
+        "[[ ! -e \"$UC_HOME/.local/bin/$_p6\" && ! -L \"$UC_HOME/.local/bin/$_p6\" ]]"
+done
+unset _p6
+# Anti-vacuity for the whole block: an uninstall that deleted ~/.local/apps
+# wholesale would satisfy every assert above while being a far worse bug than the
+# one they exist to catch. remove_bin is surgical by contract, so an unrelated
+# payload must survive.
+assert "uninstall leaves an unrelated payload alone" \
+    "[[ -e \"$UC_HOME/.local/apps/keepme\" ]]"
 rm -rf "$UC_HOME"
 # The outer sandbox must be untouched by both runs.
 assert "uninstall cases left the sandbox alone" "[[ -d \"$SB/.config/chezmoi\" || ! -e \"$SB/.config\" ]]"

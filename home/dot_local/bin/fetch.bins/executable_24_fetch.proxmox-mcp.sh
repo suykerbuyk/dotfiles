@@ -96,7 +96,7 @@ PAYLOAD="${APP_DIR}/${BIN_NAME}-${VERSION}"
 if [[ -x "$PAYLOAD" ]] && "$PAYLOAD" --help >/dev/null 2>&1; then
     echo "proxmox-mcp $VERSION already installed; symlink ensured."
     ln -sfn "$PAYLOAD" "${BIN_DIR}/${BIN_NAME}"
-    fb_prune_versions "$PAYLOAD" "" "${BIN_NAME}-*"
+    fb_prune_versions "$PAYLOAD" "" "${BIN_NAME}-[0-9]*"
     exit 0
 fi
 
@@ -128,7 +128,7 @@ trap 'rm -rf "$FB_TMP"' EXIT
 chmod +x "$PAYLOAD"
 ln -sfn "$PAYLOAD" "${BIN_DIR}/${BIN_NAME}"
 
-fb_prune_versions "$PAYLOAD" "$PMCP_PREV" "${BIN_NAME}-*"
+fb_prune_versions "$PAYLOAD" "$PMCP_PREV" "${BIN_NAME}-[0-9]*"
 
 echo "Installed proxmox-mcp ${VERSION} (${OS}/${ARCH}) -> ${BIN_DIR}/${BIN_NAME}"
 echo "  note: needs PROXMOX_API_URL, PROXMOX_TOKEN_ID and PROXMOX_TOKEN_SECRET;"

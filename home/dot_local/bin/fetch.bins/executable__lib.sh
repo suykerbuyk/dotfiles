@@ -1210,15 +1210,41 @@ fb_remove_completions() {
 }
 
 # ----------------------------------------------------------------------
-# Removal helper — surgical opposite of install_bin (for single binaries)
-# Reuses fb_check_bin, idempotent, safe (no data loss on unrelated files)
+# Removal helper — surgical opposite of install_bin / install_versioned_bin
 # ----------------------------------------------------------------------
+#   remove_bin <name> [extra-glob...]
+#
+# Removes the PATH symlink, the legacy unversioned ${APP_DIR}/<name> payload, and
+# every versioned ${APP_DIR}/<name>-[0-9]* payload. Idempotent, and safe on a
+# broken or half-installed tool (it does not gate on fb_check_bin).
+#
+# THE EXTRA GLOBS, and why they are the caller's to supply. This is the same
+# vocabulary fb_prune_versions uses, deliberately: the 2026-09-05 ruling was that
+# ONE glob serves both the prune and the teardown, and that only works if both
+# sides accept the same explicit, plural, caller-supplied patterns. The payload
+# names in this tree are not uniform, and a derived "${name}-*" reclaims none of
+# the odd ones:
+#   go     $APP_DIR/go1.27.1          no separator at all — go.dev's version
+#                                     string already starts with "go"
+#   rg     ripgrep-15.1.0-x86_64-…    an abandoned naming scheme from a fetcher
+#                                     generation that no longer exists
+#   nvim   nvim.appimage-0.11.6       a superseded scheme, dot not dash
+# Those three are exactly the globs their fetchers already pass to
+# fb_prune_versions, so prune and teardown cannot disagree about what a payload
+# is called.
+#
+# Payloads whose name shares nothing with the binary name still need a teardown
+# special case rather than a glob — tsh's payload is `teleport-<v>`, zed's is
+# `zed.app`, nvm's is `nvm/` — as do tools with non-payload artifacts (desktop
+# entries, terminfo, generated config, git keys).
 remove_bin() {
-    local bin_name="$1"
+    local bin_name="${1:-}"
     if [[ -z "$bin_name" ]]; then
         echo "Error: remove_bin requires bin_name" >&2
         return 1
     fi
+    shift
+    local extra_globs=("$@")
     local app_root="${APP_DIR:-$HOME/.local/apps}"
     local bin_path="${BIN_DIR:-$HOME/.local/bin}/${bin_name}"
     local app_path="${app_root}/${bin_name}"
@@ -1244,12 +1270,26 @@ remove_bin() {
     # problem and still have their own teardown special cases in
     # update-user-home-dir.sh: go is `go1.27.1` (no separator), tsh's payload is
     # `teleport-<v>` (the tool is not the binary), zed is `zed.app`.
-    local versioned
+    local versioned pat
     for versioned in "${app_root}/${bin_name}"-[0-9]*; do
         [[ -e "$versioned" ]] || continue   # unmatched glob stays literal
         rm -rf "$versioned"
         echo "  removed versioned payload: $(basename "$versioned")"
         removed=1
+    done
+
+    # Caller-supplied globs, for the payload names the rule above cannot derive.
+    # Same -e guard rather than nullglob, for the same reason fb_prune_versions
+    # gives: an unmatched glob stays literal in bash, and enabling nullglob would
+    # be a global shell-option change inflicted on every caller.
+    for pat in ${extra_globs[@]+"${extra_globs[@]}"}; do
+        [[ -n "$pat" ]] || continue
+        for versioned in "${app_root}"/$pat; do
+            [[ -e "$versioned" ]] || continue
+            rm -rf "$versioned"
+            echo "  removed versioned payload: $(basename "$versioned")"
+            removed=1
+        done
     done
 
     if [[ "$removed" == 1 ]]; then

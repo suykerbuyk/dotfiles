@@ -191,7 +191,7 @@ APPIMAGE="${APP_DIR}/${BIN_NAME}-${VERSION}.AppImage"
 if [[ -x "$APPIMAGE" ]] && "$APPIMAGE" --version >/dev/null 2>&1; then
     echo "ghostty $VERSION already installed; symlink + payloads ensured."
     link_ghostty "$APPIMAGE"
-    fb_prune_versions "$APPIMAGE" "" 'ghostty-*.AppImage' 
+    fb_prune_versions "$APPIMAGE" "" 'ghostty-[0-9]*.AppImage' 
     install_terminfo "$APPIMAGE"
     install_desktop "$APPIMAGE"
     exit 0
@@ -236,7 +236,7 @@ trap 'rm -rf "$FB_TMP"' EXIT
 chmod +x "$APPIMAGE"
 link_ghostty "$APPIMAGE"
 
-fb_prune_versions "$APPIMAGE" "$GHOSTTY_PREV" 'ghostty-*.AppImage'
+fb_prune_versions "$APPIMAGE" "$GHOSTTY_PREV" 'ghostty-[0-9]*.AppImage'
 install_terminfo "$APPIMAGE"
 install_desktop "$APPIMAGE"
 

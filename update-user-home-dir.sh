@@ -99,16 +99,42 @@ if $UNINSTALL; then
     # and nothing would ever reclaim them, because the only code that knew their
     # names was the fetcher that had just been torn down.
     #
-    # remove_bin matches <name>-[0-9]*, so a payload whose name is not
-    # "<binname>-<version>" still needs a special case below: go is `go1.27.1`
-    # with no separator, tsh's payload is `teleport-<v>`, zed is `zed.app`.
+    # remove_bin matches <name>-[0-9]*. Three payloads do not follow that naming
+    # and take an EXPLICIT GLOB instead (below) — the same vocabulary, and the
+    # same patterns, their fetchers already hand fb_prune_versions, so prune and
+    # teardown cannot disagree about what a payload is called. A payload whose
+    # name shares nothing with the binary name still needs a special case:
+    # tsh's is `teleport-<v>`, zed's is `zed.app`, nvm's is `nvm/`.
     #
     # Keep this list in lockstep with the fetch.bins/ scripts (every
-    # 0N_fetch.<tool>.sh must map to an entry here, a special case below, or the
-    # rust block).
-    for b in jq rg go gofmt broot fzf nvim ninja starship chezmoi age age-keygen tree-sitter herdr fd bat xh op; do
+    # 0N_fetch.<tool>.sh must map to an entry here, a glob call below, a special
+    # case, or the rust block).
+    for b in jq gofmt broot fzf ninja starship chezmoi age age-keygen tree-sitter herdr fd bat xh op proxmox-mcp; do
         if $FORCE; then remove_bin "$b"; else echo "  would remove_bin $b"; fi
     done
+    # The three whose payload name remove_bin cannot derive from the binary name.
+    #
+    # go is the one that was actually STRANDING disk: its payload is
+    # `$APP_DIR/go1.27.1` — no separator at all, because go.dev's version string
+    # already starts with "go" — so neither `go` nor `go-[0-9]*` matches it, and
+    # a plain loop entry removed the two symlinks while leaving ~250 MB of
+    # toolchain behind. Seven of those accumulated here before phase 2 (1.8 GB).
+    #
+    # rg and nvim each carry an ABANDONED scheme rather than a current one:
+    # ripgrep-<ver>-<triple>/ from a fetcher generation that no longer exists,
+    # and nvim.appimage-<ver> from a superseded one. Machines that have not run
+    # the phase-5 fetchers yet still hold them.
+    # (gofmt stays in the loop above: it is a symlink INTO the go tree and owns
+    # no payload of its own, so it needs no glob.)
+    if $FORCE; then
+        remove_bin rg   'ripgrep-[0-9]*'
+        remove_bin nvim 'nvim.appimage-[0-9]*'
+        remove_bin go   'go1.*'
+    else
+        echo "  would remove_bin rg (plus ripgrep-[0-9]*)"
+        echo "  would remove_bin nvim (plus nvim.appimage-[0-9]*)"
+        echo "  would remove_bin go (plus go1.*)"
+    fi
     # Slots 18-21 (fd, bat, delta, xh) also install SHELL COMPLETIONS into the
     # XDG user dirs. remove_bin knows nothing about those, so a bare loop entry
     # would strand them — the same class of bug as tree-sitter's, pointed at a
@@ -163,14 +189,15 @@ if $UNINSTALL; then
     else
         echo "  would remove zed (~/.local/apps/zed.app + desktop entry)"
     fi
-    # ghostty is the one AppImage: remove_bin ghostty would only clear the
-    # ~/.local/bin/ghostty symlink, but the fetcher also drops a VERSIONED
-    # AppImage (~/.local/apps/ghostty-<ver>.AppImage — not the bare "ghostty"
-    # path remove_bin knows), a desktop entry, an icon, and the xterm-ghostty
-    # terminfo entry that makes ghostty's default TERM resolvable.
+    # ghostty keeps a special case, but a SMALLER one than before. Its payload is
+    # a versioned AppImage (~/.local/apps/ghostty-<ver>.AppImage), which
+    # remove_bin's own <name>-[0-9]* glob now matches, so the two hand-written
+    # `rm -f` lines for the payload and the symlink are gone. What survives is
+    # what remove_bin genuinely knows nothing about: a desktop entry, an icon,
+    # and the xterm-ghostty terminfo entry that makes ghostty's default TERM
+    # resolvable.
     if $FORCE; then
-        rm -f "$HOME"/.local/apps/ghostty-*.AppImage
-        rm -f "$HOME/.local/bin/ghostty"
+        remove_bin ghostty
         rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/com.mitchellh.ghostty.desktop"
         rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/512x512/apps/com.mitchellh.ghostty.png"
         # Surgical, like podman's config removal: ~/.terminfo may hold entries
@@ -183,14 +210,16 @@ if $UNINSTALL; then
     else
         echo "  would remove ghostty (~/.local/apps/ghostty-*.AppImage + desktop entry + icon + xterm-ghostty terminfo)"
     fi
-    # podman needs a special case like zed/nvm: remove_bin podman would only
-    # clear the ~/.local/bin/podman symlink, but the podman fetcher also drops a
-    # versioned whole-userland tree (~/.local/apps/podman-<ver>/), a generated
-    # PATH helper (~/.local/bin/podman-rootless-setup), and host-local config
-    # under ~/.config/containers — none of which remove_bin knows about.
+    # podman keeps a special case, but a SMALLER one than before. Its versioned
+    # whole-userland tree (~/.local/apps/podman-<ver>/) is matched by
+    # remove_bin's own <name>-[0-9]* glob now, so the hand-written `rm -rf` for
+    # the payload and the `rm -f` for the symlink are gone. What survives is what
+    # remove_bin knows nothing about: a generated PATH helper
+    # (~/.local/bin/podman-rootless-setup) and host-local config under
+    # ~/.config/containers.
     if $FORCE; then
-        rm -rf "$HOME"/.local/apps/podman-*
-        rm -f  "$HOME/.local/bin/podman" "$HOME/.local/bin/podman-rootless-setup"
+        remove_bin podman
+        rm -f  "$HOME/.local/bin/podman-rootless-setup"
         # Surgical config removal: ~/.config/containers may pre-exist from a
         # system podman/buildah, so DON'T rm -rf the dir. Delete only the exact
         # files our fetcher generates, then rmdir the dir if that left it empty
@@ -203,21 +232,15 @@ if $UNINSTALL; then
     else
         echo "  would remove podman (~/.local/apps/podman-* + podman symlink + podman-rootless-setup + generated ~/.config/containers config)"
     fi
-    # proxmox-mcp needs a special case for the same reason ghostty does: the
-    # fetcher installs a VERSIONED payload (~/.local/apps/proxmox-mcp-<ver>),
-    # because the binary has no --version flag and the path is therefore the
-    # only place its version can live. remove_bin looks for the BARE
-    # ~/.local/apps/proxmox-mcp, does not find it, and removes only the symlink
-    # — while still reporting success, because the symlink branch already set
-    # removed=1. The payload would survive on disk forever and a reinstall would
-    # add a second one beside it. rm -f, not -rf: the payload is a file.
-    if $FORCE; then
-        rm -f "$HOME"/.local/apps/proxmox-mcp-*
-        rm -f "$HOME/.local/bin/proxmox-mcp"
-        echo "  removed proxmox-mcp (versioned payload + symlink)"
-    else
-        echo "  would remove proxmox-mcp (~/.local/apps/proxmox-mcp-* + symlink)"
-    fi
+    # proxmox-mcp no longer needs a special case at all — it is a LOOP ENTRY now.
+    # It had one because its versioned payload (~/.local/apps/proxmox-mcp-<ver>,
+    # the only place its version can live, since the binary has no --version
+    # flag) was invisible to a remove_bin that looked only for the bare name:
+    # remove_bin deleted the symlink, reported success because its symlink branch
+    # had already set removed=1, and left the payload on disk forever. The
+    # <name>-[0-9]* sweep is exactly that case, so the hand-written block is
+    # deleted rather than shrunk.
+    #
     # tsh/tctl need a special case for the same reason proxmox-mcp and ghostty
     # do, plus one they do not have. The fetcher installs a VERSIONED payload
     # DIRECTORY (~/.local/apps/teleport-<ver>/{tsh,tctl}) because the two
@@ -234,7 +257,7 @@ if $UNINSTALL; then
     # rm -rf for the versioned directory (it is a directory), rm -f for the
     # legacy files and the symlinks.
     if $FORCE; then
-        rm -rf "$HOME"/.local/apps/teleport-*
+        rm -rf "$HOME"/.local/apps/teleport-[0-9]*
         rm -f  "$HOME/.local/apps/tsh" "$HOME/.local/apps/tctl"
         rm -f  "$HOME/.local/bin/tsh"  "$HOME/.local/bin/tctl"
         echo "  removed tsh/tctl (versioned teleport-* payload + legacy unversioned payloads + symlinks)"

@@ -228,7 +228,7 @@ if [[ -x "${PAYLOAD_DIR}/tsh" && -x "${PAYLOAD_DIR}/tctl" ]] \
     echo "tsh/tctl ${VERSION} already installed and matching ${PROXY} — nothing to do."
     ln -sfn "${PAYLOAD_DIR}/tsh"  "${BIN_DIR}/tsh"
     ln -sfn "${PAYLOAD_DIR}/tctl" "${BIN_DIR}/tctl"
-    fb_prune_versions "$PAYLOAD_DIR" "" 'teleport-*'
+    fb_prune_versions "$PAYLOAD_DIR" "" 'teleport-[0-9]*'
     remove_legacy_unversioned
     exit 0
 fi
@@ -285,7 +285,7 @@ trap 'rm -rf "$FB_TMP"' EXIT
 ln -sfn "${PAYLOAD_DIR}/tsh"  "${BIN_DIR}/tsh"
 ln -sfn "${PAYLOAD_DIR}/tctl" "${BIN_DIR}/tctl"
 
-fb_prune_versions "$PAYLOAD_DIR" "$TSH_PREV_DIR" 'teleport-*'
+fb_prune_versions "$PAYLOAD_DIR" "$TSH_PREV_DIR" 'teleport-[0-9]*'
 remove_legacy_unversioned
 
 echo "Installed Teleport client tools v${VERSION} (pinned to ${PROXY}) -> ${BIN_DIR}/{tsh,tctl}"

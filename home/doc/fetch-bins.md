@@ -70,16 +70,29 @@ chezmoi-managed files from `~` (via `chezmoi managed`), removes fetched tools (v
 `remove_bin`), and clears chezmoi's own state/config. It never touches the repo.
 
 **Keep the removal list in lockstep with `fetch.bins/`.** Every
-`NN_fetch.<tool>.sh` must map to an entry in the `remove_bin` loop, to a special
-case, or to the rust block — a tool that installs anything `remove_bin` does not
-know about (a desktop entry, generated config, a payload whose name is not
-`<binname>-<version>`) needs the special case. zed, podman, ghostty and delta
-have one; `tree-sitter` was missed when it was added as slot 15 and was stranded
-by `--uninstall --force` until it was added to the loop.
+`NN_fetch.<tool>.sh` must map to one of four things: an entry in the `remove_bin`
+loop, a `remove_bin <name> <glob>` call, a special case, or the rust block.
+`tree-sitter` was missed when it was added as slot 15 and was stranded by
+`--uninstall --force` until it was added to the loop.
 
-Versioned payloads that *do* follow the `<binname>-<version>` naming no longer
-need one: `remove_bin` sweeps `<name>-[0-9]*` itself, per the reversed ruling
-described under `remove_bin` below.
+Which one a tool needs:
+
+| the tool… | teardown |
+|---|---|
+| has no payload, or one named `<binname>-<version>` | plain loop entry |
+| has a payload `<name>-[0-9]*` cannot derive (go, rg, nvim) | `remove_bin <name> <glob>` |
+| has a payload sharing nothing with the binary name (tsh → `teleport-<v>`, zed → `zed.app`, nvm → `nvm/`) | special case |
+| installs non-payload artifacts (desktop entry, terminfo, generated config, git keys) | special case |
+
+zed, nvm, tsh/tctl, ghostty, podman and delta have a special case; ghostty's and
+podman's are **smaller** than they were, because `remove_bin` owns their payload
+half now and only their desktop/terminfo/config/helper artifacts remain.
+proxmox-mcp lost its special case entirely.
+
+The end-to-end teardown test seeds all four naming shapes into a throwaway HOME,
+runs the real `--uninstall --force`, and asserts both that each payload is gone
+**and** that an unrelated one survives — a teardown that cleared `~/.local/apps`
+wholesale would otherwise satisfy every reclamation assert.
 
 The rule covers **artifacts, not just binaries**. Slots 18–21 install shell
 completion files, so the uninstall path calls `fb_remove_completions` alongside
@@ -284,8 +297,16 @@ Key `_lib.sh` helpers:
     than the installer runs — which is how seven Go toolchains happened.
   - **The globs are explicit and plural** because the payload names are not
     uniform: slot 04 is `go1.*` (no tool prefix — go.dev's version string already
-    starts with `go`), slot 07 needs `nvim-*` **and** `nvim.appimage-*` for its
-    superseded naming scheme. A helper deriving `"${bin}-*"` reclaims neither.
+    starts with `go`), slot 07 needs `nvim-[0-9]*` **and**
+    `nvim.appimage-[0-9]*` for its superseded naming scheme, slot 16 is
+    `ghostty-[0-9]*.AppImage`, slot 22's is `teleport-[0-9]*` (the payload is not
+    named after either binary). A helper deriving `"${bin}-*"` reclaims none of
+    them.
+  - **These are the same strings `remove_bin` gets**, which is the whole point of
+    the shared vocabulary: prune and teardown cannot disagree about what a
+    payload is called. The suite compares the two sides as text for the three
+    slots that need an explicit teardown glob, rather than asserting each
+    separately and letting them drift.
   - **It refuses on an absent `keep`** and says so, rather than deleting the
     current payload alongside the old ones — the empty-string trap this tree has
     now paid for three times. Best-effort by contract: it warns and returns 0, so
@@ -302,17 +323,36 @@ Key `_lib.sh` helpers:
     finished the migration the earlier 2/4 split was tracking, and the suite
     asserts that no slot defines a local `prune_old_versions` any more.
 - `fetch_chezmoi` — fetch the chezmoi static release binary (same `gh_*` pattern).
-- `remove_bin name` — remove a tool's symlink, its legacy unversioned
-  `~/.local/apps/<name>` payload, **and every `~/.local/apps/<name>-<version>`**.
-  - That last clause reverses a standing ruling ("versioned runtime dirs are
+- `remove_bin name [extra-glob…]` — remove a tool's symlink, its legacy
+  unversioned `~/.local/apps/<name>` payload, **every
+  `~/.local/apps/<name>-[0-9]*`**, and anything the caller's extra globs name.
+  - The versioned clause reverses a standing ruling ("versioned runtime dirs are
     intentionally left; the active symlink is gone, so the tool is no longer on
     `PATH`"). Leaving them is how `~/.local/apps` reached 3.5 GB with 1.6 GB
     orphaned: nothing on the machine referenced those trees, and the only code
     that knew their names was the fetcher that had just been torn down. One glob
     now serves both the prune and the teardown.
-  - It matches `<name>-[0-9]*`, so a payload whose name is not
-    `<binname>-<version>` still needs a teardown special case: go is `go1.27.1`
-    with no separator, `tsh`'s payload is `teleport-<v>`, zed is `zed.app`.
+  - **The extra globs are the caller's, and are the same strings the fetcher
+    hands `fb_prune_versions`.** That shared vocabulary is what makes "one glob
+    serves both" literally true — prune and teardown cannot disagree about what a
+    payload is called. Three slots need one, because `<name>-[0-9]*` cannot
+    derive their payload name:
+
+    | slot | payload | glob |
+    |---|---|---|
+    | 04 go | `go1.27.1` — no separator; go.dev's version string already starts with `go` | `'go1.*'` |
+    | 03 rg | `ripgrep-15.1.0-x86_64-…` — an abandoned scheme | `'ripgrep-[0-9]*'` |
+    | 07 nvim | `nvim.appimage-0.11.6` — a superseded scheme, dot not dash | `'nvim.appimage-[0-9]*'` |
+
+    **go is the one that was actually stranding disk.** Teardown removed the `go`
+    and `gofmt` symlinks and left ~250 MB of toolchain behind, every time; seven
+    of those accumulated here (1.8 GB). `gofmt` still needs no glob — it is a
+    symlink *into* the go tree and owns no payload of its own.
+  - A payload whose name shares nothing with the binary name still needs a
+    teardown **special case** rather than a glob: `tsh`'s payload is
+    `teleport-<v>`, zed's is `zed.app`, nvm's is `nvm/`. So do tools with
+    non-payload artifacts — desktop entries, terminfo, generated config, git
+    keys.
 - `fb_install_completions tool zsh-src bash-src` / `fb_remove_completions tool…` —
   install (or tear down) shell completion **files** for slots 18–21. The zsh file
   is always installed as `_<tool>`, whatever it is called upstream. Full scheme,
@@ -683,10 +723,13 @@ Key `_lib.sh` helpers:
   `install_bin`'s `fb_check_bin` gate is version-blind, and this binary cannot
   be asked its version, so slot 22's compare-the-installed-version trick is
   unavailable. Putting the upstream version in the path lets the filesystem
-  answer "is this current?" without asking the binary anything. Teardown is
-  therefore a **special case, not a `for b in …` loop entry**: `remove_bin`
-  would look for the bare `~/.local/apps/proxmox-mcp`, not find it, remove only
-  the symlink, and still report success.
+  answer "is this current?" without asking the binary anything. Teardown was a
+  **special case** for exactly that reason — `remove_bin` looked for the bare
+  `~/.local/apps/proxmox-mcp`, did not find it, removed only the symlink, and
+  still reported success, because its symlink branch had already set
+  `removed=1`. Since `remove_bin` sweeps `<name>-[0-9]*`, that *is* this case,
+  and slot 24 is a plain **`for b in …` loop entry** now with no special case at
+  all.
 
   **`fb_arch` is correct here**, against the usual advice below: upstream's
   tokens are `amd64`/`arm64`, exactly what `fb_arch` emits. Do not "fix" it to a
