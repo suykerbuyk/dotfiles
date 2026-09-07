@@ -158,9 +158,24 @@ StrictHostKeyChecking = no
 User johns
 IdentityFile = ~/.ssh/id_ed25519
 
+# ---------------------------------------------------------------------------
+# The blocks below name no IdentityFile of their own, deliberately.
+#
+# They used to, and all eight of those paths were DANGLING — five under ~/.ssh/
+# and three under a sibling directory that has never existed on this machine.
+# ssh skips a missing IdentityFile silently, so they cost nothing at runtime and
+# simply lied about where these hosts get their credentials.
+#
+# They get them from the AGENT: `Host *`'s IdentityFile plus whatever the agent
+# is serving is the whole story. A host that needs one specific key pinned should
+# name a PUBLIC key alongside IdentitiesOnly, the way github.com above does —
+# never a private path that may or may not exist.
+#
+# Deliberately NOT replaced by naming the vault items that serve these hosts.
+# This repo is PUBLIC, and which item unlocks which host is metadata worth not
+# publishing — the same reason ssh-load-keys.sh keeps its manifest host-local.
 Host ax1
 Hostname ax1.fun.thruhere.net
-IdentityFile=~/.ssh/id_rsa.ax1
 UserKnownHostsFile = ~/.ssh/hosts/ax1.host
 #LocalForward 8000 localhost:8000
 #LocalForward 8001 localhost:8001
@@ -173,14 +188,12 @@ IdentityFile=~/.ssh/id_ed25519
 
 Host ax2
 Hostname ax2.fun.thruhere.net
-IdentityFile=~/.ssh/id_rsa.ax1
 UserKnownHostsFile = ~/.ssh/hosts/ax2.host
 port 22
 User Suykerbuyk
 
 Host ac1
 Hostname 192.168.7.1
-IdentityFile=~/.ssh/id_rsa.ac1
 UserKnownHostsFile = ~/.ssh/hosts/ac1.host
 LocalForward 8000 localhost:8000
 LocalForward 8001 localhost:8001
@@ -191,13 +204,11 @@ port 443
 User Suykerbuyk
 
 Host ac2
-IdentityFile=~/.ssh/id_rsa.ac2
 UserKnownHostsFile = ~/.ssh/hosts/ac2.host
 User Suykerbuyk
 
 Host xoa
 User xo
-IdentityFile=~/.ssh/id_rsa
 
 
 #Host gitlab
@@ -224,7 +235,6 @@ HostName jump.thruhere.net
 DynamicForward localhost:1082
 StrictHostKeyChecking = no
 UserKnownHostsFile = ~/.ssh/hosts/jump.thruhere.net.host
-IdentityFile=~/.ssh/other_keys/digital_ocean_id_rsa
 ForwardX11 yes
 Port 22
 User johns
@@ -244,7 +254,6 @@ Host mgmt.tunnel
 HostName localhost
 StrictHostKeyChecking = no
 UserKnownHostsFile = ~/.ssh/hosts/mgmt.tunnel.host
-IdentityFile=~/.ssh/id_rsa.tpasek
 StrictHostKeyChecking = no
 ProxyCommand ssh -tN ax1 nc %h %p
 Port 8001
@@ -254,7 +263,6 @@ Host arrakis
 HostName arrakis.syketech.arpa
 StrictHostKeyChecking = no
 UserKnownHostsFile = ~/.ssh/hosts/arrakis.host
-IdentityFile=~/.ssh/other_keys/id_rsa_home
 User johns
 
 

@@ -4306,6 +4306,18 @@ unset _hoststar_fa
 # first-wins, so being above is the whole mechanism.
 # Both anchors are proved non-empty BEFORE comparing: a missing match is the
 # empty string and [[ "" -lt N ]] is TRUE (the iter-63 fail-open shape).
+# No IdentityFile may name the ~/.ssh/other_keys/ directory. It has never existed
+# on this machine, and ssh skips a missing IdentityFile SILENTLY — so eight such
+# paths sat in this config for years costing nothing at runtime while lying about
+# where those hosts get their credentials. They get them from the agent.
+# Read comment-stripped: the comment explaining the removal names the directory,
+# so a raw grep would match its own rationale forever (the iter-44 trap).
+assert "ssh config: no IdentityFile names the nonexistent other_keys dir" \
+    "[[ -z \$(sed 's/#.*//' $SSHCFG | grep -F 'other_keys') ]]"
+# Anti-vacuity: the comment-stripped view must still contain real config.
+assert "ssh config: the comment-stripped view is not empty" \
+    "[[ \$(sed 's/#.*//' $SSHCFG | grep -c 'IdentityFile' | tr -d ' ') -ge 3 ]]"
+
 _ln_pin=$(grep -n '^Host \*\.syketech\.com syketech\.com$' "$SSHCFG" | head -1 | cut -d: -f1)
 _ln_gen=$(grep -n 'Begin generated Teleport configuration' "$SSHCFG" | head -1 | cut -d: -f1)
 assert "ssh config: both tsh-ordering anchors were found" \
