@@ -120,15 +120,109 @@ dotfiles-keys status   # is the key present? is ~/.keys decrypted?
 The full model — including key rotation and the honest threat model — is in
 [`home/doc/secrets.md`](home/doc/secrets.md).
 
+### SSH keys that work without the 1Password GUI
+
+Almost every private key here lives in 1Password, not on disk — **zero plaintext
+private keys**, and the one key that is on disk is passphrase-encrypted. That's
+comfortable on a desktop, where the 1Password app serves its own SSH agent and
+approves each signature. It's a problem everywhere else: a headless box, an
+inbound SSH session, or WSL on a laptop where you'd rather not install the app at
+all.
+
+Three mechanisms cover it, split by **direction of travel** rather than by
+machine. They aren't alternatives — each handles a case the others can't.
+
+**1 · The agent you arrived with wins.** If a shell inherits a live
+`SSH_AUTH_SOCK` — a forwarded agent, a multiplexer pane — it keeps it.
+1Password is the *default* for a shell that arrived with nothing, never an
+override. That sounds obvious; it wasn't true here for a long time, and `ssh -A`
+silently lost its forwarded agent to a local one that might be locked.
+
+**2 · Forward the agent from a desktop that has the app.** Enabled per host in
+`~/.ssh/config` — never globally, because root on the far end can use the socket
+for the life of the session. Signatures then raise an approval prompt on the
+desktop where you already are. For multi-hop use `ProxyJump`, never a chain of
+`ForwardAgent yes`: under ProxyJump the intermediate host never sees the socket.
+
+**3 · Pull the key from 1Password directly**, for a box with no local agent worth
+forwarding:
+
+```bash
+ssh-load-keys.sh --list   # what this machine would load, contacts nothing
+ssh-load-keys.sh          # op read → ssh-add, with a TTL
+```
+
+Key material goes vault → stdout → pipe → agent memory. It never touches disk,
+never appears in argv, never enters the environment.
+
+#### Populating the manifest
+
+`ssh-load-keys.sh` reads **`~/.config/shell/ssh-keys.manifest`** — one 1Password
+item UUID per line, text after the UUID is a label, `#` comments ignored.
+
+The file is **host-local and unmanaged on purpose**: chezmoi does not sync it.
+The keys a laptop needs aren't the keys a workstation needs, and this repo is
+public, so which vault item unlocks which host is metadata that shouldn't be in
+it. Create it per machine.
+
+```bash
+op signin                                  # no desktop app needed
+op item list --categories 'SSH Key'        # ID + TITLE for every key
+```
+
+Then pick the ones *that machine actually reaches* and write them in:
+
+```
+# ~/.config/shell/ssh-keys.manifest
+x6xvuvozbcxxcbtae2gxakjun4   github / primary
+bs2a3qbbvj5o42ikrcxf3l47ma   digital ocean
+```
+
+Pick by **evidence, not by name**. On a host where things already work, run
+`ssh-add -l` and match the fingerprint; or read the target's
+`~/.ssh/authorized_keys`. Listing more keys than you need recreates the problem
+below.
+
+Then `ssh-load-keys.sh`, and expect `loaded github / primary (ttl 36000s)`.
+
+Two things that will otherwise waste your afternoon:
+
+- **On a desktop with the 1Password app, the loader refuses** — that agent
+  rejects added keys, and it already serves the vault directly, so there's
+  nothing to load. This tool is for the machines *without* it.
+- **`op read` blocks on an approval prompt nobody answers.** It's bounded, so it
+  fails legibly instead of hanging; raise the budget with `OP_READ_TIMEOUT` if an
+  approval is just slow.
+
+#### Offering one key, not thirteen
+
+`IdentitiesOnly no` is OpenSSH's default, and it means ssh offers **every key the
+agent holds** before touching any `IdentityFile`. Measured against a throwaway
+`sshd` with the stock `MaxAuthTries 6`: an 8-key agent queued 14 candidates, got
+6 offers in, and was disconnected — never reaching the authorised key. This agent
+serves thirteen.
+
+So hosts that need it pin `IdentitiesOnly yes` plus a **public** key. Naming the
+`.pub` is the trick: ssh matches it against the agent and lets the *agent* sign,
+so no private key needs to be on disk at all.
+
+The full model, including the traps — `IdentityFile` is cumulative while
+`IdentityAgent` and `IdentitiesOnly` are first-wins, and why the Teleport pin
+must sit *above* the tsh-generated block — is in
+[`home/doc/ssh-agent.md`](home/doc/ssh-agent.md).
+
 ### It's tested
 
 The whole bootstrap runs against an **integration test suite**
 ([`test-update-user-home-dir.sh`](test-update-user-home-dir.sh)) in a throwaway sandbox
-`$HOME` — **~95 checks offline, ~118 with live network fetches**. It proves the
+`$HOME` — **1263 checks offline, more with live network fetches**. It proves the
 phase ordering, that `jq` truly bootstraps without `jq`, that PATH reaches
 non-interactive shells, that startup is byte-silent (the `scp`-safety invariant),
-that a keyless machine applies cleanly, and a full age encrypt → apply → `0600`
-round-trip. Dotfiles you can refactor without fear.
+that a keyless machine applies cleanly, a full age encrypt → apply → `0600`
+round-trip, and — since the ssh work — that a forwarded agent survives the rc
+layer and that `ssh -G` resolves the intended identity per host. New assertions
+are mutation-proved: the check has to be shown failing against a broken file
+before it counts. Dotfiles you can refactor without fear.
 
 ---
 
@@ -174,7 +268,7 @@ directory.
 | [`fetch-bins.md`](home/doc/fetch-bins.md) | The bootstrap installer and the toolchain fetchers. |
 | [`shell.md`](home/doc/shell.md) | The env/rc layering and the bugs it fixed. |
 | [`secrets.md`](home/doc/secrets.md) | The age-encrypted secrets model. |
-| [`ssh-agent.md`](home/doc/ssh-agent.md) | The systemd user ssh-agent with socket activation. |
+| [`ssh-agent.md`](home/doc/ssh-agent.md) | Agent selection, forwarding, and loading keys from 1Password without a GUI. |
 | [`multiplexers.md`](home/doc/multiplexers.md) | tmux and herdr as peers: the shared prefix, `tm`/`hrdr`. |
 | [`teleport.md`](home/doc/teleport.md) | Reaching hosts via `tsh`, and browser-less boxes via `--headless`. |
 
