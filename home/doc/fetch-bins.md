@@ -588,7 +588,10 @@ Key `_lib.sh` helpers:
     tool, so `home/dot_config/ghostty/config` stays chezmoi-managed and is
     reproduced on a fresh machine. That config pins CaskaydiaCove Nerd Font 10
     and Catppuccin Mocha to match the repo-wide theme; validate edits with
-    `ghostty +validate-config --config-file=<path>`.
+    `ghostty +validate-config --config-file=<path>`. Clipboard policy (one
+    buffer: mouse-select and Ctrl-Shift-V share CLIPBOARD) lives in
+    [multiplexers.md](multiplexers.md) — do not retarget Ghostty Shift+Insert
+    or Kitty middle-click back to PRIMARY.
   - **kitty is the default terminal; ghostty is opt-in.** This is a deliberate
     ruling, not an oversight. Every automated spawn point names kitty —
     hyprland `$terminal` and its `exec-once`, sway `$term`, and rofi

@@ -1417,6 +1417,8 @@ TVSTUB
     assert "herdr prefix is ctrl+b" "grep -q '^prefix = \"ctrl+b\"' <<<\"\$hc\""
     assert "tmux prefix is still C-b (the other half of the parity)" \
         "grep -q '^set-option -g prefix C-b' $SRC/dot_tmux.conf"
+    assert "tmux clipboard is OSC 52 external" \
+        "grep -qE '^set -s set-clipboard external\$' $SRC/dot_tmux.conf"
 
     # Parity is ADDITIVE: tmux key first, herdr's native default retained, so a
     # chord the terminal fails to deliver degrades instead of vanishing.
@@ -1488,6 +1490,17 @@ TVSTUB
     # Terminal layer pins Catppuccin Mocha in kitty AND ghostty.
     assert "theme matches the terminal layer (catppuccin)" \
         "grep -q '^name = \"catppuccin\"' <<<\"\$hc\""
+    # Clipboard pins. These default to true in herdr --default-config; they are
+    # absent from this file unless we write them. A comment-only pin would
+    # satisfy a raw grep of the tokens, so these are start-anchored live keys.
+    assert "herdr [ui] mouse_capture is a live true" \
+        "grep -q '^mouse_capture = true\$' <<<\"\$hc\""
+    assert "herdr [ui] copy_on_select is a live true" \
+        "grep -q '^copy_on_select = true\$' <<<\"\$hc\""
+    assert "herdr mouse_capture is not commented-only" \
+        "[[ \$(grep -c '^mouse_capture = true\$' <<<\"\$hc\") -eq 1 ]]"
+    assert "herdr copy_on_select is not commented-only" \
+        "[[ \$(grep -c '^copy_on_select = true\$' <<<\"\$hc\") -eq 1 ]]"
 
     # Real validator: catches an unknown action or an undeliverable key name,
     # including inside the arrays. Both failures are silent at runtime.
@@ -3384,6 +3397,20 @@ assert "ghostty config pins an installed Nerd Font" "grep -q '^font-family = Cas
 assert "ghostty config leaves TERM at the default"  "! grep -qE '^term[[:space:]]*=' $GH_CONF"
 assert "ghostty config propagates ssh terminfo"     "grep -q 'ssh-terminfo' $GH_CONF"
 assert "ghostty config unbinds ctrl+enter fullscreen" "grep -q '^keybind = ctrl+enter=unbind$' $GH_CONF"
+assert "ghostty config copy-on-select is clipboard"  "grep -q '^copy-on-select = clipboard$' $GH_CONF"
+assert "ghostty Shift+Insert pastes CLIPBOARD"       "grep -q '^keybind = shift+insert=paste_from_clipboard$' $GH_CONF"
+# LOAD-BEARING NEGATIVE: a second keybind that restored paste_from_selection
+# would last-win in ghostty and the positive assert above would still pass.
+# nocomment so the rationale comment naming the rejected token cannot satisfy
+# a raw grep and fail this forever (or pass it forever).
+assert "ghostty Shift+Insert is not paste_from_selection" \
+    "[[ -z \$(nocomment $GH_CONF | grep -E 'shift\\+insert.*paste_from_selection') ]]"
+if command -v ghostty >/dev/null 2>&1; then
+    assert "ghostty +validate-config accepts the managed file" \
+        "ghostty +validate-config --config-file=$GH_CONF >/dev/null 2>&1"
+else
+    skip "ghostty +validate-config (ghostty not installed)"
+fi
 
 # alacritty was retired (no longer used, and the binary is not installed). Its
 # source dir is gone; the already-applied copies are cleaned off every machine
@@ -3702,6 +3729,36 @@ assert "rofi terminal is kitty"                     "grep -qE '^[[:space:]]*term
 assert ".chezmoiremove retires kitty variants"      "grep -q '^.config/kitty/kitty.um690.conf\$' home/.chezmoiremove"
 # kitty.conf still includes the theme file, so it must survive the variant purge.
 assert "kitty theme include still resolves"         "grep -q '^include current-theme.conf\$' $KCONF && [[ -f home/dot_config/kitty/current-theme.conf ]]"
+
+# One clipboard: mouse-select and Ctrl-Shift-V share CLIPBOARD. kitty last-wins,
+# so a COUNT of each live setting — a second line greps clean if you only look
+# for the value you expect to find (the font_family trap, iter 36).
+assert "kitty: exactly one active copy_on_select" \
+    "[[ \$(grep -cE '^copy_on_select' $KCONF) -eq 1 ]]"
+assert "kitty copy_on_select is the token clipboard" \
+    "grep -qE '^copy_on_select[[:space:]]+clipboard\$' $KCONF"
+assert "kitty: exactly one active map shift+insert" \
+    "[[ \$(grep -cE '^map shift\\+insert' $KCONF) -eq 1 ]]"
+assert "kitty Shift+Insert pastes CLIPBOARD" \
+    "grep -qE '^map shift\\+insert paste_from_clipboard\$' $KCONF"
+assert "kitty middle-click pastes CLIPBOARD" \
+    "grep -qE '^mouse_map middle release ungrabbed paste_from_clipboard\$' $KCONF"
+# LOAD-BEARING NEGATIVE: nocomment so the dumped `#: Paste from the primary
+# selection` headings cannot keep a raw grep red (or green) forever.
+assert "kitty middle-click is not paste_from_selection" \
+    "[[ -z \$(nocomment $KCONF | grep -E '^[[:space:]]*mouse_map middle .*paste_from_selection') ]]"
+assert "kitty has no live paste_from_selection map" \
+    "[[ -z \$(nocomment $KCONF | grep -E '^[[:space:]]*(map|mouse_map) .*paste_from_selection') ]]"
+# Ctrl-Shift-V: kitty_mod is ctrl+shift, so kitty_mod+v and kitty_mod+shift+v
+# resolve to the same key. The LAST map wins. A live `no_op` at the file end
+# (the previous last-wins) swallows the chord even if an earlier line maps
+# paste_from_clipboard.
+assert "kitty Ctrl-Shift-V last-wins is paste_from_clipboard" \
+    "[[ \$(nocomment $KCONF | grep -E '^[[:space:]]*map kitty_mod\\+shift\\+v' | tail -1 | grep -c paste_from_clipboard) -eq 1 ]]"
+assert "kitty Ctrl-Shift-V is not last-wins no_op" \
+    "[[ -z \$(nocomment $KCONF | grep -E '^[[:space:]]*map kitty_mod\\+shift\\+v no_op') ]]"
+assert "clipboard ruling is documented" \
+    "grep -q '^## Clipboard is one buffer\$' home/doc/multiplexers.md"
 
 # ===========================================================================
 # Structural checks for the nvim runtime fix + tree-sitter CLI fetcher — source

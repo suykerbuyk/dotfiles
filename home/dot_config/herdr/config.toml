@@ -143,3 +143,17 @@ edit_scrollback = ["prefix+[", "prefix+e"]
 
 help             = "prefix+?"  # tmux: prefix ? (list-keys). Already the default.
 workspace_picker = "prefix+w"  # tmux: prefix w (choose-tree). Already the default.
+
+[ui]
+# Pinned rather than left at herdr --default-config. Both default to true
+# today; a silent upstream flip would desync Linux Ghostty/Kitty from
+# Windows Terminal with no diff to point at.
+#
+# mouse_capture = true means herdr eats pane drags, so the outer terminal's
+# copy-on-select never fires inside a pane. copy_on_select = true is herdr's
+# own write: wl-copy (CLIPBOARD) on Linux, OSC 52 `c` if that native write
+# fails. herdr 0.8.0 has no PRIMARY target (herdrdev/herdr#748). Linux
+# collapse of Shift+Insert / middle-click onto CLIPBOARD lives in Ghostty
+# and Kitty, not here — this file is shared with Windows Terminal.
+mouse_capture = true
+copy_on_select = true

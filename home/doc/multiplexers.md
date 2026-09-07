@@ -224,6 +224,30 @@ approximate them, and no workaround is pretended:
 
 If you need any of these mid-task, that is a reason to be in tmux for that task.
 
+## Clipboard is one buffer
+
+Operator ruling (2026-09-07): mouse-select and Ctrl-Shift-V share one buffer,
+matching Windows Terminal. Linux PRIMARY still exists in the compositor; no
+user-facing paste key in this repo should read it. Do not "fix" Shift+Insert
+or middle-click back to PRIMARY.
+
+| Layer | Copy | Paste |
+|---|---|---|
+| Ghostty | `copy-on-select = clipboard` (writes CLIPBOARD **and** PRIMARY) | `shift+insert=paste_from_clipboard`; Ctrl-Shift-V is the Linux default `paste_from_clipboard`. Middle-click is not remappable — Ghostty always pastes the selection clipboard there. |
+| Kitty | `copy_on_select clipboard` (`yes` already coerced to that; spelled so last-wins cannot hide a second value) | Shift+Insert, middle-click, and `kitty_mod+s` → `paste_from_clipboard`. Ctrl-Shift-V is the last-wins map: `kitty_mod+shift+v` at the end of `kitty.conf` is `paste_from_clipboard`, not `no_op`. (`kitty_mod` is `ctrl+shift`; those two chords resolve to the same key.) |
+| herdr | `[ui] mouse_capture = true` + `copy_on_select = true`. herdr eats pane drags, so Ghostty/Kitty copy-on-select do not see them. herdr 0.8.0 writes CLIPBOARD (`wl-copy`, OSC 52 `c` if that fails) — it has no PRIMARY target. | No herdr paste binding. Ctrl-Shift-V is the outer terminal. |
+| tmux | `set -s set-clipboard external` — yank emits OSC 52 `c`. `mouse off`. | Ctrl-Shift-V is the outer terminal. `prefix+p` is tmux's internal buffer, not CLIPBOARD. herdr uses `prefix+p` for `previous_tab`; that mismatch is accepted, not a clipboard bug. |
+
+OSC 52 stays enabled (Windows Terminal / SSH copy path). Do not set
+`GROK_CLIPBOARD_NO_OSC52`, do not strip kitty `clipboard_control`
+`write-clipboard`, do not set tmux `set-clipboard off`.
+
+A Sway/Hyprland PRIMARY→CLIPBOARD watcher (`wl-paste --primary --watch wl-copy`)
+was considered and declined: herdr already writes CLIPBOARD, the watcher can
+freeze herdr (`herdrdev/herdr#3014`), and Hyprland is still a live managed
+desktop so a Sway-only watcher would be a second Linux split. Reopen only
+with a live re-measure and an operator ruling that names both compositors.
+
 ## Validate every config edit
 
 ```sh

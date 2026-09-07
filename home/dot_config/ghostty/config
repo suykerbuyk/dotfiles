@@ -38,6 +38,14 @@ copy-on-select = clipboard
 confirm-close-surface = true
 mouse-hide-while-typing = true
 
+# All paste keys read CLIPBOARD. Ghostty's Linux default Shift+Insert is
+# paste_from_selection (PRIMARY). copy-on-select = clipboard already writes
+# both buffers on a Ghostty-native select; this remap is for the case where
+# something else (OSC 52, herdr wl-copy) updated CLIPBOARD only.
+# Middle-click cannot be retargeted: Ghostty always pastes the selection
+# clipboard there. See home/doc/multiplexers.md ("Clipboard is one buffer").
+keybind = shift+insert=paste_from_clipboard
+
 # --- keybinds ---------------------------------------------------------------
 # Ghostty's Linux default binds ctrl+enter to toggle_fullscreen. That chord
 # never reaches herdr or the child process, and it is not sway (sway's
