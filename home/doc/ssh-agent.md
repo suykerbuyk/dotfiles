@@ -42,6 +42,49 @@ more than anything in this list.
 4. Keychain fallback.
 5. Manual `ssh-agent` on a predictable socket.
 
+## Getting a key when there is no 1Password GUI
+
+Two mechanisms, split by **direction of travel**, not by machine. They are not
+alternatives — you need both, because they serve opposite cases.
+
+**From a desktop that HAS the 1Password app → forward the agent.** The remote
+box uses this machine's agent, so every signature raises an approval prompt on
+the desktop where you already are. Nothing is copied anywhere; the key never
+leaves the app. Enabled **per host** in `~/.ssh/config` — `vault01` today — and
+never in `Host *`, because root on the forwarded-to host can use the socket for
+the life of the session. For multi-hop use `ProxyJump`, never a chain of
+`ForwardAgent yes`: under ProxyJump the intermediate host carries a tunnelled
+connection and never sees the agent socket.
+
+**From a box with NO local agent worth forwarding (WSL) → `ssh-load-keys.sh`.**
+Forwarding cannot help there — there is no local 1Password agent to forward — so
+the keys come from `op` instead:
+
+```
+op read "op://Personal/<item-UUID>/private key?ssh-format=openssh" | ssh-add -t <ttl> -
+```
+
+Key material goes vault → stdout → pipe → agent memory: never disk, never argv,
+never the environment. Notes that cost real debugging time:
+
+- `?ssh-format=openssh` is **mandatory**. The default is whatever format the key
+  was *stored* in, and 5 of the 13 items in this vault return PKCS#1 or PKCS#8,
+  which `ssh-add` rejects as `invalid format`.
+- Address items by **UUID**. Two items are both titled `SSH Key bd770i`, and a
+  title-addressed read exits 1 with a disambiguation list.
+- Read **op's** exit status, not just `ssh-add`'s. On an expired session op fails
+  while `ssh-add` reports `invalid format` against an empty stream — which is the
+  misdiagnosis this whole area started from.
+- `op whoami` is **not** a liveness probe: in 2.39.0 it reports
+  `account is not signed in` while `op read` succeeds in the same second.
+- The manifest (`~/.config/shell/ssh-keys.manifest`) is **host-local and
+  unmanaged**, like `env.d`. A laptop needs different keys than a workstation,
+  and this repo is public — a committed manifest would publish which vault items
+  hold which keys.
+- Auth is manual `op signin`, which works with no desktop app. A 1Password
+  **service account cannot read a Personal or Private vault**, so it is not an
+  option here; that route needs the keys moved to a shared vault first.
+
 🔴 **1Password is the DEFAULT, not an override.** It used to be step 1 and
 unconditional — "this check runs first (before any guard) so it reliably wins" —
 which meant any machine with the app installed silently discarded a forwarded
@@ -64,6 +107,8 @@ The original `keychain` block in `.zshrc` is preserved but commented with a migr
 - `tsh version` / `tsh ls` (no manual `TELEPORT_USE_LOCAL_SSH_AGENT=false` needed on desktops)
 - Non-interactive: `bash -c 'source ~/.config/bashrc.d/10-ssh-agent.sh; echo $SSH_AUTH_SOCK'`
 - Which agent did this shell actually pick, and does it answer: `./doctor` (the `agent` row names the socket, its origin, and how many identities it holds — reachability only, never a signature test, because `ssh-add -T` blocks against a locked 1Password vault)
+- Agent forwarding resolves per host: `ssh -G <host> | grep forwardagent`
+- Keys loadable without a GUI: `ssh-load-keys.sh --list`, then `ssh-load-keys.sh`
 - Forwarded-agent check: `SSH_AUTH_SOCK=/some/live/foreign.sock bash -c 'source ~/.config/bashrc.d/10-ssh-agent.sh; echo $SSH_AUTH_SOCK'` — must echo back the socket you gave it, unchanged
 - Keychain migration simulation (comment keychain block and re-source).
 - WSL/Arch/Debian/Pop!_OS cross-check (1Password path skipped on headless; systemd works everywhere; no breakage after reboot).

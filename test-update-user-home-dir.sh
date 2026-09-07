@@ -3426,6 +3426,97 @@ assert "syketech login helper still present"        "[[ -f home/dot_local/bin/ex
 # there is no multiplexer branch to assert: tmux, herdr and a bare terminal all
 # take one identical path. herdr exposes no buffer or clipboard command at all,
 # so the old `tmux set-buffer` approach had nothing to port to.
+# ---------------------------------------------------------------------------
+sec "ssh-load-keys: the GUI-less key loader"
+SSHLOAD="home/dot_local/bin/executable_ssh-load-keys.sh"
+assert "ssh-load-keys parses"                       "bash -n $SSHLOAD"
+assert "ssh-load-keys has a --help"                 "grep -qF -- '--help' $SSHLOAD"
+
+# `?ssh-format=openssh` on EVERY op read. Measured across all 13 SSH_KEY items
+# in the vault: the default is whatever format the key was stored in, and 5 of
+# 13 return PKCS#1 or PKCS#8, which ssh-add rejects. A read without the
+# parameter is format-luck, not a working command.
+# Count INVOCATIONS, not the string `op read`: a diagnostic message that quotes
+# the command ("op read timed out after ...") is not a call site, and counting it
+# made this assert fail against correct code. Anchor on the secret-reference URI,
+# which only a real invocation carries.
+_reads=$(nocomment $SSHLOAD | grep -c 'op read "op://' | tr -d ' ')
+_fmt=$(nocomment $SSHLOAD | grep -c 'op read "op://.*ssh-format=openssh' | tr -d ' ')
+assert "ssh-load-keys: every op read pins ssh-format=openssh" \
+    "[[ $_reads -ge 1 && $_fmt -eq $_reads ]]"
+unset _reads _fmt
+
+# NEGATIVE asserts, over comment-stripped source: this file documents at length
+# why each of these forms is wrong, so a raw grep matches its own rationale and
+# passes forever (the iter-44 trap).
+assert "ssh-load-keys: never uses 'op item get'" \
+    "[[ -z \$(nocomment $SSHLOAD | grep -F 'op item get') ]]"
+# --format json returns the SSHKEY private key in CLEARTEXT with no --reveal.
+assert "ssh-load-keys: never asks op for JSON" \
+    "[[ -z \$(nocomment $SSHLOAD | grep -F -- '--format json') ]]"
+# The stream must reach ssh-add unmutated: --no-newline or a \$( ) round-trip
+# strips the trailing newline and ssh-add answers 'invalid format'.
+assert "ssh-load-keys: never mutates the key stream" \
+    "[[ -z \$(nocomment $SSHLOAD | grep -F -- '--no-newline') ]]"
+# Key material must never reach disk. --out-file is the one op flag that writes
+# it, and it also emits no trailing newline.
+assert "ssh-load-keys: never writes key material to a file" \
+    "[[ -z \$(nocomment $SSHLOAD | grep -F -- '--out-file') ]]"
+# `op whoami` reports "account is not signed in" in 2.39.0 while `op read`
+# succeeds in the same second — it is not a liveness probe.
+assert "ssh-load-keys: does not gate on 'op whoami'" \
+    "[[ -z \$(nocomment $SSHLOAD | grep -F 'op whoami') ]]"
+
+# op's exit status must be read, not just ssh-add's: on an expired session op
+# fails while ssh-add reports 'invalid format' against an empty stream, which is
+# the misdiagnosis this whole task began from.
+assert "ssh-load-keys: reads op's status, not just ssh-add's" \
+    "nocomment $SSHLOAD | grep -qF 'PIPESTATUS'"
+# 🔴 And it must capture the WHOLE array in ONE assignment: reading
+# \${PIPESTATUS[0]} into a variable is itself a command and resets PIPESTATUS,
+# so a following \${PIPESTATUS[1]} is unbound under `set -u`. Measured here.
+assert "ssh-load-keys: captures PIPESTATUS as a whole array" \
+    "nocomment $SSHLOAD | grep -qF 'PIPESTATUS[@]'"
+assert "ssh-load-keys: does not index PIPESTATUS twice" \
+    "[[ \$(nocomment $SSHLOAD | grep -c 'PIPESTATUS\[[0-9]\]' | tr -d ' ') -eq 0 ]]"
+
+# Guard before use, the tsh-login shape: the op presence check must precede the
+# first op call. Both anchors proved non-empty BEFORE comparing — a missing
+# match is the empty string and [[ "" -lt N ]] is TRUE (the iter-63 shape).
+_ln_g=$(nocomment $SSHLOAD | grep -n 'command -v op' | head -1 | cut -d: -f1)
+_ln_r=$(nocomment $SSHLOAD | grep -n 'op read' | head -1 | cut -d: -f1)
+assert "ssh-load-keys: both guard-order anchors were found" \
+    "[[ -n \"\$_ln_g\" && -n \"\$_ln_r\" ]]"
+assert "ssh-load-keys: the op guard precedes the first op read" \
+    "[[ -n \"\$_ln_g\" && -n \"\$_ln_r\" && \$_ln_g -lt \$_ln_r ]]"
+unset _ln_g _ln_r
+
+# Refuses the 1Password agent by name: it rejects added keys, and the resulting
+# error reads like a bad key rather than the wrong agent.
+assert "ssh-load-keys: refuses to load into the 1Password agent" \
+    "nocomment $SSHLOAD | grep -qF '.1password/agent.sock'"
+
+# 🔴 `op read` must be BOUNDED. Measured against the real vault: it blocked until
+# a 60s timeout killed it, waiting for an approval prompt nobody answered. This
+# script exists to serve a GUI-less box, which is precisely where nobody is going
+# to answer — unbounded, it hangs forever there. Same class as `ssh-add -T`
+# against a locked agent, which is why the drop-in refuses to call that at all.
+assert "ssh-load-keys: bounds op read with timeout(1)" \
+    "nocomment $SSHLOAD | grep -qF 'TIMEOUT_BIN'"
+# timeout(1) is looked up, never assumed: it is not in FreeBSD base as a given,
+# and a missing binary must degrade rather than break the whole loader.
+assert "ssh-load-keys: probes for timeout rather than assuming it" \
+    "nocomment $SSHLOAD | grep -qE 'command -v timeout'"
+# rc 124 is timeout's own status and means something different from op failing —
+# it must not be reported as \"op could not read\", which sends the reader to the
+# vault instead of to the prompt.
+assert "ssh-load-keys: reports a timeout distinctly from an op error" \
+    "nocomment $SSHLOAD | grep -qF '124'"
+# The manifest is host-local by design — this repo is PUBLIC, and a committed
+# manifest would publish which vault items hold which keys.
+assert "ssh-load-keys: no 1Password item UUIDs are committed" \
+    "[[ -z \$(nocomment $SSHLOAD | grep -oE '\\b[a-z0-9]{26}\\b') ]]"
+
 TSHL="home/dot_local/bin/executable_tsh-login-syketech.sh"
 # The embedded driver, extracted the same way the script writes it out. The
 # `cat` line is TAB-INDENTED, so anchoring this on ^cat matched nothing and the
@@ -4166,11 +4257,34 @@ if command -v ssh >/dev/null 2>&1 && [[ -r "$SB/.ssh/config" ]]; then
     assert_eq "ssh -G: github.com resolves to the ambient agent (no IdentityAgent)" "$_g_gh" "0"
     _g_syke=$(ssh -F "$SB/.ssh/config" -G syketech.com 2>/dev/null | grep -i '^identityagent ' | sed 's/^[Ii]dentity[Aa]gent //')
     assert_glob "ssh -G: syketech.com resolves to the 1Password agent" "$_g_syke" *1password/agent.sock
-    unset _g_gh _g_syke
+    # Agent forwarding is opt-in PER HOST. vault01 is the GUI-less box this repo
+    # actually runs on, so it gets a forwarded agent; everything else must not,
+    # because forwarding lets root on the far end use the socket for the life of
+    # the session. github.com is the canary: it shares no block with vault01, so
+    # if it ever reads `yes` the opt-in has leaked into `Host *`.
+    _fa_v=$(ssh -F "$SB/.ssh/config" -G vault01 2>/dev/null | grep -i '^forwardagent ' | sed 's/^[Ff]orward[Aa]gent //')
+    assert_eq "ssh -G: vault01 forwards the agent"          "$_fa_v"  "yes"
+    _fa_gh=$(ssh -F "$SB/.ssh/config" -G github.com 2>/dev/null | grep -i '^forwardagent ' | sed 's/^[Ff]orward[Aa]gent //')
+    assert_eq "ssh -G: github.com does NOT forward the agent" "$_fa_gh" "no"
+    _fa_syke=$(ssh -F "$SB/.ssh/config" -G hal9k-rpi04.syketech.com 2>/dev/null | grep -i '^forwardagent ' | sed 's/^[Ff]orward[Aa]gent //')
+    assert_eq "ssh -G: the Teleport hosts do NOT forward the agent" "$_fa_syke" "no"
+    unset _g_gh _g_syke _fa_v _fa_gh _fa_syke
 else
     skip "ssh -G: github.com resolves to the ambient agent (no IdentityAgent) — no ssh on PATH or no applied config"
     skip "ssh -G: syketech.com resolves to the 1Password agent — no ssh on PATH or no applied config"
+    skip "ssh -G: vault01 forwards the agent — no ssh on PATH or no applied config"
+    skip "ssh -G: github.com does NOT forward the agent — no ssh on PATH or no applied config"
+    skip "ssh -G: the Teleport hosts do NOT forward the agent — no ssh on PATH or no applied config"
 fi
+
+# Structural twin of the ssh -G pair above: `Host *` must never gain a
+# ForwardAgent either. Same first-wins hazard as IdentityAgent, but the blast
+# radius is worse — a global `yes` hands every host you touch, including ones you
+# do not control, the use of your agent for the life of the session.
+_hoststar_fa=$(awk '/^Host \*$/{f=1;next} /^Host /{f=0} f' "$SSHCFG" | sed 's/#.*//')
+assert "ssh config: the Host * block carries no ForwardAgent" \
+    "[[ -z \$(printf '%s\n' \"\$_hoststar_fa\" | grep -iE '^[[:space:]]*ForwardAgent') ]]"
+unset _hoststar_fa
 
 assert "doctor registry lists tsh"                  "grep -q 'tsh|tsh|' lib/doctor-registry.sh"
 # tsh/tctl are NOT remove_bin loop entries, and asserting that they are is what
@@ -5242,6 +5356,7 @@ unset _reap_adjacent
 # these three emitted ONLY the copyright and no usage text at all.
 for h in test-update-user-home-dir.sh \
          home/dot_local/bin/executable_setup-ssh-agent.sh \
+         home/dot_local/bin/executable_ssh-load-keys.sh \
          home/dot_local/bin/executable_agent-bootstrap.sh; do
     # Invoked through its OWN shebang, not `bash <file>`. Naming the interpreter
     # here is what let eight scripts carry an unusable `#!/bin/bash` past this very

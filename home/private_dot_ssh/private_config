@@ -1,3 +1,30 @@
+# ---------------------------------------------------------------------------
+# Agent forwarding — PER HOST, never globally.
+#
+# Forwarding lets the REMOTE host use this machine's agent for onward auth. On a
+# desktop running the 1Password app that means each signature raises an approval
+# prompt HERE, which is exactly what you want when working on a GUI-less box from
+# a windowing one: the approval surface stays where the human is.
+#
+# 🔴 It is not free. Root on the forwarded-to host can use the agent socket for
+# as long as the session is open, so this is enabled only for hosts under our own
+# control and NEVER in `Host *`.
+#
+# 🔴 For multi-hop use ProxyJump, never a chain of `ForwardAgent yes`. Under
+# ProxyJump the intermediate host carries a tunnelled TCP connection and never
+# sees the agent socket; only the final host gets forwarding. The prox-mgmt1
+# block below already uses that shape.
+#
+# This only works because the rc layer stops discarding what gets forwarded:
+# 10-ssh-agent.sh honours an inherited LIVE socket and env.sh only fills a gap
+# (iter 66). Before that, arriving on a box running these dotfiles silently
+# replaced the forwarded agent with a local one. See home/doc/ssh-agent.md.
+#
+# To extend: add a `Host <name>` block here with `ForwardAgent yes`, above the
+# `Host *` block. Verify with `ssh -G <name> | grep forwardagent`.
+Host vault01
+    ForwardAgent yes
+
 # 🔴 ssh_config is FIRST-WINS per keyword, with no specificity ranking: the first
 # value seen for a keyword wins, even if a later block matches the host more
 # narrowly. Measured with `ssh -G` on OpenSSH 10.5p1, for IdentityAgent
