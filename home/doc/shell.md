@@ -495,3 +495,97 @@ panes, splits, subshells) stays silent. The one-shot is a stamp file,
   doctor carries no broot special case.
 - **Two bashrc files.** `.bashrc-debian` and `.bashrc-arch` differed by exactly one
   alias. `.chezmoiremove` deletes the stale copies from every machine.
+
+## Test discipline
+
+The harness is large and its failure modes are subtle. These rules were each paid
+for by a real bug that shipped green, and they are collected here rather than in
+`resume.md` so the resume can stay a gateway.
+
+### An assert must be able to fail
+
+Every new assertion is **mutation-proved**: break the thing it guards, watch the
+assert go red, restore. Three properties, all required.
+
+- **The file actually changed.** md5 it before and after. A mutation that silently
+  fails to apply reports a *passing* assert as MISSED and looks like a blind
+  check — measured, and it cost a wrong conclusion before the md5 step was added.
+- **The assert is reachable.** An assert inside a skipped branch proves nothing.
+- **The mutation breaks MEANING, not syntax.** Any assert catches a syntax error;
+  only a good one catches a semantic regression.
+
+### Read comment-stripped source for negative and counting asserts
+
+This repo documents at length *why* each rejected form was rejected, so a raw
+grep matches the file's own rationale and the assert passes forever. It has
+caught people in both directions:
+
+- asserts that matched their rationale comments and stayed green while the code
+  they guarded was gutted;
+- a verification grep that matched the comment it had *just written*, reporting a
+  correct file as broken.
+
+Strip with `sed 's/#.*//'`. When a scan reads the file it lives in, break the
+literal so it cannot match its own source — `ssh[-]agent` rather than
+`ssh-agent`.
+
+### Prove a captured value exists before comparing it
+
+A missing match is the empty string, and `[[ "" -lt 42 ]]` is **true**, because
+empty is 0 in arithmetic context. So an ordering assert built on two `grep -n`
+captures **fails open** — it passes when its anchors have vanished, which is
+exactly when you need it. Assert both anchors are non-empty first.
+
+Same shape as a GNU-only `realpath -m` returning empty on BSD, where
+`"" != ""` is false and a guard was skipped in silence.
+
+### A false SKIP reads as coverage
+
+A skip that fires for the wrong reason is worse than a failure: it *looks* like
+deliberate platform gating. One assert guarded on `df_have`, which is a **sourced
+rc-layer helper** and undefined in the harness — it exited 127, the guard failed,
+and the assert skipped while appearing intentional. Guard with `command -v`, and
+give every deliberate skip a named reason so it can be counted.
+
+### `assert()` runs with pipefail OFF
+
+`producer | grep -q PATTERN` is a SIGPIPE race — `grep -q` exits on first match
+and the producer dies with SIGPIPE, which pipefail turns into a spurious failure
+(measured: one bad verdict in 46 clean runs). Captured values are passed as
+**arguments** (`assert_eq`, `assert_glob`, `assert_re`), never spliced into
+`eval`, where one stray quote becomes a syntax error indistinguishable from a
+real verdict.
+
+### Capture traps
+
+- Assert emptiness on the **file** (`[[ ! -s f ]]`), never on `$(cat f)` —
+  command substitution strips trailing newlines, so a one-byte `"\n"` leak reads
+  as empty and passes.
+- Capture `$?` **before** any trailing command; a function ending in `cat`
+  returns cat's status.
+- **BSD `wc` pads with leading whitespace; GNU `wc` on a pipe does not.** A count
+  captured with `$( )` and string-compared passes on Linux and fails on FreeBSD.
+  `tr -d ' '` at the point of capture, or use an arithmetic context, which
+  evaluates the padding away.
+- `grep -F` is a **substring** match (`fd.bash.other` contains `fd.bash`), and
+  `grep -c` counts **lines**, not occurrences.
+
+### The suite is self-capturing
+
+A daemon that inherits that capture makes the suite finish every assert and then
+**hang** — it never exits, and a hang reads as a broken machine rather than a
+broken test. So: never pipe a command that may spawn a daemon through `$( )`;
+write to a file and `cat` it. Reap by **PID**, never `pkill -f`, whose pattern
+can match the command line of the shell running it.
+
+Reaper patterns must tolerate an interposed flag: `pgrep -f "ssh-agent -a $DIR"`
+demands adjacency and silently missed every `ssh-agent -s -a …` that `keychain`
+spawns — 232 agents accumulated before anyone looked.
+
+### Anything that can block must be bounded
+
+The harness has no watchdog. `ssh-add -T` against a locked agent, `op read`
+waiting on an approval, a unix socket that `listen()`s but never accepts — each
+blocks forever. Prefer a design whose failure modes are exit codes and stderr
+over one whose failure mode is a prompt that never returns, and where a blocking
+call is unavoidable, bound it with `timeout(1)` (probed, never assumed).

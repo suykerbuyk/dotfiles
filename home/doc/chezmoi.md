@@ -115,3 +115,53 @@ symlinks with managed files.
 `private_`(0700) guards, the installer dry-run (all phases + no repo
 contamination), and the fetch/uninstall paths. `--go` adds the 150 MB Go fetch
 (GOROOT check); `--no-net` runs structural-only.
+
+## Recovering a machine stranded by the history rewrite
+
+Iteration 36 rewrote **every** commit in this repo with `git filter-repo`, to
+redact credentials before it went public. A checkout that has not pulled since is
+therefore on a **disjoint history** — not a drifted branch — and the usual
+recovery moves do not apply.
+
+**The tell is that it looks healthy.** `git status -sb` reports a plausible
+`ahead N, behind M` on a clean tree. What gives it away:
+
+```bash
+git merge-base HEAD origin/main    # returns NOTHING on a stranded checkout
+```
+
+No merge base means **a merge is impossible**. Do not attempt one; the conflict
+output will be every file in the repo and none of it is meaningful.
+
+The fix is to discard the local history:
+
+```bash
+git fetch origin
+git reset --hard origin/main
+```
+
+Two things to do **first**, in this order:
+
+1. **Prove the local side holds nothing unique.** The SHAs differ everywhere, so
+   compare by subject:
+
+   ```bash
+   comm -23 <(git log --format=%s          | sort -u) \
+            <(git log --format=%s origin/main | sort -u)
+   ```
+
+   Anything printed exists only locally and will be destroyed by the reset.
+
+2. **Read the sensitive diffs before applying.** This checkout is also
+   `chezmoi sourceDir`, so the reset moves the machine's source of truth for
+   `$HOME`. `~/.ssh/config` especially: an unreconciled machine still holds the
+   pre-rewrite plaintext credentials, and the point of the reset is to replace
+   them.
+
+🔴 **Never `chezmoi re-add` on a machine that has not yet been reconciled.** The
+live file there still contains the redacted secrets, and re-adding pushes them
+straight back into a public repo. Push the clean version *down* with
+`chezmoi apply` first, always.
+
+Corollary for anything that quotes a commit: every SHA from before iteration 36
+is **dangling**. Map old references by commit *subject*, never by hash.
