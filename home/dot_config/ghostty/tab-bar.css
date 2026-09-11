@@ -1,0 +1,27 @@
+/* Compact tab strip for Ghostty (GTK / libadwaita). Loaded by `gtk-custom-css`
+ * in ./config; the path is relative to that file.
+ *
+ * GEOMETRY ONLY. Colours come from `window-theme = ghostty` in the config, so
+ * the strip follows the terminal theme and this file never restates a palette.
+ *
+ * libadwaita's defaults (1.8.4, the AppImage's runtime) make the strip 48px
+ * tall under a ~15px terminal row: tabbox padding 6px top and bottom around a
+ * 34px min-height, each tab 26px min-height plus 4px padding, and a 24px
+ * minimum on the per-tab close button. Every one of those has to go; the close
+ * button is the floor an earlier attempt missed, which is why it stopped at
+ * 26px. Measured with these rules: 22px.
+ *
+ * On sway ghostty is server-decorated, so there is no GTK header bar above
+ * this strip to shrink; gtk-titlebar and gtk-titlebar-style change nothing.
+ */
+
+tabbar .box { padding: 0; }
+tabbar tabbox { padding-top: 0; padding-bottom: 0; min-height: 0; }
+tabbar tabbox > separator { margin-top: 3px; margin-bottom: 3px; }
+tabbar .start-action, tabbar .end-action { padding: 0 2px; }
+tabbar tab { min-height: 0; padding: 1px 4px; border-radius: 4px; }
+tabbar tab button.image-button { min-width: 16px; min-height: 16px; padding: 0; margin: 0; }
+tabbar tab button.image-button image { -gtk-icon-size: 12px; }
+/* The attention indicator sits 4px below the tab by default, which now falls
+ * outside the shorter strip. */
+tabbar tab indicator { transform: translateY(1px); }

@@ -21,6 +21,13 @@ window-padding-x = 8
 window-padding-y = 4
 window-padding-balance = true
 
+# Tab strip. `ghostty` takes the window chrome's colours from the terminal
+# theme; the default `auto` follows the system GTK theme, which is light on
+# sway and left a white strip over a Catppuccin terminal. The stylesheet only
+# shrinks the strip from libadwaita's 48px to 22px (rationale in the file).
+window-theme = ghostty
+gtk-custom-css = tab-bar.css
+
 # --- terminal ---------------------------------------------------------------
 # TERM is deliberately left at ghostty's default (xterm-ghostty) rather than
 # forced to xterm-256color. The slot-16 fetcher installs

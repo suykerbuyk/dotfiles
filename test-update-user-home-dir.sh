@@ -134,6 +134,17 @@ assert_empty() { if [[ -z "$2"      ]]; then ok "$1"; else bad "$1" "got [$2]  w
 # get mangled as collateral, which is harmless for counting tokens but is why
 # this is not used for positive exact-match asserts.
 nocomment() { sed 's/#.*//' "$1"; }
+# CSS counterpart: nocomment would strip a `#rrggbb` colour and keep /* */ text,
+# which is wrong in both directions. Multi-line comments need state, so awk;
+# POSIX awk because this runs on FreeBSD too.
+cssnocomment() {
+    awk '{ o = ""; s = $0
+           while (s != "") {
+               if (inc) { i = index(s, "*/"); if (!i) s = ""; else { s = substr(s, i + 2); inc = 0 } }
+               else     { i = index(s, "/*"); if (!i) { o = o s; s = "" } else { o = o substr(s, 1, i - 1); s = substr(s, i + 2); inc = 1 } }
+           }
+           print o }' "$1"
+}
 
 # ---- portable file mode ------------------------------------------------------
 # GNU and BSD stat share a NAME and nothing else: the format languages are
@@ -3405,6 +3416,23 @@ assert "ghostty Shift+Insert pastes CLIPBOARD"       "grep -q '^keybind = shift+
 # a raw grep and fail this forever (or pass it forever).
 assert "ghostty Shift+Insert is not paste_from_selection" \
     "[[ -z \$(nocomment $GH_CONF | grep -E 'shift\\+insert.*paste_from_selection') ]]"
+# Compact tab strip. The stylesheet is loaded by a RELATIVE path, so it must be
+# a sibling in the chezmoi source or ghostty silently falls back to libadwaita's
+# 48px strip. An earlier fix lived only as a hand edit to the applied config and
+# was erased by the next apply — hence asserting the managed source, not ~.
+GH_CSS="home/dot_config/ghostty/tab-bar.css"
+assert "ghostty tab-bar.css tracked beside the config" "[[ -f $GH_CSS ]]"
+assert "ghostty config loads tab-bar.css"            "grep -q '^gtk-custom-css = tab-bar.css$' $GH_CONF"
+assert "ghostty chrome follows the terminal theme"   "grep -q '^window-theme = ghostty$' $GH_CONF"
+# The close button's 24px min-height is the floor that held the earlier attempt
+# at 26px; the tabbox rule is libadwaita's 34px + 6px padding.
+assert "tab-bar.css overrides the close-button floor" \
+    "cssnocomment $GH_CSS | grep -q '^tabbar tab button.image-button {.*min-height: 16px'"
+assert "tab-bar.css zeroes the tabbox padding" \
+    "cssnocomment $GH_CSS | grep -q '^tabbar tabbox {.*min-height: 0'"
+# Geometry only: colours belong to window-theme, never to a second palette.
+assert "tab-bar.css sets no colours" \
+    "[[ -z \$(cssnocomment $GH_CSS | grep -iE 'color|background|#[0-9a-f]{3,6}') ]]"
 if command -v ghostty >/dev/null 2>&1; then
     assert "ghostty +validate-config accepts the managed file" \
         "ghostty +validate-config --config-file=$GH_CONF >/dev/null 2>&1"
