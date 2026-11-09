@@ -1,5 +1,11 @@
 return {
   'ray-x/go.nvim',
+  -- Skip entirely on a Go-less host: no gopls (lsp_cfg), no `go install` build
+  -- step, no clone. `enabled` (not `cond`) keeps lazy from installing/building
+  -- it. Re-evaluated on each :Lazy sync, so it activates once `go` is on PATH.
+  enabled = function()
+    return vim.fn.executable 'go' == 1
+  end,
   dependencies = { -- optional packages
     'ray-x/guihua.lua',
     'neovim/nvim-lspconfig',
