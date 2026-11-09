@@ -135,6 +135,18 @@ if $UNINSTALL; then
         echo "  would remove_bin nvim (plus nvim.appimage-[0-9]*)"
         echo "  would remove_bin go (plus go1.*)"
     fi
+    # codex's code-mode companion (slot 25) is an APP_DIR-only payload plus a
+    # sibling symlink (~/.local/apps/codex-code-mode-host -> codex-code-mode-host
+    # -<ver>), NOT a ~/.local/bin tool — codex execs it as a sibling of its own
+    # /proc/self/exe. remove_bin's standard logic clears the sibling symlink
+    # (app_path) and every versioned codex-code-mode-host-[0-9]* payload. It is a
+    # special case rather than a loop entry because the loop's `codex` entry
+    # cannot derive this name (codex-[0-9]* never matches codex-code-mode-host-*).
+    if $FORCE; then
+        remove_bin codex-code-mode-host
+    else
+        echo "  would remove_bin codex-code-mode-host (sibling of codex-<ver>)"
+    fi
     # Slots 18-21 (fd, bat, delta, xh) also install SHELL COMPLETIONS into the
     # XDG user dirs. remove_bin knows nothing about those, so a bare loop entry
     # would strand them — the same class of bug as tree-sitter's, pointed at a

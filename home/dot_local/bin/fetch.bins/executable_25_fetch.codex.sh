@@ -63,12 +63,74 @@ fi
 
 PAYLOAD="${APP_DIR}/${BIN_NAME}-${VERSION}"
 
+# --- code-mode companion ------------------------------------------------------
+# codex's "code mode" launches a helper named `codex-code-mode-host` from the
+# directory of its OWN resolved binary: it reads /proc/self/exe (so it follows
+# the ~/.local/bin/codex -> ~/.local/apps/codex-<ver> symlink to the real file)
+# and looks for a SIBLING `codex-code-mode-host` in ~/.local/apps. So the
+# companion is an APP_DIR payload, NOT a ~/.local/bin tool — it never goes on
+# PATH. It ships as its own release asset at the SAME tag, inner binary
+# codex-code-mode-host-<triple> (carries the triple, like codex-<triple>).
+#
+# Placement: versioned payload codex-code-mode-host-<ver> + a stable sibling
+# symlink codex-code-mode-host -> it. This matches the repo's versioned-payload
+# norm (prune/teardown by codex-code-mode-host-[0-9]*), and codex execs the
+# sibling, so the symlink is followed by execve (verified empirically on this
+# host — see the slot task report). The symlink target is RELATIVE so it resolves
+# regardless of $HOME.
+CMH_NAME="codex-code-mode-host"
+CMH_FINAL="${APP_DIR}/${CMH_NAME}-${VERSION}"
+CMH_LINK="${APP_DIR}/${CMH_NAME}"
+
+# Runs --version (or --help) as a liveness probe; either is enough to prove the
+# binary executes.
+_cmh_probe() { "$1" --version >/dev/null 2>&1 || "$1" --help >/dev/null 2>&1; }
+
+# Install the companion. Called on BOTH the fast path (codex already current) and
+# the install path, because a host that already had codex but never had the
+# companion must still get it — the fast-path `exit 0` is before here otherwise.
+# Only the DOWNLOAD is skipped when the exact versioned payload is already there.
+install_code_mode_host() {
+    if [[ -x "$CMH_FINAL" ]] && _cmh_probe "$CMH_FINAL"; then
+        ln -sfn "${CMH_NAME}-${VERSION}" "$CMH_LINK"
+        echo "${CMH_NAME} ${VERSION} already installed; sibling symlink ensured."
+        return 0
+    fi
+
+    local url tb stage
+    # Exact-name match, same reasoning as the main asset: the release is full of
+    # sibling tarballs and .zst/.sigstore twins.
+    url="$(gh_asset_url openai/codex \
+        '. == ("codex-code-mode-host-" + $arch + ".tar.gz")' "$TRIPLE" "" "$PIN_TAG")"
+    tb="${FB_TMP}/${CMH_NAME}.tar.gz"
+    gh_download "$url" "$tb"
+    tar -xzf "$tb" -C "$FB_TMP"
+
+    # Stage beside the destination (same filesystem -> atomic publish), verify
+    # the staged binary runs, then publish and link the sibling.
+    stage="$(fb_stage_payload "$CMH_FINAL")"
+    cp "${FB_TMP}/${CMH_NAME}-${TRIPLE}" "$stage"
+    chmod +x "$stage"
+    if ! _cmh_probe "$stage"; then
+        echo "Error: ${CMH_NAME} failed its liveness probe (neither --version nor --help ran)." >&2
+        rm -f "$stage"
+        exit 1
+    fi
+    fb_publish_payload "$stage" "$CMH_FINAL"
+    ln -sfn "${CMH_NAME}-${VERSION}" "$CMH_LINK"
+    echo "Installed ${CMH_NAME} ${VERSION} -> ${CMH_FINAL}"
+    echo "  (sibling symlink ${CMH_LINK} -> ${CMH_NAME}-${VERSION})"
+    fb_prune_versions "$CMH_FINAL" "" "${CMH_NAME}-[0-9]*"
+}
+
 # Fast path, BEFORE the download: the version is already in hand, so there is
 # nothing to learn from spending 117 MB. The bare `codex` glob is the legacy
 # unversioned payload this slot would migrate off; -[0-9] rather than a bare -*,
-# per fb_prune_versions.
+# per fb_prune_versions. The companion is still provisioned here — codex being
+# current does not mean its code-mode host is installed.
 if fb_versioned_current "$BIN_NAME" "$VERSION" --version; then
     fb_prune_versions "$PAYLOAD" "" "${BIN_NAME}-[0-9]*"
+    install_code_mode_host
     exit 0
 fi
 
@@ -86,3 +148,6 @@ tar -xzf "$TARBALL" -C "$FB_TMP"
 CODEX_PREV="$(fb_prev_payload "$BIN_NAME")"
 install_versioned_bin "${FB_TMP}/codex-${TRIPLE}" "$BIN_NAME" "$VERSION" --version
 fb_prune_versions "$PAYLOAD" "$CODEX_PREV" "${BIN_NAME}-[0-9]*"
+
+# The code-mode companion, at the same version/tag as the codex we just installed.
+install_code_mode_host

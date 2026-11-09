@@ -2803,12 +2803,36 @@ assert "all EIGHTEEN versioned slots use the shared prune" \
     "[[ \$(grep -lE '^[[:space:]]*fb_prune_versions[[:space:]]' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | wc -l) -eq 18 ]]"
 assert "no slot defines a local prune any more" \
     "[[ \$(grep -lE '^prune_old_versions\(\)' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | wc -l) -eq 0 ]]"
+# ---- slot 25: the codex code-mode companion --------------------------------
+# codex launches `codex-code-mode-host` as a SIBLING of its own /proc/self/exe
+# (~/.local/apps/codex-<ver>), so slot 25 must ALSO fetch+install that companion
+# into APP_DIR — NOT on PATH — at the same version/tag. Mutation-proof: every
+# grep runs over `nocomment` so a rationale comment mentioning the host cannot
+# satisfy the assertion; the behaviour must be in live code.
+CODEX_SLOT="home/dot_local/bin/fetch.bins/executable_25_fetch.codex.sh"
+assert "slot 25 fetches the code-mode-host release asset (exact-name match)" \
+    "nocomment $CODEX_SLOT | grep -qF '\"codex-code-mode-host-\" + \$arch + \".tar.gz\"'"
+assert "slot 25 installs the companion as a versioned APP_DIR payload (staged)" \
+    "nocomment $CODEX_SLOT | grep -q 'fb_stage_payload ' && nocomment $CODEX_SLOT | grep -q 'fb_publish_payload '"
+assert "slot 25 links the companion as an APP_DIR sibling, not a PATH tool" \
+    "nocomment $CODEX_SLOT | grep -qE 'ln -sfn .*CMH_NAME.*CMH_LINK' && ! nocomment $CODEX_SLOT | grep -q 'install_versioned_bin .*code-mode-host'"
+# Must provision the companion on BOTH paths — the fast path (codex already
+# current) and the install path — so a host that has codex but never had the
+# host still gets it. Two bare call sites (the function definition line
+# `install_code_mode_host() {` does not match the anchored call pattern).
+assert "slot 25 provisions the companion on both the fast and install paths" \
+    "[[ \$(nocomment $CODEX_SLOT | grep -cE '^[[:space:]]*install_code_mode_host\$') -ge 2 ]]"
+# Teardown parity: the --uninstall path must clear the companion too.
+assert "uninstall removes the codex code-mode companion" \
+    "nocomment update-user-home-dir.sh | grep -q 'remove_bin codex-code-mode-host'"
 # The six HAND-ROLLED versioned slots, distinct from the helper-driven ones added
 # in phase 5. These six own their staging and publish directly because their
 # payload shapes differ (toolchain tree, runtime tree, userland tree, AppImage
 # file, directory of two binaries, bare binary) and their fast paths do different
 # extra work; the phase-5 slots are one uniform shape and go through
-# install_versioned_bin instead. Only these six may name fb_stage_payload.
+# install_versioned_bin instead. These six hand-roll the MAIN payload through
+# fb_stage_payload (slot 25 also stages, but only for its code-mode companion —
+# its main codex payload still goes through install_versioned_bin).
 FB_VERSIONED="$(echo home/dot_local/bin/fetch.bins/executable_{04,07,12,16,22,24}_fetch.*.sh)"
 # Every versioned slot prunes on BOTH paths, so two call sites each, twelve in
 # total. A slot that prunes only on install strands its predecessor forever the
@@ -2837,8 +2861,12 @@ assert "no versioned slot builds a payload path in FB_TMP" \
     "[[ -z \$(cat \$FB_VERSIONED | sed 's/#.*//' | grep -E '^[A-Z_]+=\"\\\$\{?FB_TMP' | grep -v '^TARBALL=') ]]"
 assert "no versioned slot moves a payload out of FB_TMP" \
     "[[ -z \$(cat \$FB_VERSIONED | sed 's/#.*//' | grep -E '^[[:space:]]*mv .*FB_TMP') ]]"
-assert "each of the eighteen prunes from BOTH paths (36 call sites)" \
-    "[[ \$(cat home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | grep -cE '^[[:space:]]*fb_prune_versions[[:space:]]') -eq 36 ]]"
+# 18 slots x 2 paths = 36, PLUS slot 25's code-mode companion, which prunes its
+# own codex-code-mode-host-[0-9]* payloads on its install path only (its fast
+# path returns when the exact version is already present, with nothing newer to
+# supersede). That one extra call site makes 37.
+assert "each of the eighteen prunes from BOTH paths, plus the codex companion (37 call sites)" \
+    "[[ \$(cat home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | grep -cE '^[[:space:]]*fb_prune_versions[[:space:]]') -eq 37 ]]"
 
 # --- fb_versioned_current / install_versioned_bin (phase 5) -----------------
 # The versioned twin of fb_check_bin + install_bin, for a BARE SINGLE BINARY.
