@@ -21,6 +21,15 @@
 # `bash -c`, cron and git hooks do not get them.
 [ -r "$HOME/.keys" ] && . "$HOME/.keys"
 
+# op-session -- obtain a 1Password CLI session INTO THIS interactive shell. The
+# op-signin.sh lifestyle-bin is a child process and cannot export OP_SESSION_*
+# back into its parent, so the session must arrive via `eval "$(...)"`; this is
+# the ergonomic one-word form of that eval and belongs in the rc layer because
+# only an interactive shell you typed into should hold a live session. The
+# hyphen in the name is fine here (rc layer, bash/zsh only -- cf. dotfiles-reinit
+# above); it would be rejected under dash in the env layer.
+op-session() { eval "$(op-signin.sh "$@")"; }
+
 # --- aliases ------------------------------------------------------------------
 if df_have dircolors; then
     if [ -r "$HOME/.dircolors" ]; then

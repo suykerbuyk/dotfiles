@@ -61,9 +61,11 @@ export TELEPORT_TLS_ROUTING_CONN_UPGRADE=true
 # non-interactive shells, which never reach that branch.
 export TELEPORT_USE_LOCAL_SSH_AGENT=false
 
-# One `op` call per distinct secret. An earlier version fetched the password
-# twice -- once into a variable it then never read, and once inline for a paste
-# buffer -- costing an extra unlock prompt for nothing.
+# The password is fetched at most twice on purpose (first attempt, then a retry
+# after a signin): see op_signin_once below. The OTP is fetched once. An even
+# earlier version fetched the password twice for nothing -- once into a variable
+# it never read, once inline for a paste buffer -- which is a different thing and
+# stays gone; the retry here reads the value it fetches.
 #
 # The predicate is OPERABILITY, not presence. `command -v op` proves only that a
 # binary exists; the failure actually observed was an INSTALLED op returning
@@ -106,9 +108,36 @@ op_print_linux_sgid_fix() {
 	printf '    sudo chmod g+s %s\n' "$real" >&2
 }
 
+# Headless op: the per-session `op signin` carries a ~30-min idle TTL, so on a
+# browser-less box `op item get` routinely fails for no reason but a lapsed
+# session. op-signin.sh (a sibling lifestyle-bin) re-establishes one; we try it
+# ONCE, opportunistically, and retry the fetch.
+#
+# 🔴 DEGRADE-NEVER-REFUSE is preserved exactly. op-signin.sh is an UPGRADE, never
+# a requirement: if it is absent (`command -v`), fails, or the human cancels its
+# password prompt, op_signin_once returns non-zero, the retry is skipped,
+# op_reason is set, and the script falls through to the interactive `tsh login`
+# below just as it did before this helper existed. The session it obtains lives
+# only in THIS process -- we `eval` its export here -- and dies with the script;
+# that is fine, because the retried `op item get` below is its only consumer.
+op_signin_done=0
+op_signin_once() {
+	[ "$op_signin_done" = 0 ] || return 1
+	op_signin_done=1
+	command -v op-signin.sh >/dev/null 2>&1 || return 1
+	# op-signin.sh prints `export OP_SESSION_*` on success and nothing on
+	# failure, so an empty capture or a non-zero exit both mean "no session" and
+	# both degrade. Its stderr joins op's own error log.
+	_session="$(op-signin.sh 2>>"$op_err")" || return 1
+	[ -n "$_session" ] || return 1
+	eval "$_session"
+	return 0
+}
+
 if ! command -v op >/dev/null 2>&1; then
 	op_reason="1Password CLI (op) not found on PATH"
-elif ! pass="$(op item get "$ITEM" --fields label=password --reveal 2>"$op_err")"; then
+elif ! pass="$(op item get "$ITEM" --fields label=password --reveal 2>"$op_err")" &&
+	{ ! op_signin_once || ! pass="$(op item get "$ITEM" --fields label=password --reveal 2>"$op_err")"; }; then
 	op_reason="op could not read the password"
 elif ! otp="$(op item get "$ITEM" --otp 2>"$op_err")"; then
 	op_reason="op could not read the one-time password"

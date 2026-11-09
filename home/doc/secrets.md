@@ -68,7 +68,21 @@ template, substituting your `$HOME` and the checkout path.
    ```
 
    `OP_SECRET_KEY` in `~/.keys` is for `op account add` on a box without the
-   desktop app.
+   desktop app. Two companions, `OP_ACCOUNT_ADDRESS` (`my.1password.com`) and
+   `OP_ACCOUNT_EMAIL` (`1pass@suykerbuyk.org`), parameterize that enroll so no
+   address or email is hard-wired. They are **not secrets** (a public hostname and
+   an email) but are staged beside `OP_SECRET_KEY` so the enroll path is
+   self-contained; like all of `~/.keys` they are sourced only in interactive
+   shells. Their sole consumer is the enroll-if-needed branch of `op-signin.sh`
+   (and a manual `op account add`): `~/.local/bin/op-signin.sh` adds the account
+   automatically when all three are present **and** the account is absent from
+   `op account list`, then signs in. On an **already-enrolled** box none of the
+   three is needed — the account persists in `~/.config/op/config` and
+   `eval "$(op-signin.sh)"` just prompts for the master password. Do **not** name
+   either var `OP_ACCOUNT`: that is op's own account selector and exporting it
+   would retarget `op` for every shell. See
+   [`teleport.md`](teleport.md) §5 for the per-session signin and the ~30-minute
+   idle TTL.
 2. `git pull` (or clone) and run `./update-user-home-dir.sh`.
 
 That's it — `~/.keys` materializes at `0600`. A machine **without** the key still

@@ -278,6 +278,48 @@ fallback message *offers* it and the script never runs it.
 > `/dev/tty` requirement comes from *its* job of handing the terminal back to the
 > human, not from `tsh`.
 
+### Headless `op` session: `op-signin.sh` (CLI-only enrollment)
+
+The login helper's `op` path needs a **live `op` session**. On a workstation the
+1Password desktop app supplies one; on a browser-less box there is no desktop app,
+so the session comes from the **CLI**, and the CLI session carries a **~30-minute
+idle TTL**. That lapsed session — not a missing binary — is the usual reason
+`tsh-login-syketech.sh` falls back to typing the two secrets by hand on such a box.
+
+`op-signin.sh` (`~/.local/bin/op-signin.sh`) closes that gap. It is a child
+process, so it cannot export into its parent; it prints `op signin`'s own
+`export OP_SESSION_<shorthand>=…` line on stdout, and you bring it into the shell
+with `eval`:
+
+```console
+$ eval "$(op-signin.sh)"      # or the op-session shell function, which wraps it
+```
+
+- **Enroll once on a fresh box.** When `OP_ACCOUNT_ADDRESS`, `OP_ACCOUNT_EMAIL`
+  and `OP_SECRET_KEY` are staged in `~/.keys` **and** the account is not yet in
+  `op account list`, `op-signin.sh` runs `op account add` for you (announced on
+  stderr; `OP_SECRET_KEY` is read from the environment, the master password is
+  typed). On an **already-enrolled** box those three vars are unnecessary — the
+  account persists in `~/.config/op/config` and `op signin` needs only the
+  password. See [`secrets.md`](secrets.md) for how the vars are staged.
+- **Per session**, re-run `eval "$(op-signin.sh)"` whenever the idle TTL has
+  lapsed. `op signin` is idempotent — a still-live session re-emits with no
+  prompt. There is deliberately **no session-keeper**; the 30-minute idle TTL is
+  accepted as the recurring cost.
+
+**This is CLI master-password auth, independent of the desktop-app IPC above.**
+The `setgid onepassword-cli` fix in this section is about the desktop app's
+`1Password-BrowserSupport.sock`; it does **not** apply to `op-signin.sh`, which
+needs no setgid bit.
+
+**`tsh-login-syketech.sh` uses it automatically.** When its `op item get` fails
+on a lapsed session, the helper runs `op-signin.sh` **once** and retries — so
+running the login script alone on a browser-less box prompts for the master
+password and then just works. The degrade contract is unchanged: if `op-signin.sh`
+is absent, fails, or you cancel its prompt, the login script still falls through
+to an ordinary interactive `tsh login`, exactly as before. As with everything in
+this document, **the test suite never drives a live signin** (see §Testing).
+
 ## 6. Rejected: shipping identity files
 
 `tsh login --out=identity --format=file` mints a portable credential that

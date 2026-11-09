@@ -433,8 +433,8 @@ if [[ -n "$POSIX_SH" ]]; then
     # `-ge`, deliberately not `-eq`: the floor asserts the scan still WORKS, not
     # that the repo is frozen at 14 files. Adding a POSIX script must not turn
     # the suite red for no reason — it must simply get checked.
-    assert "POSIX shebang scan is not vacuous (>= 14 files, found $POSIX_SCANNED)" \
-        "[[ \$POSIX_SCANNED -ge 14 ]]"
+    assert "POSIX shebang scan is not vacuous (>= 15 files, found $POSIX_SCANNED)" \
+        "[[ \$POSIX_SCANNED -ge 15 ]]"
 
     # ---- SET B: sourced files, which have no shebang to declare with --------
     # A sourced file never gets a shebang, so set A cannot see it — yet it is
@@ -3612,10 +3612,14 @@ assert "tsh-login: guards tsh as well as op"        "nocomment $TSHL | grep -q '
 # so requiring it would fail a correct script.
 assert "tsh-login: does not reach for df_have"      "[[ -z \$(nocomment $TSHL | grep 'df_have') ]]"
 
-# COUNT, not presence: an earlier version fetched the password twice -- once into
-# a variable it never read, once inline for a paste buffer -- which a
-# "string exists somewhere" assert cannot see.
-assert "tsh-login: exactly one op call per secret"  "[[ \$(nocomment $TSHL | grep -c 'op item get') -eq 2 ]]"
+# COUNT, not presence. The headless-session integration (iter: Phase 2) fetches
+# the PASSWORD twice on purpose -- an attempt, then a retry after op-signin.sh --
+# and the OTP once, so `op item get` now appears exactly THREE times. This is a
+# different thing from the old waste it replaced (a password fetched into a
+# variable never read); the retry reads the value it fetches. A count catches a
+# fourth stray fetch, or a retry accidentally dropped back to a single attempt.
+assert "tsh-login: op item get appears 3x (password + retry + otp)" \
+    "[[ \$(nocomment $TSHL | grep -c 'op item get') -eq 3 ]]"
 
 # THE herdr FIX, asserted as an absence. Any multiplexer- or clipboard-specific
 # call is a regression: it would mean one multiplexer got a convenience the other
@@ -3725,6 +3729,112 @@ assert "tsh-login: OTP cue set covers both prompt forms" \
     "[[ \$(tshl_pydriver | grep 'OTP_CUES = ' | grep -o 'b\"' | wc -l) -ge 3 ]]"
 assert "tsh-login: warns when the OTP prompt is unrecognised" \
     "tshl_pydriver | grep -q 'no OTP prompt recognised'"
+
+# --- tsh-login x op-signin integration (Phase 2) ----------------------------
+# On a browser-less box the `op item get` above fails only because the per-session
+# op signin (~30-min idle TTL) has lapsed. The helper re-establishes a session
+# ONCE and retries -- so running the login script alone prompts for the master
+# password and then works. All asserts over comment-stripped source.
+assert "tsh-login: attempts op-signin.sh on a fetch failure" \
+    "nocomment $TSHL | grep -qF 'op-signin.sh'"
+# OPPORTUNISTIC, so degrade-never-refuse is preserved: the helper is reached only
+# behind `command -v`, and a missing/failed/cancelled helper leaves op_reason set
+# and falls through to the interactive `tsh login` (the --proxy count == 3 assert
+# below still holds). This is the load-bearing half of the integration.
+assert "tsh-login: the signin helper is guarded by command -v (never required)" \
+    "nocomment $TSHL | grep -qF 'command -v op-signin.sh'"
+# Tried at MOST once: a retry loop against a helper that cannot sign in would hang
+# or re-prompt forever on exactly the GUI-less box this serves.
+assert "tsh-login: signin is tried at most once (a done-flag guards it)" \
+    "nocomment $TSHL | grep -qF 'op_signin_done'"
+# The session must reach THIS process so the retried `op item get` can see it --
+# op-signin.sh is a child and cannot export into us, hence eval of its stdout.
+assert "tsh-login: evals the helper's export into this process" \
+    "nocomment $TSHL | grep -qE 'eval \"\\\$_session\"'"
+# No secret on the helper's invocation: op-signin.sh takes none, and a \$pass/\$otp
+# appearing on its line would be a leak onto a child's argv.
+assert "tsh-login: no secret on the op-signin.sh invocation" \
+    "[[ -z \$(nocomment $TSHL | grep -F 'op-signin.sh' | grep -E '\\\$pass|\\\$otp') ]]"
+
+# ===========================================================================
+# op-signin.sh: the headless 1Password session helper (Phase 2). A lifestyle-bin
+# that prints `op signin`'s own `export OP_SESSION_*` line on stdout for `eval`.
+# It is CLI master-password auth, deliberately independent of the desktop-app
+# setgid IPC that tsh-login documents. All asserts over comment-stripped source.
+sec "op-signin: headless 1Password session helper (no network)"
+OPSI="home/dot_local/bin/executable_op-signin.sh"
+assert "op-signin: file exists"                     "[[ -f $OPSI ]]"
+# POSIX shebang -- which also enrols it in the SET A shebang scan above (the floor
+# there was raised 14->15 for this file), so its POSIX `-n` parse is covered there.
+assert "op-signin: declares #!/usr/bin/env sh"      "head -1 $OPSI | grep -qE '^#![[:space:]]*/usr/bin/env[[:space:]]+sh\$'"
+assert "op-signin: parses under sh -n"              "sh -n $OPSI"
+assert "op-signin: keeps its SPDX banner"           "grep -q '^# SPDX-License-Identifier: MIT OR Apache-2.0\$' $OPSI"
+assert "op-signin: has a --help"                    "grep -qF -- '--help' $OPSI"
+# Name from arg0, never hardwired (the tsh-login idiom). NEGATIVE half is
+# comment-stripped: the header names the script and a raw grep matches that.
+assert "op-signin: derives its name from arg0"      "grep -q 'me=\"\${0##\*/}\"' $OPSI"
+assert "op-signin: no hardwired script name"        "[[ -z \$(nocomment $OPSI | grep -F 'op-signin.sh:') ]]"
+# Lifestyle-bin: sources nothing, so df_have (a sourced rc helper) is unavailable.
+assert "op-signin: does not reach for df_have"      "[[ -z \$(nocomment $OPSI | grep 'df_have') ]]"
+
+# Guard before use: the op presence check must precede the first op call. Both
+# anchors proved non-empty BEFORE comparing -- a missing match is the empty string
+# and [[ \"\" -lt N ]] is TRUE (the iter-63 fail-open shape).
+_ln_og=$(nocomment $OPSI | grep -n 'command -v op' | head -1 | cut -d: -f1)
+_ln_oc=$(nocomment $OPSI | grep -n 'op account list' | head -1 | cut -d: -f1)
+assert "op-signin: both guard-order anchors were found" \
+    "[[ -n \"\$_ln_og\" && -n \"\$_ln_oc\" ]]"
+assert "op-signin: the op guard precedes the first op call" \
+    "[[ -n \"\$_ln_og\" && -n \"\$_ln_oc\" && \$_ln_og -lt \$_ln_oc ]]"
+unset _ln_og _ln_oc
+
+# PROBE CORRECTION (Chair ruling): neither `op whoami` nor `op account get` is a
+# reliable liveness probe, so the helper uses neither as one -- it just runs
+# `op signin` and emits op's OWN fresh stdout, which makes a stale token
+# impossible by construction.
+assert "op-signin: does not gate on 'op whoami'"    "[[ -z \$(nocomment $OPSI | grep -F 'op whoami') ]]"
+assert "op-signin: does not probe with 'op account get'" \
+    "[[ -z \$(nocomment $OPSI | grep -F 'op account get') ]]"
+assert "op-signin: signs in via 'op signin'"        "nocomment $OPSI | grep -qE '^[[:space:]]*op signin'"
+# stdout carries ONLY `op signin`'s own export line: the helper must never READ a
+# cached OP_SESSION_* variable (a $-expansion) and re-emit it -- that is exactly
+# the stale-token defect the probe correction eliminates by construction. Anchored
+# on the `$` so the help text, which names `export OP_SESSION_*` but never expands
+# it, does not trip this.
+assert "op-signin: never re-emits a cached OP_SESSION variable" \
+    "[[ -z \$(nocomment $OPSI | grep -E '\\\$\\{?OP_SESSION') ]]"
+
+# Enroll-if-needed reads the STAGED vars, and OP_SECRET_KEY reaches op through the
+# ENVIRONMENT, never argv (/proc/PID/cmdline is world-readable).
+assert "op-signin: enroll references OP_ACCOUNT_ADDRESS" "nocomment $OPSI | grep -qF 'OP_ACCOUNT_ADDRESS'"
+assert "op-signin: enroll references OP_ACCOUNT_EMAIL"   "nocomment $OPSI | grep -qF 'OP_ACCOUNT_EMAIL'"
+assert "op-signin: gates enroll on OP_SECRET_KEY present" "nocomment $OPSI | grep -qF 'OP_SECRET_KEY'"
+assert "op-signin: OP_SECRET_KEY is never on an op argv" \
+    "[[ -z \$(nocomment $OPSI | grep -E 'op (account add|signin)' | grep -F 'OP_SECRET_KEY') ]]"
+# Stages OP_ACCOUNT_ADDRESS, NOT op's own OP_ACCOUNT selector (whole-word: the
+# ADDRESS/EMAIL names contain OP_ACCOUNT but are not it).
+assert "op-signin: does not use the bare OP_ACCOUNT selector" \
+    "[[ -z \$(nocomment $OPSI | grep -w 'OP_ACCOUNT') ]]"
+# enroll chatter goes to stderr so stdout stays reserved for the export line.
+assert "op-signin: enroll output is redirected to stderr" \
+    "nocomment $OPSI | grep -F 'op account add' | grep -qF '>&2'"
+# NO desktop-app setgid import: this is password auth, a different mechanism.
+assert "op-signin: does not import the desktop-app setgid path" \
+    "[[ -z \$(nocomment $OPSI | grep -Ei 'onepassword-cli|sgid|BrowserSupport') ]]"
+
+# The rc-layer ergonomic wrapper: `eval` must run in the interactive shell, which
+# a child bin cannot do for its parent -- so the one-word form lives in common.sh.
+CMNSH="home/dot_config/shell/common.sh"
+assert "common.sh defines op-session()"             "grep -qE '^op-session\\(\\)' $CMNSH"
+assert "common.sh op-session wraps eval of op-signin.sh" \
+    "nocomment $CMNSH | grep -F 'op-session()' | grep -qF 'eval \"\$(op-signin.sh'"
+
+# Docs: the headless-op procedure is documented where §5 lives, and the staged
+# vars are documented in secrets.md.
+assert "teleport.md documents the headless op session" \
+    "grep -qF 'op-signin.sh' home/doc/teleport.md"
+assert "secrets.md documents OP_ACCOUNT_ADDRESS/EMAIL" \
+    "grep -qF 'OP_ACCOUNT_ADDRESS' home/doc/secrets.md && grep -qF 'OP_ACCOUNT_EMAIL' home/doc/secrets.md"
 
 # kitty takes the LAST occurrence of a setting, so a second active font_family
 # silently overrides the first. kitty.conf carried a trailing
