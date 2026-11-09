@@ -48,3 +48,18 @@
 .local/bin/fetch.bins/12_fetch.protoc.sh
 .local/bin/protoc
 .local/apps/protoc-*
+
+# nvim Part-B cleanup (dot-imp2). Dead/retired config files under the
+# kickstart-modular tree. Deleting the source stops them reaching new machines;
+# these lines remove the already-applied copies from ~ (same orphan rule as the
+# entries above). Applied path is ~/.config/nvim-kickstart-modular/<relpath>
+# (the ~/.config/nvim symlink itself is managed by symlink_nvim and stays).
+#
+# utils.lua: unused (no require; macOS-only osascript/Keychain; its get_cstring
+#   requires the uninstalled Comment.nvim). autopairs/indent_line: dead specs,
+#   never required, plugins never installed. none-ls.lua: retired in favour of
+#   nvim-lint for the single checkmake diagnostics source.
+.config/nvim-kickstart-modular/lua/utils.lua
+.config/nvim-kickstart-modular/lua/kickstart/plugins/autopairs.lua
+.config/nvim-kickstart-modular/lua/kickstart/plugins/indent_line.lua
+.config/nvim-kickstart-modular/lua/custom/plugins/none-ls.lua

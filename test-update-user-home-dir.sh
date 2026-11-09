@@ -5165,14 +5165,24 @@ assert "lazy-lock.json tracked in nvim source"      "[[ -f $LAZY_LOCK ]]"
 assert "lazy-lock.json is valid JSON"               "jq empty $LAZY_LOCK"
 assert "lazy-lock.json pins lazy.nvim itself"       "jq -e '.[\"lazy.nvim\"].commit' $LAZY_LOCK >/dev/null"
 
-# Format-on-save consolidation: conform is the ONLY formatter driver. none-ls
-# must stay diagnostics-only (its old vim.lsp.buf.format autocmd re-formatted
-# every buffer conform had just formatted), no GoFormat autocmd may return
-# (go.nvim's goimports() is an async gopls action that can write after the
-# save), and python must keep ruff_organize_imports or import sorting is lost.
+# Format-on-save consolidation: conform is the ONLY formatter driver. Diagnostics
+# moved from none-ls to nvim-lint in Part B: none-ls.lua was DELETED (its old
+# vim.lsp.buf.format autocmd re-formatted every buffer conform had just
+# formatted). nvim-lint (lint.lua) now carries the checkmake Makefile diagnostic
+# and diagnostics only — it must never register a formatting source, so conform
+# stays sole formatter. No GoFormat autocmd may return (go.nvim's goimports() is
+# an async gopls action that can write after the save), and python must keep
+# ruff_organize_imports or import sorting is lost.
 NVIM_LUA="home/dot_config/nvim-kickstart-modular/lua"
 assert "conform python keeps import sorting"        "grep -q 'ruff_organize_imports' $NVIM_LUA/custom/plugins/conform.lua"
-assert "none-ls has no formatting sources"          "! grep -qE 'builtins\.formatting|LspFormatting' $NVIM_LUA/custom/plugins/none-ls.lua"
+# Part B: none-ls retired -> nvim-lint. Positive, mutation-proof checks (each
+# targets a file/dir that EXISTS, so it can actually FAIL if the invariant
+# breaks). The old assert greped the now-deleted none-ls.lua, so grep exited 2,
+# the `!` flipped it to success, and it false-passed vacuously testing nothing.
+assert "none-ls.lua removed (migrated to nvim-lint)" "[[ ! -e $NVIM_LUA/custom/plugins/none-ls.lua ]]"
+assert "nvim-lint owns the checkmake diagnostic"     "grep -q 'linters_by_ft' $NVIM_LUA/kickstart/plugins/lint.lua && grep -q 'checkmake' $NVIM_LUA/kickstart/plugins/lint.lua"
+assert "nvim-lint registers no formatting source"    "! grep -qE 'builtins\.formatting|LspFormatting' $NVIM_LUA/kickstart/plugins/lint.lua"
+assert "no null-ls formatting source left in tree"   "! grep -rqE 'builtins\.formatting|LspFormatting' $NVIM_LUA/"
 assert "no GoFormat autocmd in config"              "! grep -rq \"nvim_create_augroup('GoFormat'\" $NVIM_LUA/"
 assert "duplicate kickstart conform spec removed"   "[[ ! -e $NVIM_LUA/kickstart/plugins/conform.lua ]]"
 assert "fzf-lua dependency removed"                 "! grep -rq 'ibhagwan/fzf-lua' $NVIM_LUA/"

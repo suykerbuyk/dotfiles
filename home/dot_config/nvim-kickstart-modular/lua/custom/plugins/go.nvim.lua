@@ -23,7 +23,6 @@ return {
   -- Do NOT re-add a GoFormat autocmd: go.nvim's goimports() routes through an
   -- async gopls organizeImports code action that can write the buffer after
   -- the save it was triggered by.
-  event = { 'CmdlineEnter' },
   ft = { 'go', 'gomod' },
   build = ':lua require("go.install").update_all_sync()', -- if you need to install/update all binaries
 }
