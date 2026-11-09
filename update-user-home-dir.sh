@@ -109,7 +109,7 @@ if $UNINSTALL; then
     # Keep this list in lockstep with the fetch.bins/ scripts (every
     # 0N_fetch.<tool>.sh must map to an entry here, a glob call below, a special
     # case, or the rust block).
-    for b in jq gofmt broot fzf ninja starship chezmoi age age-keygen tree-sitter herdr fd bat xh op proxmox-mcp; do
+    for b in jq gofmt broot fzf ninja starship chezmoi age age-keygen tree-sitter herdr fd bat xh op proxmox-mcp codex; do
         if $FORCE; then remove_bin "$b"; else echo "  would remove_bin $b"; fi
     done
     # The three whose payload name remove_bin cannot derive from the binary name.
@@ -263,6 +263,34 @@ if $UNINSTALL; then
         echo "  removed tsh/tctl (versioned teleport-* payload + legacy unversioned payloads + symlinks)"
     else
         echo "  would remove tsh/tctl (~/.local/apps/teleport-* + legacy ~/.local/apps/{tsh,tctl} + symlinks)"
+    fi
+    # claude (slot 26) is a self-managing harness: the installer-invoking fetcher
+    # never created a ~/.local/apps payload, so remove_bin has nothing to match.
+    # It owns ~/.local/bin/claude -> ~/.local/share/claude/versions/<v>. CONSERVATIVE
+    # teardown: remove only the install payload + symlink, and LEAVE ~/.claude
+    # (user auth, settings, history) — the zed/nvm posture of not deleting user
+    # state. Guarded on the tree existing so a box that never installed it is silent.
+    if [[ -e "$HOME/.local/bin/claude" || -L "$HOME/.local/bin/claude" || -d "$HOME/.local/share/claude" ]]; then
+        if $FORCE; then
+            rm -f "$HOME/.local/bin/claude"
+            rm -rf "$HOME/.local/share/claude"
+            echo "  removed claude (~/.local/bin/claude + ~/.local/share/claude; kept ~/.claude user state)"
+        else
+            echo "  would remove claude (~/.local/bin/claude + ~/.local/share/claude; keep ~/.claude user state)"
+        fi
+    fi
+    # grok (slot 27) is a self-managing harness owning all of ~/.grok. CONSERVATIVE
+    # teardown: drop the ~/.local/bin/grok symlink FIRST (else it dangles), then the
+    # install payload only — ~/.grok/bin and ~/.grok/downloads — and LEAVE the rest
+    # of ~/.grok (auth, sessions, skills, version.json). Guarded on the tree existing.
+    if [[ -e "$HOME/.local/bin/grok" || -L "$HOME/.local/bin/grok" || -d "$HOME/.grok/bin" || -d "$HOME/.grok/downloads" ]]; then
+        if $FORCE; then
+            rm -f "$HOME/.local/bin/grok"
+            rm -rf "$HOME/.grok/bin" "$HOME/.grok/downloads"
+            echo "  removed grok (~/.local/bin/grok symlink + ~/.grok/{bin,downloads}; kept ~/.grok auth/sessions/skills)"
+        else
+            echo "  would remove grok (~/.local/bin/grok symlink + ~/.grok/{bin,downloads}; keep ~/.grok auth/sessions/skills)"
+        fi
     fi
     # Rust is not a remove_bin tool: rustup owns ~/.cargo and ~/.rustup, so let
     # it tear itself down cleanly (removes toolchains, cargo, and the homes).

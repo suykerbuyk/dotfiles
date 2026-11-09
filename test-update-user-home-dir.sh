@@ -15,6 +15,9 @@
 #   ./test-update-user-home-dir.sh --ghostty  # also exercise the 48 MB ghostty AppImage fetch
 #   ./test-update-user-home-dir.sh --herdr    # also exercise the 21 MB herdr binary fetch
 #   ./test-update-user-home-dir.sh --bins     # also exercise slots 18-21 (fd/bat/delta/xh, ~13 MB)
+#   ./test-update-user-home-dir.sh --codex    # also exercise the 117 MB codex static fetch (installs codex)
+#   ./test-update-user-home-dir.sh --claude   # claude slot: state that the INSTALL path is not exercised here
+#   ./test-update-user-home-dir.sh --grok     # grok slot: state that the INSTALL path is not exercised here
 #   RUN_GO_FETCH=1 ./test-update-user-home-dir.sh
 #   RUN_RUST_FETCH=1 ./test-update-user-home-dir.sh
 #   RUN_PODMAN_FETCH=1 ./test-update-user-home-dir.sh
@@ -41,6 +44,9 @@ RUN_PODMAN="${RUN_PODMAN_FETCH:-0}"
 RUN_GHOSTTY="${RUN_GHOSTTY_FETCH:-0}"
 RUN_HERDR="${RUN_HERDR_FETCH:-0}"
 RUN_BINS="${RUN_BINS_FETCH:-0}"
+RUN_CODEX="${RUN_CODEX_FETCH:-0}"
+RUN_CLAUDE="${RUN_CLAUDE_FETCH:-0}"
+RUN_GROK="${RUN_GROK_FETCH:-0}"
 NET=1
 for a in "$@"; do
     case "$a" in
@@ -50,6 +56,9 @@ for a in "$@"; do
         --ghostty) RUN_GHOSTTY=1 ;;
         --herdr) RUN_HERDR=1 ;;
         --bins) RUN_BINS=1 ;;
+        --codex) RUN_CODEX=1 ;;
+        --claude) RUN_CLAUDE=1 ;;
+        --grok) RUN_GROK=1 ;;
         --no-net) NET=0 ;;
         # Print the header block, skipping the SPDX banner above it.
         --help|-h) awk '/^# SPDX-License-Identifier:/{s=1;next}
@@ -324,7 +333,7 @@ unset XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS   # simulate headless -> Phase 4 
 BIN_DIR="$SB/.local/bin"; APP_DIR="$SB/.local/apps"
 
 echo "sandbox HOME=$SB"
-echo "repo=$REPO   go-fetch=$([[ $RUN_GO == 1 ]] && echo on || echo off)   rust-fetch=$([[ $RUN_RUST == 1 ]] && echo on || echo off)   podman-fetch=$([[ $RUN_PODMAN == 1 ]] && echo on || echo off)   ghostty-fetch=$([[ $RUN_GHOSTTY == 1 ]] && echo on || echo off)   herdr-fetch=$([[ $RUN_HERDR == 1 ]] && echo on || echo off)   bins-fetch=$([[ $RUN_BINS == 1 ]] && echo on || echo off)   network=$([[ $NET == 1 ]] && echo on || echo off)"
+echo "repo=$REPO   go-fetch=$([[ $RUN_GO == 1 ]] && echo on || echo off)   rust-fetch=$([[ $RUN_RUST == 1 ]] && echo on || echo off)   podman-fetch=$([[ $RUN_PODMAN == 1 ]] && echo on || echo off)   ghostty-fetch=$([[ $RUN_GHOSTTY == 1 ]] && echo on || echo off)   herdr-fetch=$([[ $RUN_HERDR == 1 ]] && echo on || echo off)   bins-fetch=$([[ $RUN_BINS == 1 ]] && echo on || echo off)   codex-fetch=$([[ $RUN_CODEX == 1 ]] && echo on || echo off)   claude-fetch=$([[ $RUN_CLAUDE == 1 ]] && echo on || echo off)   grok-fetch=$([[ $RUN_GROK == 1 ]] && echo on || echo off)   network=$([[ $NET == 1 ]] && echo on || echo off)"
 
 # ---- locate a chezmoi binary (fetch into sandbox if needed) ----------------
 sec "setup: chezmoi binary"
@@ -2788,8 +2797,10 @@ assert "nvim fetcher passes BOTH the current and legacy globs" \
 # 18, 19, 20, 21) moved off install_bin onto a versioned payload, so the pruning
 # population is 17, not 6. The count is deliberately a moving number — that is
 # what makes it a census and not a decoration. Phase 5d moves it again.
-assert "all SEVENTEEN versioned slots use the shared prune" \
-    "[[ \$(grep -lE '^[[:space:]]*fb_prune_versions[[:space:]]' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | wc -l) -eq 17 ]]"
+# UPDATED for unit 2: slot 25 (codex) is a new versioned static slot on the
+# install_versioned_bin + fb_prune_versions pattern, so the population is 18.
+assert "all EIGHTEEN versioned slots use the shared prune" \
+    "[[ \$(grep -lE '^[[:space:]]*fb_prune_versions[[:space:]]' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | wc -l) -eq 18 ]]"
 assert "no slot defines a local prune any more" \
     "[[ \$(grep -lE '^prune_old_versions\(\)' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | wc -l) -eq 0 ]]"
 # The six HAND-ROLLED versioned slots, distinct from the helper-driven ones added
@@ -2826,8 +2837,8 @@ assert "no versioned slot builds a payload path in FB_TMP" \
     "[[ -z \$(cat \$FB_VERSIONED | sed 's/#.*//' | grep -E '^[A-Z_]+=\"\\\$\{?FB_TMP' | grep -v '^TARBALL=') ]]"
 assert "no versioned slot moves a payload out of FB_TMP" \
     "[[ -z \$(cat \$FB_VERSIONED | sed 's/#.*//' | grep -E '^[[:space:]]*mv .*FB_TMP') ]]"
-assert "each of the seventeen prunes from BOTH paths (34 call sites)" \
-    "[[ \$(cat home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | grep -cE '^[[:space:]]*fb_prune_versions[[:space:]]') -eq 34 ]]"
+assert "each of the eighteen prunes from BOTH paths (36 call sites)" \
+    "[[ \$(cat home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | grep -cE '^[[:space:]]*fb_prune_versions[[:space:]]') -eq 36 ]]"
 
 # --- fb_versioned_current / install_versioned_bin (phase 5) -----------------
 # The versioned twin of fb_check_bin + install_bin, for a BARE SINGLE BINARY.
@@ -5275,6 +5286,54 @@ else
 fi
 
 # ===========================================================================
+# ===========================================================================
+# Installer-invoking slots (26 claude, 27 grok) are SKIP-IF-PRESENT. This is the
+# load-bearing assert for the whole unit: claude is frequently LIVE (this very
+# test is a claude process) and Phase 5 runs on every installer pass, so a slot
+# that re-invoked the official installer — or ran `claude update` / `grok update`
+# — on an already-provisioned box would be a defect that disturbs a running tool.
+#
+# No network: the skip branch returns BEFORE any curl, so this runs in the
+# default group (including --no-net). We force the "present" state with a STUB on
+# the sandbox PATH (the sandbox HOME has no real claude/grok), then assert the
+# slot (1) printed "already installed", (2) exited 0, (3) left the stub UNCHANGED
+# — proving it never replaced the binary — and (4) created NO install tree,
+# proving the curl|bash branch never ran. The stub is the delta-reconcile
+# non-vacuity trick: if the guard regressed to always-install, the stub would be
+# overwritten and the tree would appear, failing (3)/(4).
+sec "installer-invoking slots are skip-if-present (no re-install of a live tool)"
+for pair in "claude:26_fetch.claude.sh:.local/share/claude" "grok:27_fetch.grok.sh:.grok/bin"; do
+    tool="${pair%%:*}"; rest="${pair#*:}"; slot="${rest%%:*}"; tree="${rest#*:}"
+    FETCHER="$SB/.local/bin/fetch.bins/$slot"
+    if [[ ! -x "$FETCHER" ]]; then
+        skip "$tool skip-if-present ($slot not applied into sandbox)"
+        continue
+    fi
+    # A stub that exists, is executable, and answers --version — i.e. "present".
+    STUB="$SB/.local/bin/$tool"
+    printf '#!/usr/bin/env bash\necho "%s 0.0.0-stub"\n' "$tool" > "$STUB"
+    chmod +x "$STUB"
+    STUB_SUM_BEFORE="$(sha256sum "$STUB" | cut -d" " -f1)"
+    VER_BEFORE="$("$STUB" --version 2>&1)"
+    # Run the applied slot; fb_init prepends $SB/.local/bin to PATH, so the stub
+    # is the claude/grok it finds. Capture output (don't pipe into grep -q under
+    # pipefail — a still-writing producer would take SIGPIPE and fail the test).
+    out="$("$FETCHER" 2>&1)"; rc=$?
+    assert "$tool slot exits 0 when the tool is already present" "[[ $rc -eq 0 ]]"
+    assert "$tool slot prints 'already installed' (took the skip branch)" \
+        "grep -q 'already installed' <<<\"\$out\""
+    assert "$tool slot did NOT re-run the installer (no 'Installing' line)" \
+        "! grep -q 'Installing' <<<\"\$out\""
+    assert "$tool slot left the present binary UNCHANGED" \
+        "[[ \"\$(sha256sum \"$STUB\" | cut -d' ' -f1)\" == \"$STUB_SUM_BEFORE\" ]]"
+    assert "$tool --version unchanged across the slot run" \
+        "[[ \"\$(\"$STUB\" --version 2>&1)\" == \"$VER_BEFORE\" ]]"
+    assert "$tool slot created no install tree (~/$tree absent)" \
+        "[[ ! -e \"$SB/$tree\" ]]"
+    rm -f "$STUB"
+done
+
+# ===========================================================================
 if [[ $RUN_GO == 1 ]]; then
     sec "go fetcher (150 MB) — GOROOT resolves via in-place symlink"
     if [[ -x "$SB/.local/bin/fetch.bins/04_fetch.go.sh" ]]; then
@@ -5459,6 +5518,55 @@ if [[ $RUN_BINS == 1 ]]; then
 else
     skip "fd/bat/delta/xh fetchers (pass --bins or RUN_BINS_FETCH=1 to enable)"
 fi
+
+# ===========================================================================
+# codex (slot 25) end to end. Unlike claude/grok, codex is a STATIC binary we
+# fetch+pin, and it is ABSENT on this box — so --codex really downloads (~117 MB),
+# extracts, and installs it into the sandbox, which both verifies the slot and
+# confirms the --version probe is correct (the one thing the plan could not
+# verify statically, since codex wasn't installed to probe).
+if [[ $RUN_CODEX == 1 ]]; then
+    sec "codex fetcher (117 MB static musl) — rust-v tag, exact-match asset, triple-named binary"
+    if [[ -x "$SB/.local/bin/fetch.bins/25_fetch.codex.sh" ]]; then
+        "$SB/.local/bin/fetch.bins/25_fetch.codex.sh" >/dev/null 2>&1
+        assert "codex installed + --version works"  "\"$BIN_DIR/codex\" --version >/dev/null 2>&1"
+        assert "codex symlink -> ~/.local/apps"     "[[ \"\$(readlink -f \"$BIN_DIR/codex\")\" == \"$APP_DIR\"/* ]]"
+        # Payload must be the versioned path codex-<ver>, not a bare ~/.local/apps/codex
+        # (a bare name would mean it fell back to the install_bin shape, losing the fast path).
+        assert "codex payload is versioned (codex-<ver>)" \
+            "[[ \"\$(readlink -f \"$BIN_DIR/codex\")\" == \"$APP_DIR\"/codex-[0-9]* ]]"
+        # The whole point of installing the triple-named inner file AS `codex`:
+        # what lands on PATH is the real ELF, named codex, not codex-<triple>.
+        assert "installed codex is an ELF binary"   "head -c4 \"\$(readlink -f \"$BIN_DIR/codex\")\" | grep -q ELF"
+        # Second run must take the versioned fast path: idempotent, same payload,
+        # no new version dir (the fast path only re-asserts the symlink and exits).
+        CODEX_TGT="$(readlink -f "$BIN_DIR/codex")"
+        "$SB/.local/bin/fetch.bins/25_fetch.codex.sh" >/dev/null 2>&1; rerc=$?
+        assert "codex re-run is idempotent (exit 0)"           "[[ $rerc -eq 0 ]]"
+        assert "codex re-run keeps the same versioned payload" "[[ \"\$(readlink -f \"$BIN_DIR/codex\")\" == \"$CODEX_TGT\" ]]"
+    else
+        skip "codex fetcher not present (apply group did not run)"
+    fi
+else
+    skip "codex fetcher (pass --codex or RUN_CODEX_FETCH=1 to enable; installs codex)"
+fi
+
+# ===========================================================================
+# claude (26) / grok (27) INSTALL paths are intentionally NOT exercised here.
+# Both tools are LIVE on the real box (the skip-if-present guard makes the slot a
+# no-op there), and the sandbox must never run the official curl|bash installer
+# for a self-managing harness. The meaningful behaviour — skip-if-present — is
+# asserted unconditionally above (stub-based, no network). These flags exist for
+# symmetry and to make that explicit; they assert nothing a live fetch would.
+for pair in "claude:$RUN_CLAUDE" "grok:$RUN_GROK"; do
+    tool="${pair%%:*}"; on="${pair#*:}"
+    if [[ "$on" == 1 ]]; then
+        sec "$tool fetcher (installer-invoking) — install path NOT exercised here"
+        skip "$tool install path is not run in-sandbox (self-managing harness; skip-if-present asserted above)"
+    else
+        skip "$tool fetcher (installer-invoking; skip-if-present asserted in the default group)"
+    fi
+done
 
 # ---- licensing -------------------------------------------------------------
 # Dual MIT/Apache-2.0. The repo-root LICENSE is canonical and carries BOTH texts;

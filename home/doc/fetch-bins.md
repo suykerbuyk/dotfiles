@@ -104,7 +104,7 @@ teardown strands them exactly the way tree-sitter's binary was stranded.
 
 Each `NN_fetch.<tool>.sh` sources `_lib.sh` and installs one tool as a **versioned
 static binary** under `~/.local/apps/`, symlinked into `~/.local/bin/`. There are
-currently **24 slots** (01–24).
+currently **27 slots** (01–27).
 
 Key `_lib.sh` helpers:
 - `fb_init` — dirs, temp dir with cleanup trap, and a guard against running inside
@@ -319,7 +319,7 @@ Key `_lib.sh` helpers:
     a teardown) delete a *different tool's* payload. Every tag in this tree
     normalizes to a leading digit once the `v` is stripped, so the anchor costs
     nothing elsewhere.
-  - All **six** versioned slots (04, 07, 12, 16, 22, 24) now use it — phase 4
+  - All **seven** versioned slots (04, 07, 12, 16, 22, 24, 25) now use it — phase 4
     finished the migration the earlier 2/4 split was tracking, and the suite
     asserts that no slot defines a local `prune_old_versions` any more.
 - `fetch_chezmoi` — fetch the chezmoi static release binary (same `gh_*` pattern).
@@ -759,6 +759,54 @@ Key `_lib.sh` helpers:
   session would take a handshake failure; and a stanza in a shared client
   config injects the whole Proxmox tool catalog into every agent on the
   machine, including implementors that have no use for it.
+
+- **codex** (`25_fetch.codex.sh`) is the OpenAI Codex CLI — a single static
+  **musl** binary in a `.tar.gz`, the plain versioned-payload pattern (same shape
+  as slot 13 starship: `fb_rust_triple musl`, `install_versioned_bin`,
+  `fb_prune_versions`). Three deviations, all measured, are documented in the
+  slot header and matter if you touch it:
+  - **The tag is `rust-v<version>`**, not `v<version>`. `openai/codex` ships many
+    products from one repo and tags the CLI `rust-v0.167.0`, so the strip is
+    `${TAG_NAME#rust-v}` and the pinned path rebuilds `rust-v${VERSION}` —
+    `FB_PIN_CODEX=0.167.0`.
+  - **Exact-name asset match** (`. == ("codex-" + $arch + ".tar.gz")`, `$arch` a
+    full Rust triple), because the release is full of sibling binaries
+    (`codex-app-server-…`, `codex-exec-…`, `bwrap-…`) and `.zst`/`.sigstore`
+    twins. Same `==` discipline as starship's `.sha256` guard.
+  - **The inner binary carries the triple** (`codex-x86_64-unknown-linux-musl`),
+    so the slot installs that file **as** `codex`. Teardown is a plain
+    `remove_bin` loop entry (`codex-[0-9]*` is derivable), so it is in the
+    `for b in …` list with no extra glob.
+- **claude** (`26_fetch.claude.sh`) and **grok** (`27_fetch.grok.sh`) are
+  **installer-invoking** slots, the nvm (02) / rust (10) family, **not** static
+  payloads: each is a self-managing, self-updating harness that owns its own tree
+  and symlink, so it bypasses `install_bin`/`fb_check_bin`/versioned payloads.
+  - **They copy nvm's model, not rust's: install-if-absent, NEVER update.** The
+    **skip-if-present guard is first and is the point of the slot** — `command -v
+    <tool> && <tool> --version >/dev/null 2>&1 && { echo already; exit 0; }`.
+    claude is frequently LIVE (the fetcher can run inside a running claude) and
+    Phase 5 runs every installer pass, so a slot that re-ran the official
+    installer — or `claude update` / `grok update` — on a provisioned box would
+    disturb a running tool. rust's `rustup update stable` on every pass is exactly
+    what these must not do.
+  - **Official installers (verified 2026-11-09, read-only):** claude runs
+    `curl -fsSL https://claude.ai/install.sh | bash -s stable` (the **stable**
+    channel; the URL 302s to the dist host, and the script delegates to the native
+    `claude install`, landing `~/.local/bin/claude →
+    ~/.local/share/claude/versions/<v>`). grok runs
+    `GROK_CHANNEL=stable curl -fsSL https://x.ai/cli/install.sh | bash`, which
+    writes `~/.grok/downloads/grok-<ver>-<os>-<arch>` and `~/.grok/bin/grok`; the
+    slot then `ln -sf ~/.grok/bin/grok ~/.local/bin/grok` so grok lands on PATH
+    like every other tool (`~/.grok/bin` is not on this repo's PATH, and
+    `GROK_BIN_DIR=~/.local/bin` would split grok's self-managed layout).
+  - **Teardown is a bespoke, CONSERVATIVE special case** (beside zed/nvm):
+    `remove_bin` has nothing to match because neither created a `~/.local/apps`
+    payload. Remove **only the install payload**, and **leave user auth/config/
+    state**. claude: `rm -f ~/.local/bin/claude; rm -rf ~/.local/share/claude`
+    (keep `~/.claude`). grok: drop `~/.local/bin/grok` **first** (else it dangles),
+    then `rm -rf ~/.grok/bin ~/.grok/downloads` (keep the rest of `~/.grok` —
+    auth/sessions/skills/version.json). Each `rm -rf` is guarded on the tree
+    existing, so a box that never installed the tool is silent.
 
 ## chezmoi source layout (`home/`)
 - Attribute-encoded names: `dot_*`, `private_*` (e.g. `private_dot_ssh` → 0700),

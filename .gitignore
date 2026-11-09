@@ -36,3 +36,4 @@ home/dot_local/apps/
 # them is not. It lives at ~/.config/chezmoi/key.txt (0600) and in 1Password
 # ("dotfiles age key"). Guard against any stray copy at any depth.
 key.txt
+/.agents/

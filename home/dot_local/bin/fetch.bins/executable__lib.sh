@@ -134,7 +134,7 @@ fb_supported_os() {
     # No FreeBSD build upstream. jq is listed here rather than as an error
     # because slot 01 already defers to a system jq, which is how FreeBSD gets
     # one (pkg install jq) — the fetch is what is unavailable, not the tool.
-    jq|rg|broot|nvim|zed|ninja|podman|tree-sitter|ghostty|herdr|fd|bat|delta|xh|tsh|tctl|op|proxmox-mcp)
+    jq|rg|broot|nvim|zed|ninja|podman|tree-sitter|ghostty|herdr|fd|bat|delta|xh|tsh|tctl|op|proxmox-mcp|codex|claude|grok)
         echo "linux darwin" ;;
     *)
         echo "" ;;
