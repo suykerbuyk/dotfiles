@@ -3490,6 +3490,41 @@ assert_eq "a bare fb_pin assignment aborts under set -e (callers need ||)" \
 assert_eq "the || form falls through to the fallback" \
     "$(fbsb 'V="$(fb_pin nvim)" || V=fallback; echo "$V"')" "fallback"
 
+# --- bash-3.2 safety: fb_lower / fb_upper and the bash-4 scanner ------------
+# macOS /bin/bash is 3.2.57. fetch.bins must not use bash-4-only syntax. There is
+# no 3.2 binary on a Linux box, so this is enforced two ways: a comment-stripped
+# static scan of every slot and the lib for the constructs below, and behavioural
+# asserts on the case-fold helpers that replaced ${x^^}/${x,,}. nocomment strips
+# from any '#', including one inside quotes, so a construct after a quoted '#' on
+# the same line would escape the scan; no current line does that.
+FB_B4_RE='\$\{[A-Za-z_0-9]+(\^\^|\^|,,|,|@[QEPAaUuLK])[^}]*\}|(declare|local|typeset)[[:space:]]+-[a-zA-Z]*[AGgn]|(^|[^[:alnum:]_])(mapfile|readarray|coproc)([^[:alnum:]_]|$)|\|&|&>>|;;&|;&|\[-[0-9]+\]|\$\{[A-Za-z_0-9]+(\[[^]]*\])?:[[:space:]]+-[0-9]|\$\{[A-Za-z_]+:[^}:]*:-[0-9]|wait[[:space:]]+-n|\[\[[[:space:]]+-v[[:space:]]|EPOCHSECONDS|SRANDOM|shopt[[:space:]]+-[a-z]*s[a-z]*[[:space:]]+[^;|&]*(globstar|lastpipe|autocd|dirspell|direxpand|checkjobs|inherit_errexit|globasciiranges|compat[0-9]+)|(^|[^[:alnum:]_])read[[:space:]]+([^|;&]*[[:space:]])?-[A-Za-z]*N|(^|[^[:alnum:]_])read[[:space:]]+([^|;&]*[[:space:]])?-t[[:space:]]*[0-9]*\.[0-9]|printf[[:space:]][^;|&]*%\([^)]*\)T'
+fb_b4_files=("$FBD"/executable_*.sh)
+# An unmatched glob stays literal, so prove it matched, and that the lib is in the
+# set; no hardcoded count, so adding a slot does not break this.
+assert_ne "bash-4 scan glob matched real files" "${fb_b4_files[*]}" "$FBD/executable_*.sh"
+case " ${fb_b4_files[*]} " in
+    *"/executable__lib.sh "*) ok "bash-4 scan includes _lib.sh" ;;
+    *) bad "bash-4 scan includes _lib.sh" ;;
+esac
+for _f in "${fb_b4_files[@]}"; do
+    _n="$(nocomment "$_f" | grep -cE -e "$FB_B4_RE")"
+    assert_eq "$(basename "$_f"): no bash-4-only construct" "$_n" "0"
+done
+
+assert_eq "fb_lower/fb_upper pin LC_ALL=C on tr" \
+    "$(nocomment "$FBLIB" | grep -c 'LC_ALL=C tr')" "2"
+assert_eq "is_wsl folds osrelease through fb_lower" \
+    "$(nocomment "$FBLIB" | grep -c 'case "$(fb_lower "$osrelease")" in')" "1"
+
+assert_eq "fb_upper folds lower to upper" \
+    "$(fbsb 'fb_upper tree-sitter')" "TREE-SITTER"
+assert_eq "fb_lower folds upper to lower" \
+    "$(fbsb 'fb_lower Microsoft-WSL2')" "microsoft-wsl2"
+assert_eq "fb_upper of the empty string is empty" \
+    "$(fbsb 'fb_upper ""')" ""
+assert_eq "fb_pin folds a mixed-case tool name" \
+    "$(fbsb 'export FB_PIN_TREE_SITTER=1.2.3; fb_pin Tree-Sitter')" "1.2.3"
+
 # --- fb_prune_versions ------------------------------------------------------
 # Install path: keep the new payload, SPARE the one just superseded (deferring
 # that delete by one run), drop everything older — including the legacy scheme.

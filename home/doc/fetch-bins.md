@@ -443,11 +443,25 @@ watchdog (a background job, `kill`, no GNU `timeout`): the probe by
   22 tsh) are not exposed to this residual — the sums file is separate material.
 * **Fast paths are unaffected.** A payload already on disk is trusted as before;
   this checks downloads, not installed state.
-* **bash.** The new helpers use no `${x^^}`/`${x,,}`, `mapfile`, namerefs or
-  associative arrays and no `sha256sum -c`. That does **not** make fetch.bins
-  bash-3.2-safe: `fb_pin` uses `${tool^^}` and the lib uses `${osrelease,,}`, so
-  the fetchers already need bash ≥ 4 on native macOS. A separate follow-on should
-  fix those and run a real bash-3.2 integration pass.
+* **bash.** fetch.bins uses no bash-4-only syntax, so it is written to parse under macOS
+  `/bin/bash` 3.2. `fb_pin` and `is_wsl` used `${tool^^}` / `${osrelease,,}`;
+  both now go through the shared helpers `fb_upper` / `fb_lower`
+  (`printf '%s' "$1" | LC_ALL=C tr ...`). `LC_ALL=C` is pinned because `tr`
+  ranges are unspecified outside the POSIX locale (BSD `tr` follows collation),
+  and ranges rather than `[:upper:]` classes because GNU and BSD disagree on
+  classes. A failing `tr` aborts under `set -e`; `tr` is already a dependency of
+  the lib. The suite enforces this with a comment-stripped scan of every slot and
+  `_lib.sh` for bash-4 constructs (case-modification and `@`-transform
+  expansions, `declare/local/typeset -A/-g/-n`, `mapfile`/`readarray`/`coproc`,
+  `|&`, `&>>`, `;;&`, `;&`, negative array indices and substring offsets/lengths,
+  `wait -n`, `[[ -v ]]`, `EPOCHSECONDS`, `SRANDOM`, 4.x `shopt` options,
+  `read -N` / fractional `-t`, `printf %(..)T`) plus behavioural asserts on the
+  helpers. There is no bash 3.2 binary on a Linux box, so a real run under macOS
+  `/bin/bash` remains a manual check.
+  **Still not macOS-portable (BSD userland, not bash; separate follow-on):**
+  `readlink -f`, `realpath`, `sed -i`, `stat -c`, `sort -V`, and the lib's other
+  `tr` calls (`tr '[:upper:]' '[:lower:]'` in the `DF_OS` fallback, `tr 'A-F'
+  'a-f'` in the digest normalisers), which do not pin `LC_ALL=C`.
 
 #### Coverage census
 

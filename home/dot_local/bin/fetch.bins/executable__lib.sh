@@ -410,6 +410,20 @@ gh_latest_tag_nojq() {
 }
 
 # ----------------------------------------------------------------------
+# Case folding without bash-4 ${x,,} / ${x^^}
+# ----------------------------------------------------------------------
+#   fb_lower <string>   fb_upper <string>   -> prints the folded string
+#
+# macOS /bin/bash is 3.2, which cannot parse the bash-4 case expansions. Two
+# portability hazards, both avoided: (1) tr CHARACTER CLASSES ([:upper:]) are
+# handled differently by GNU and BSD tr, so these use ranges; (2) tr RANGES are
+# unspecified by POSIX outside the POSIX locale (BSD tr follows collation), so
+# LC_ALL=C is pinned on the tr process only. ASCII is all any caller folds.
+# A failing tr aborts under set -e; tr is already a dependency of this file.
+fb_lower() { printf '%s' "$1" | LC_ALL=C tr 'A-Z' 'a-z'; }
+fb_upper() { printf '%s' "$1" | LC_ALL=C tr 'a-z' 'A-Z'; }
+
+# ----------------------------------------------------------------------
 # Version pinning — FB_PIN_<TOOL>
 # ----------------------------------------------------------------------
 # ONE way to say "hold this tool at this version". Before this there was exactly
@@ -428,8 +442,8 @@ gh_latest_tag_nojq() {
 # slots would otherwise be unpinnable:
 #   tree-sitter -> FB_PIN_TREE_SITTER   proxmox-mcp -> FB_PIN_PROXMOX_MCP
 #   age-keygen  -> FB_PIN_AGE_KEYGEN
-# Pure bash, no `tr`: GNU and BSD tr disagree about character-class handling,
-# and this runs on both.
+# The name is upper-cased through fb_upper, not ${tool^^}: that expansion is
+# bash 4, and macOS /bin/bash is 3.2.
 #
 # The pin value is whatever the SLOT calls a version, because that is the string
 # it will interpolate into a path and a URL. Slot 04 is the one that surprises:
@@ -439,7 +453,7 @@ gh_latest_tag_nojq() {
 # unset, so a caller may branch on the status or on the output.
 fb_pin() {
     local tool="$1" var
-    var="FB_PIN_${tool^^}"
+    var="FB_PIN_$(fb_upper "$tool")"
     var="${var//-/_}"
     var="${var//./_}"
     [[ -n "${!var:-}" ]] || return 1
@@ -1950,7 +1964,7 @@ fetch_age() {
 is_wsl() {
     local osrelease=""
     [ -r /proc/sys/kernel/osrelease ] && osrelease=$(</proc/sys/kernel/osrelease)
-    case "${osrelease,,}" in
+    case "$(fb_lower "$osrelease")" in
         *microsoft*|*wsl*) return 0 ;;
     esac
     [ -n "${WSL_DISTRO_NAME:-}" ] && return 0
