@@ -15,7 +15,7 @@
 #   ./test-update-user-home-dir.sh --ghostty  # also exercise the 48 MB ghostty AppImage fetch
 #   ./test-update-user-home-dir.sh --herdr    # also exercise the 21 MB herdr binary fetch
 #   ./test-update-user-home-dir.sh --bins     # also exercise slots 18-21 (fd/bat/delta/xh, ~13 MB)
-#   ./test-update-user-home-dir.sh --codex    # also exercise the 117 MB codex static fetch (installs codex)
+#   ./test-update-user-home-dir.sh --codex    # also exercise the 200 MB codex package fetch (installs codex)
 #   ./test-update-user-home-dir.sh --claude   # claude slot: state that the INSTALL path is not exercised here
 #   ./test-update-user-home-dir.sh --grok     # grok slot: state that the INSTALL path is not exercised here
 #   RUN_GO_FETCH=1 ./test-update-user-home-dir.sh
@@ -3095,8 +3095,8 @@ assert_fbrun "an entry point prints only its single status line on stdout" 0 - '
 # redirects the probe's own output to /dev/null.
 #
 # Per-artifact scoping: only the TAMPERED artifact's consumer, publish and payload
-# must be absent. Artifacts verified earlier in the same run (codex installs main
-# before the companion) may legitimately have fired.
+# must be absent. Artifacts verified earlier in the same run may legitimately have
+# fired (codex now installs a single package tarball, so it has no such case).
 FLOW_OK=0
 if [[ "$(uname -s)" == Linux ]]; then FLOW_OK=1; fi
 FLARCH="$(uname -m)"                      # slots 03/05/17-21 use raw uname -m
@@ -3129,10 +3129,21 @@ fl_build() {
     case "$kind" in
         bare) fl_stub "$out" "$tag" "$name" ;;
         gz)   fl_stub "$d/$name" "$tag" "$name"; gzip -c "$d/$name" > "$out" ;;
-        tgz)  local p IFS_SAVE="$IFS"; IFS=:
-              for p in $layout; do mkdir -p "$d/$(dirname "$p")"; fl_stub "$d/$p" "$tag" "$(basename "$p")"; done
+        tgz)  local p t IFS_SAVE="$IFS"; IFS=:
+              for p in $layout; do
+                  # `path=>target` builds a SYMLINK member (codex's directory-link/escape checks)
+                  t=""; case "$p" in *'=>'*) t="${p#*=>}"; p="${p%%=>*}" ;; esac
+                  mkdir -p "$d/$(dirname "$p")"
+                  if [[ -n "$t" ]]; then ln -s "$t" "$d/$p"; continue; fi
+                  case "$p" in
+                      codex-package.json)   fl_codex_manifest > "$d/$p" ;;
+                      */voice/manifest.json) printf '{}\n' > "$d/$p" ;;
+                      bin/codex) if [[ -n "${FL_CODEX_BADVER:-}" ]]; then printf '#!/bin/sh\nexit 1\n' > "$d/$p"; chmod +x "$d/$p"; else fl_stub "$d/$p" "$tag" "$(basename "$p")"; fi ;;
+                      *)                    fl_stub "$d/$p" "$tag" "$(basename "$p")" ;;
+                  esac
+              done
               IFS="$IFS_SAVE"
-              ( cd "$d" && tar -czf "$out" $(printf '%s' "$layout" | tr ':' '\n' | cut -d/ -f1 | sort -u) ) ;;
+              ( cd "$d" && tar -czf "$out" $(printf '%s' "$layout" | tr ':' '\n' | sed 's/=>.*//' | cut -d/ -f1 | sort -u) ) ;;
         zip)  mkdir -p "$d/$(dirname "$layout")"; fl_stub "$d/$layout" "$tag" "$name"
               python3 -I - "$d" "$out" "$layout" <<'PYZ'
 import sys, zipfile
@@ -3143,6 +3154,127 @@ z.writestr(i, open(d + "/" + layout, "rb").read()); z.close()
 PYZ
               ;;
     esac
+}
+# ---- codex (slot 25) package-layout fixtures --------------------------------
+# The upstream release asset codex-package-<triple>.tar.gz has NO top-level
+# directory: bin/, codex-package.json, codex-resources/, codex-path/ are archive
+# roots. Seven members make a COMPLETE package. The fixture proves presence,
+# regular-file/executable/non-symlink and the manifest fields -- it does NOT prove
+# the voice checksums or upstream's own parser semantics.
+FL_CODEX_LAYOUT="bin/codex:bin/codex-code-mode-host:bin/codex-exec-server:codex-package.json:codex-resources/bwrap:codex-path/rg:codex-resources/voice/manifest.json"
+fl_codex_without() { # <member>: the complete layout minus one member
+    printf ':%s:' "$FL_CODEX_LAYOUT" | sed "s|:$1:|:|; s/^://; s/:\$//"
+}
+# real JSON, all eight fields; FL_CODEX_MANIFEST_FIELD/_VALUE override ONE field (value is JSON)
+fl_codex_manifest() {
+    local j
+    j="$(jq -nc --arg t "$FLTRIPLE" '{layoutVersion:1,version:"1.0.0",target:$t,variant:"codex",entrypoint:"bin/codex",execServer:"bin/codex-exec-server",resourcesDir:"codex-resources",pathDir:"codex-path"}')"
+    if [[ -n "${FL_CODEX_MANIFEST_FIELD:-}" ]]; then
+        j="$(printf '%s' "$j" | jq -c --arg f "$FL_CODEX_MANIFEST_FIELD" --argjson v "$FL_CODEX_MANIFEST_VALUE" '.[$f] = $v')"
+    fi
+    printf '%s\n' "$j"
+}
+fl_codex_seed() { # <root> [layout]: lay a package tree on disk (same members/manifest as the fixture)
+    local root="$1" lay="${2:-$FL_CODEX_LAYOUT}" tmp
+    tmp="$(mktemp -d "$FLTMP/stage/s.XXXXXX")"
+    fl_build tgz GOOD "$tmp/p.tgz" "$lay" codex
+    mkdir -p "$root"; tar -xzf "$tmp/p.tgz" -C "$root"
+}
+fl_codex_complete() { # <root>: test-side completeness, independent of the slot's predicate
+    local r="$1"
+    [[ -f "$r/codex-package.json" && -x "$r/bin/codex" && -x "$r/bin/codex-code-mode-host" \
+       && -x "$r/bin/codex-exec-server" && -x "$r/codex-resources/bwrap" && -x "$r/codex-path/rg" \
+       && -f "$r/codex-resources/voice/manifest.json" ]]
+}
+fl_codex_snap() { ( cd "$1" && find . | sort && find . -type f -exec md5sum {} + | sort ); }
+# One asset under the exact name, an INCOMPLETE layout/manifest, the slot must refuse.
+# fl_asset APPENDS to the release doc and gh_asset_url takes the first match, so these
+# never call fl_setup first: a second same-name asset would not be the one downloaded.
+fl_codex_reject() { # <label> <layout> [manifest-field json-value]
+    local w="flow 25 reject $1" a
+    fl_reset; a="$FL_HOME/.local/apps"
+    FL_CODEX_MANIFEST_FIELD="${3:-}"; FL_CODEX_MANIFEST_VALUE="${4:-}"
+    fl_asset openai/codex rust-v1.0.0 "codex-package-$FLTRIPLE.tar.gz" tgz "$2" codex
+    FL_CODEX_MANIFEST_FIELD=""; FL_CODEX_MANIFEST_VALUE=""
+    fl_run 25
+    assert "$w: the slot fails with the incomplete diagnostic" "[[ $FLR_RC -ne 0 && \"\$FLR_ERR\" == *incomplete* ]]"
+    assert "$w: nothing published, linked or left staged" \
+        "[[ ! -e $a/codex-1.0.0 && ! -L $FL_HOME/.local/bin/codex && ! -e $FL_HOME/.local/bin/codex && -z \$(ls -d $a/codex-1.0.0.new.* 2>/dev/null) ]]"
+}
+fl_check_codex_layout() {
+    local a w="flow 25 package" prior snap0 snap1 cl
+    # --- complete install ---
+    fl_setup 25 good ""; a="$FL_HOME/.local/apps"; fl_run 25
+    assert_eq "$w: complete fixture, slot exits 0" "$FLR_RC" "0"
+    assert "$w: the published root is complete (manifest, 3 bins, bwrap, rg, voice manifest)" "fl_codex_complete $a/codex-1.0.0"
+    assert "$w: ~/.local/bin/codex resolves to <root>/bin/codex" "[[ \"\$(readlink $FL_HOME/.local/bin/codex)\" == $a/codex-1.0.0/bin/codex ]]"
+    assert "$w: no code-mode-host sibling outside the package (neither -e nor -L)" \
+        "[[ ! -e $a/codex-code-mode-host && ! -L $a/codex-code-mode-host && ! -e $a/codex-code-mode-host-1.0.0 && ! -L $a/codex-code-mode-host-1.0.0 ]]"
+    # --- validation rejections: one per distinct clause ---
+    fl_codex_reject manifest-layoutVersion "$FL_CODEX_LAYOUT" layoutVersion 999
+    fl_codex_reject manifest-variant       "$FL_CODEX_LAYOUT" variant '"wrong"'
+    fl_codex_reject manifest-version       "$FL_CODEX_LAYOUT" version '"9.9.9"'
+    fl_codex_reject manifest-target        "$FL_CODEX_LAYOUT" target '"wrong-triple"'
+    fl_codex_reject manifest-entrypoint    "$FL_CODEX_LAYOUT" entrypoint '"bin/other"'
+    fl_codex_reject manifest-execServer    "$FL_CODEX_LAYOUT" execServer '"bin/other"'
+    fl_codex_reject manifest-resourcesDir  "$FL_CODEX_LAYOUT" resourcesDir '"other"'
+    fl_codex_reject manifest-pathDir       "$FL_CODEX_LAYOUT" pathDir '"other"'
+    fl_codex_reject symlinked-exec-server  "$(fl_codex_without bin/codex-exec-server):bin/codex-exec-server=>codex"
+    fl_codex_reject missing-bwrap          "$(fl_codex_without codex-resources/bwrap)"
+    fl_codex_reject missing-rg             "$(fl_codex_without codex-path/rg)"
+    fl_codex_reject missing-voice-manifest "$(fl_codex_without codex-resources/voice/manifest.json)"
+    fl_codex_reject missing-exec-server    "$(fl_codex_without bin/codex-exec-server)"
+    fl_codex_reject missing-code-mode-host "$(fl_codex_without bin/codex-code-mode-host)"
+    # --- migration: flat file + sibling symlink + versioned host -> package dir ---
+    fl_setup 25 good ""; a="$FL_HOME/.local/apps"
+    fl_stub "$a/codex-1.0.0" GOOD codex; fl_stub "$a/codex-code-mode-host-1.0.0" GOOD codex-code-mode-host
+    ln -s codex-code-mode-host-1.0.0 "$a/codex-code-mode-host"; ln -sfn "$a/codex-1.0.0" "$FL_HOME/.local/bin/codex"
+    fl_run 25
+    assert_eq "$w migration: slot exits 0" "$FLR_RC" "0"
+    assert "$w migration: the flat file became a complete package dir" "[[ -d $a/codex-1.0.0 ]] && fl_codex_complete $a/codex-1.0.0"
+    assert "$w migration: legacy host symlink and versioned host are gone (neither -e nor -L)" \
+        "[[ ! -e $a/codex-code-mode-host && ! -L $a/codex-code-mode-host && ! -e $a/codex-code-mode-host-1.0.0 && ! -L $a/codex-code-mode-host-1.0.0 ]]"
+    assert "$w migration: PATH link now targets <root>/bin/codex" "[[ \"\$(readlink $FL_HOME/.local/bin/codex)\" == $a/codex-1.0.0/bin/codex ]]"
+    # --- fast path: a COMPLETE existing package downloads nothing ---
+    fl_setup 25 good ""; a="$FL_HOME/.local/apps"
+    fl_codex_seed "$a/codex-1.0.0"; ln -s codex-code-mode-host-1.0.0 "$a/codex-code-mode-host"   # dangling stray
+    fl_run 25
+    assert "$w fast path: complete package, exit 0 and NO download" "[[ $FLR_RC -eq 0 && \$(fl_ev '^download ') -eq 0 ]]"
+    assert "$w fast path: link ensured to <root>/bin/codex" "[[ \"\$(readlink $FL_HOME/.local/bin/codex)\" == $a/codex-1.0.0/bin/codex ]]"
+    assert "$w fast path: the stray legacy sibling is swept (neither -e nor -L)" "[[ ! -e $a/codex-code-mode-host && ! -L $a/codex-code-mode-host ]]"
+    # --- fast path: a same-version flat FILE is not current ---
+    fl_setup 25 good ""; a="$FL_HOME/.local/apps"
+    fl_stub "$a/codex-1.0.0" GOOD codex; ln -sfn "$a/codex-1.0.0" "$FL_HOME/.local/bin/codex"
+    fl_run 25
+    assert "$w fast path: a flat FILE is not current -> downloads and becomes a package dir" "[[ $FLR_RC -eq 0 && \$(fl_ev '^download ') -ge 1 && -d $a/codex-1.0.0 ]]"
+    # --- fast path: an INCOMPLETE existing directory is repaired ---
+    fl_setup 25 good ""; a="$FL_HOME/.local/apps"
+    fl_codex_seed "$a/codex-1.0.0" "bin/codex:codex-package.json"
+    fl_run 25
+    assert "$w fast path: an incomplete existing dir triggers a repair download" \
+        "[[ $FLR_RC -eq 0 && \$(fl_ev '^download ') -ge 1 ]] && fl_codex_complete $a/codex-1.0.0"
+    # --- preservation: a rejected package leaves the previous state alone ---
+    fl_reset; a="$FL_HOME/.local/apps"
+    fl_asset openai/codex rust-v1.0.0 "codex-package-$FLTRIPLE.tar.gz" tgz "$(fl_codex_without bin/codex-exec-server)" codex
+    fl_codex_seed "$a/codex-0.0.1"; ln -sfn "$a/codex-0.0.1/bin/codex" "$FL_HOME/.local/bin/codex"
+    snap0="$(fl_codex_snap "$a/codex-0.0.1")"; fl_run 25; snap1="$(fl_codex_snap "$a/codex-0.0.1")"
+    assert "$w preserve (prior package): rejected package -> fails" "[[ $FLR_RC -ne 0 && \"\$FLR_ERR\" == *incomplete* ]]"
+    assert_eq "$w preserve (prior package): the prior tree is byte-identical" "$snap1" "$snap0"
+    assert "$w preserve (prior package): link unchanged, no new final, no stage left" \
+        "[[ \"\$(readlink $FL_HOME/.local/bin/codex)\" == $a/codex-0.0.1/bin/codex && ! -e $a/codex-1.0.0 && -z \$(ls -d $a/codex-1.0.0.new.* 2>/dev/null) ]]"
+    fl_reset; a="$FL_HOME/.local/apps"
+    fl_asset openai/codex rust-v1.0.0 "codex-package-$FLTRIPLE.tar.gz" tgz "$(fl_codex_without bin/codex-exec-server)" codex
+    fl_stub "$a/codex-1.0.0" GOOD codex; ln -sfn "$a/codex-1.0.0" "$FL_HOME/.local/bin/codex"
+    fl_run 25
+    assert "$w preserve (same-version flat file): rejected package -> fails, flat file survives" \
+        "[[ $FLR_RC -ne 0 && -f $a/codex-1.0.0 && ! -d $a/codex-1.0.0 && \"\$(readlink $FL_HOME/.local/bin/codex)\" == $a/codex-1.0.0 && -z \$(ls -d $a/codex-1.0.0.new.* 2>/dev/null) ]]"
+    # --- stage cleanup when the staged codex fails its --version probe ---
+    fl_reset; a="$FL_HOME/.local/apps"
+    FL_CODEX_BADVER=1; fl_asset openai/codex rust-v1.0.0 "codex-package-$FLTRIPLE.tar.gz" tgz "$FL_CODEX_LAYOUT" codex; FL_CODEX_BADVER=""
+    fl_codex_seed "$a/codex-0.0.1"
+    fl_run 25
+    assert "$w probe failure: fails, nothing published, no .new stage left, prior tree kept" \
+        "[[ $FLR_RC -ne 0 && ! -e $a/codex-1.0.0 && -z \$(ls -d $a/codex-1.0.0.new.* 2>/dev/null) && -x $a/codex-0.0.1/bin/codex ]]"
 }
 # _fl_put <url> <kind> <layout> <bin>: serve GOOD bytes at <url>, keep EVIL beside them
 _fl_put() {
@@ -3277,8 +3409,7 @@ fl_setup() {
     22) fl_asset_at cdn.teleport.dev "https://cdn.teleport.dev/teleport-v18.0.0-linux-$FLAMD-bin.tar.gz" tgz "teleport/tsh:teleport/tctl" tsh
         fl_sums_at "https://cdn.teleport.dev/teleport-v18.0.0-linux-$FLAMD-bin.tar.gz.sha256" "https://cdn.teleport.dev/teleport-v18.0.0-linux-$FLAMD-bin.tar.gz" teleport-v18.0.0-linux-$FLAMD-bin.tar.gz ;;
     24) fl_asset gordcurrie/proxmox-mcp v1.0.0 "proxmox-mcp_linux_$FLAMD" bare x proxmox-mcp ;;
-    25) fl_asset openai/codex rust-v1.0.0 "codex-$r.tar.gz" tgz "codex-$r" codex
-        fl_asset openai/codex rust-v1.0.0 "codex-code-mode-host-$r.tar.gz" tgz "codex-code-mode-host-$r" codex-code-mode-host ;;
+    25) fl_asset openai/codex rust-v1.0.0 "codex-package-$r.tar.gz" tgz "$FL_CODEX_LAYOUT" codex ;;
     01) fl_asset_at jqlang/jq "https://github.com/jqlang/jq/releases/download/jq-1.0.0/jq-linux-$FLAMD" bare x jq
         fl_sums_at "https://github.com/jqlang/jq/releases/download/jq-1.0.0/sha256sum.txt" "https://github.com/jqlang/jq/releases/download/jq-1.0.0/jq-linux-$FLAMD" "jq-linux-$FLAMD"
         printf '%s %s\n' jqlang/jq jq-1.0.0 > "$FL_REL/$(fl_key jqlang/jq).tag"
@@ -3339,28 +3470,6 @@ fl_check() {
     fi
 }
 
-# codex runs TWO flows in one shell: main (installed first) then the companion.
-# Per-artifact scoping: tampering the companion legitimately leaves main's payload.
-fl_check_codex() {
-    FL_COVERED="$FL_COVERED 25"
-    local main="codex-$FLTRIPLE.tar.gz" cmh="codex-code-mode-host-$FLTRIPLE.tar.gz" a
-    fl_setup 25 good ""; a="$FL_HOME/.local/apps"; fl_run 25
-    assert_eq "flow 25 codex, nothing tampered: exits 0" "$FLR_RC" "0"
-    assert "flow 25 codex, nothing tampered: BOTH artifacts verified (two verify lines)" "[[ \$(grep -c 'verified sha256' $FLTMP/out) -eq 2 ]]"
-    assert "flow 25 codex, nothing tampered: main and companion published" "[[ -e $a/codex-1.0.0 && -e $a/codex-code-mode-host-1.0.0 ]]"
-    fl_setup 25 evil "$main"; a="$FL_HOME/.local/apps"; fl_run 25
-    assert "flow 25 codex MAIN tampered: fails with the mismatch" "[[ $FLR_RC -ne 0 && \"\$FLR_ERR\" == *MISMATCH* ]]"
-    assert "flow 25 codex MAIN tampered: main never extracted/executed/published" \
-        "[[ \$(fl_ev '^tar ') -eq 0 && \$(fl_ev 'exec:EVIL') -eq 0 && ! -e $a/codex-1.0.0 ]]"
-    assert "flow 25 codex MAIN tampered: the companion was never reached" "[[ ! -e $a/codex-code-mode-host-1.0.0 && \$(fl_ev 'code-mode-host') -eq 0 ]]"
-    fl_setup 25 evil "$cmh"; a="$FL_HOME/.local/apps"; fl_run 25
-    assert "flow 25 codex COMPANION tampered: fails with the mismatch" "[[ $FLR_RC -ne 0 && \"\$FLR_ERR\" == *MISMATCH* ]]"
-    assert "flow 25 codex COMPANION tampered: the earlier VERIFIED main legitimately installed" \
-        "[[ -e $a/codex-1.0.0 && \$(fl_ev "exec:GOOD:codex-$FLTRIPLE") -ge 1 ]]"
-    assert "flow 25 codex COMPANION tampered: only main was extracted; the companion never ran or published" \
-        "[[ \$(fl_ev '^tar ') -eq 1 && \$(fl_ev 'exec:EVIL') -eq 0 && ! -e $a/codex-code-mode-host-1.0.0 && ! -e $a/codex-code-mode-host ]]"
-}
-
 if [[ $FLOW_OK == 1 ]]; then
     sec "slot flows: tampered bytes never reach a consumer or a publish"
     fl_check 03 rg rg-1.0.0 "ripgrep-1.0.0-$FLTRIPLE.tar.gz" tar yes
@@ -3383,7 +3492,8 @@ if [[ $FLOW_OK == 1 ]]; then
     fl_check 01 jq jq-1.0.0 "jq-linux-$FLAMD" - yes JQ_FETCH_FORCE=1
     assert "flow 01 jq: the jq-free bootstrap never called jq (sentinel jq untouched)" "[[ \$(fl_ev 'JQ-CALLED') -eq 0 ]]"
     fl_check 09 chezmoi chezmoi-1.0.0 "chezmoi_1.0.0_linux_$FLAMD.tar.gz" tar yes
-    fl_check_codex
+    fl_check 25 codex codex-1.0.0 "codex-package-$FLTRIPLE.tar.gz" tar no
+    fl_check_codex_layout
     # C1: a missing DECLARED sums asset. FB_VERIFY=off must still install (the escape hatch
     # for an old pinned release / a renamed checksum asset); warn and strict must hard-fail.
     fl_drop_asset() { # <repo> <asset-name>
@@ -3634,43 +3744,47 @@ assert "nvim fetcher passes BOTH the current and legacy globs" \
 # what makes it a census and not a decoration. Phase 5d moves it again.
 # UPDATED for unit 2: slot 25 (codex) is a new versioned static slot on the
 # install_versioned_bin + fb_prune_versions pattern, so the population is 18.
+# (Slot 25 later moved to a hand-rolled DIRECTORY payload, the nvim idiom; it still
+# prunes, so the population stays 18.)
 assert "all EIGHTEEN versioned slots use the shared prune" \
     "[[ \$(grep -lE '^[[:space:]]*fb_prune_versions[[:space:]]' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | wc -l) -eq 18 ]]"
 assert "no slot defines a local prune any more" \
     "[[ \$(grep -lE '^prune_old_versions\(\)' home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | wc -l) -eq 0 ]]"
-# ---- slot 25: the codex code-mode companion --------------------------------
-# codex launches `codex-code-mode-host` as a SIBLING of its own /proc/self/exe
-# (~/.local/apps/codex-<ver>), so slot 25 must ALSO fetch+install that companion
-# into APP_DIR — NOT on PATH — at the same version/tag. Mutation-proof: every
-# grep runs over `nocomment` so a rationale comment mentioning the host cannot
-# satisfy the assertion; the behaviour must be in live code.
+# ---- slot 25: the codex PACKAGE layout -------------------------------------
+# codex 0.167 wants its upstream package root (bin/, codex-package.json,
+# codex-resources/, codex-path/), so slot 25 fetches codex-package-<triple>.tar.gz
+# and publishes it as a DIRECTORY payload (the nvim idiom). The 6abd15a companion
+# machinery is gone: codex-code-mode-host now ships inside bin/. Positive asserts
+# are killed by deleting the live line; the NEGATIVE ones (absence) can only be
+# killed by INSERTING the forbidden live line. Every grep runs over `nocomment`.
 CODEX_SLOT="home/dot_local/bin/fetch.bins/executable_25_fetch.codex.sh"
-assert "slot 25 fetches the code-mode-host release asset (exact-name match)" \
-    "nocomment $CODEX_SLOT | grep -qF '\"codex-code-mode-host-\" + \$arch + \".tar.gz\"'"
-assert "slot 25 installs the companion as a versioned APP_DIR payload (staged)" \
-    "nocomment $CODEX_SLOT | grep -q 'fb_stage_payload ' && nocomment $CODEX_SLOT | grep -q 'fb_publish_payload '"
-assert "slot 25 links the companion as an APP_DIR sibling, not a PATH tool" \
-    "nocomment $CODEX_SLOT | grep -qE 'ln -sfn .*CMH_NAME.*CMH_LINK' && ! nocomment $CODEX_SLOT | grep -q 'install_versioned_bin .*code-mode-host'"
-# Must provision the companion on BOTH paths — the fast path (codex already
-# current) and the install path — so a host that has codex but never had the
-# host still gets it. Two bare call sites (the function definition line
-# `install_code_mode_host() {` does not match the anchored call pattern).
-assert "slot 25 provisions the companion on both the fast and install paths" \
-    "[[ \$(nocomment $CODEX_SLOT | grep -cE '^[[:space:]]*install_code_mode_host\$') -ge 2 ]]"
-# Teardown parity: the --uninstall path must clear the companion too.
-assert "uninstall removes the codex code-mode companion" \
+assert "slot 25 fetches the package asset by exact name" \
+    "nocomment $CODEX_SLOT | grep -qF '\"codex-package-\" + \$arch + \".tar.gz\"'"
+assert "slot 25 does not fetch the separate code-mode-host asset" \
+    "! nocomment $CODEX_SLOT | grep -qF 'code-mode-host-\" + \$arch'"
+assert "slot 25 no longer uses the single-file helpers or the companion machinery" \
+    "! nocomment $CODEX_SLOT | grep -qE 'install_versioned_bin|fb_versioned_current|install_code_mode_host|CMH_'"
+assert "slot 25 stages a directory payload (stage, mkdir the stage, publish)" \
+    "nocomment $CODEX_SLOT | grep -q 'fb_stage_payload ' && nocomment $CODEX_SLOT | grep -q 'fb_publish_payload ' && nocomment $CODEX_SLOT | grep -q 'mkdir -p \"\$STAGE\"'"
+assert "slot 25 verifies the tarball digest before it extracts" \
+    "nocomment $CODEX_SLOT | awk '/fb_verify_gh_digest/ {v=NR} /tar -xzf/ {t=NR} END {exit !(v && t && v<t)}'"
+assert "slot 25 extracts the package tarball without --strip-components" \
+    "! nocomment $CODEX_SLOT | grep -q -- '--strip-components'"
+# Teardown parity: remove_bin codex clears the package dir (rm -rf codex-[0-9]*); the
+# special case below only clears the LEGACY flat-layout sibling on hosts not migrated yet.
+assert "uninstall still clears the LEGACY codex-code-mode-host sibling" \
     "nocomment update-user-home-dir.sh | grep -q 'remove_bin codex-code-mode-host'"
-# The six HAND-ROLLED versioned slots, distinct from the helper-driven ones added
-# in phase 5. These six own their staging and publish directly because their
+# The SEVEN HAND-ROLLED versioned slots, distinct from the helper-driven ones added
+# in phase 5. These seven own their staging and publish directly because their
 # payload shapes differ (toolchain tree, runtime tree, userland tree, AppImage
-# file, directory of two binaries, bare binary) and their fast paths do different
-# extra work; the phase-5 slots are one uniform shape and go through
-# install_versioned_bin instead. These six hand-roll the MAIN payload through
-# fb_stage_payload (slot 25 also stages, but only for its code-mode companion —
-# its main codex payload still goes through install_versioned_bin).
-FB_VERSIONED="$(echo home/dot_local/bin/fetch.bins/executable_{04,07,12,16,22,24}_fetch.*.sh)"
-# Every versioned slot prunes on BOTH paths, so two call sites each, twelve in
-# total. A slot that prunes only on install strands its predecessor forever the
+# file, directory of two binaries, bare binary, codex's package tree) and their fast
+# paths do different extra work; the phase-5 slots are one uniform single-file shape
+# and go through install_versioned_bin instead. Slot 25 joined them when codex moved
+# from a lone binary to the upstream package directory (install_versioned_bin and
+# fb_versioned_current both refuse a directory payload).
+FB_VERSIONED="$(echo home/dot_local/bin/fetch.bins/executable_{04,07,12,16,22,24,25}_fetch.*.sh)"
+# Every versioned slot prunes on BOTH paths, so two call sites each. (Fourteen of
+# these are the hand-rolled seven.) A slot that prunes only on install strands its predecessor forever the
 # moment a run is interrupted before the prune.
 # Every versioned slot must OBTAIN its staging path from the helper rather than
 # spelling one itself. Without this the only thing stopping a slot drifting back
@@ -3686,7 +3800,7 @@ for _vf in $FB_VERSIONED; do
         "nocomment $_vf | grep -q 'fb_publish_payload '"
 done
 unset _vf
-# Scoped to the SIX versioned slots, not the whole tree: the install_bin slots
+# Scoped to the SEVEN hand-rolled versioned slots, not the whole tree: the install_bin slots
 # use $FB_TMP legitimately and by contract -- install_bin owns the copy into
 # APP_DIR and explicitly requires a source outside it. The narrower rule pinned
 # here is that a slot publishing its OWN versioned payload must not build that
@@ -3696,12 +3810,11 @@ assert "no versioned slot builds a payload path in FB_TMP" \
     "[[ -z \$(cat \$FB_VERSIONED | sed 's/#.*//' | grep -E '^[A-Z_]+=\"\\\$\{?FB_TMP' | grep -v '^TARBALL=') ]]"
 assert "no versioned slot moves a payload out of FB_TMP" \
     "[[ -z \$(cat \$FB_VERSIONED | sed 's/#.*//' | grep -E '^[[:space:]]*mv .*FB_TMP') ]]"
-# 18 slots x 2 paths = 36, PLUS slot 25's code-mode companion, which prunes its
-# own codex-code-mode-host-[0-9]* payloads on its install path only (its fast
-# path returns when the exact version is already present, with nothing newer to
-# supersede). That one extra call site makes 37.
-assert "each of the eighteen prunes from BOTH paths, plus the codex companion (37 call sites)" \
-    "[[ \$(cat home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | grep -cE '^[[:space:]]*fb_prune_versions[[:space:]]') -eq 37 ]]"
+# 18 slots x 2 paths = 36. Slot 25's code-mode companion used to add a 37th call
+# site (it pruned its own codex-code-mode-host-[0-9]* payloads); the companion now
+# ships inside the package directory, so slot 25 is back to fast + install = 2.
+assert "each of the eighteen prunes from BOTH paths (36 call sites)" \
+    "[[ \$(cat home/dot_local/bin/fetch.bins/executable_[0-9]*.sh | grep -cE '^[[:space:]]*fb_prune_versions[[:space:]]') -eq 36 ]]"
 
 # --- fb_versioned_current / install_versioned_bin (phase 5) -----------------
 # The versioned twin of fb_check_bin + install_bin, for a BARE SINGLE BINARY.
@@ -6398,23 +6511,24 @@ else
 fi
 
 # ===========================================================================
-# codex (slot 25) end to end. Unlike claude/grok, codex is a STATIC binary we
-# fetch+pin, and it is ABSENT on this box — so --codex really downloads (~117 MB),
-# extracts, and installs it into the sandbox, which both verifies the slot and
-# confirms the --version probe is correct (the one thing the plan could not
-# verify statically, since codex wasn't installed to probe).
+# codex (slot 25) end to end. Unlike claude/grok, codex is a release package we
+# fetch+pin, and it is ABSENT on this box — so --codex really downloads (~200 MB),
+# extracts, and installs the package directory into the sandbox, which both
+# verifies the slot and confirms the --version probe is correct. (Never run
+# `codex doctor` here: it writes under the sandbox CODEX_HOME.)
 if [[ $RUN_CODEX == 1 ]]; then
-    sec "codex fetcher (117 MB static musl) — rust-v tag, exact-match asset, triple-named binary"
+    sec "codex fetcher (200 MB package) — rust-v tag, exact-match package asset, directory payload"
     if [[ -x "$SB/.local/bin/fetch.bins/25_fetch.codex.sh" ]]; then
         "$SB/.local/bin/fetch.bins/25_fetch.codex.sh" >/dev/null 2>&1
         assert "codex installed + --version works"  "\"$BIN_DIR/codex\" --version >/dev/null 2>&1"
         assert "codex symlink -> ~/.local/apps"     "[[ \"\$(readlink -f \"$BIN_DIR/codex\")\" == \"$APP_DIR\"/* ]]"
-        # Payload must be the versioned path codex-<ver>, not a bare ~/.local/apps/codex
-        # (a bare name would mean it fell back to the install_bin shape, losing the fast path).
-        assert "codex payload is versioned (codex-<ver>)" \
-            "[[ \"\$(readlink -f \"$BIN_DIR/codex\")\" == \"$APP_DIR\"/codex-[0-9]* ]]"
-        # The whole point of installing the triple-named inner file AS `codex`:
-        # what lands on PATH is the real ELF, named codex, not codex-<triple>.
+        # Payload must be the versioned PACKAGE DIRECTORY codex-<ver>/, with the binary
+        # at bin/codex inside it, not a bare ~/.local/apps/codex file.
+        assert "codex payload is a versioned package dir (codex-<ver>/bin/codex)" \
+            "[[ \"\$(readlink -f \"$BIN_DIR/codex\")\" == \"$APP_DIR\"/codex-[0-9]*/bin/codex ]]"
+        assert "codex package root carries codex-package.json" \
+            "[[ -f \"\$(dirname \"\$(readlink -f \"$BIN_DIR/codex\")\")/../codex-package.json\" ]]"
+        # What lands on PATH is the real ELF at <root>/bin/codex.
         assert "installed codex is an ELF binary"   "head -c4 \"\$(readlink -f \"$BIN_DIR/codex\")\" | grep -q ELF"
         # Second run must take the versioned fast path: idempotent, same payload,
         # no new version dir (the fast path only re-asserts the symlink and exits).

@@ -142,7 +142,8 @@ Key `_lib.sh` helpers:
     them leaves the pair at two versions — the both-or-neither problem slot 22
     solved the same way for `tsh`/`tctl`. It therefore hand-rolls on
     `fb_stage_payload`/`fb_publish_payload` rather than `install_versioned_bin`,
-    which refuses a directory.
+    which refuses a directory (as does slot 25 codex, whose payload is the
+    upstream package tree).
 - `install_bin src name [verify-args]` — copy to `~/.local/apps`, verify, then
   symlink (verification gate before the symlink is created). **Pass a `src` that is
   not already `~/.local/apps/<name>`** — idiomatically the extracted binary in
@@ -394,7 +395,7 @@ declined. Coverage is kept honest by an **exact census** in the suite instead.
 | `fb_url_basename <url>` | The tail of a URL (query/fragment stripped) — the identity of what was fetched when there is no release metadata (jq's interpolated URL, the Teleport CDN). |
 
 **Identity comes from the URL that was downloaded, never from a local path.**
-Slots rename downloads locally (`codex.tar.gz`, `starship.tar.gz`, `${FB_TMP}/jq`),
+Slots rename downloads locally (`codex-package.tar.gz`, `starship.tar.gz`, `${FB_TMP}/jq`),
 and `gh_asset_url` returns only `.browser_download_url`. Hashing or looking up a
 local alias against upstream metadata would silently verify the wrong identity, so
 `fb_verify_gh_digest` takes the URL and `gh_asset_name` maps it back to the name.
@@ -467,7 +468,7 @@ watchdog (a background job, `kill`, no GNU `timeout`): the probe by
 
 | slot(s) | flavour |
 |---|---|
-| 03 rg, 05 broot, 07 nvim, 11 ninja, 12 podman, 14 age, 15 tree-sitter, 16 ghostty, 17 herdr, 18 fd, 19 bat, 20 delta, 21 xh, 24 proxmox-mcp, 25 codex (**both** tarballs) | GitHub `digest` (`fb_verify_gh_digest`) |
+| 03 rg, 05 broot, 07 nvim, 11 ninja, 12 podman, 14 age, 15 tree-sitter, 16 ghostty, 17 herdr, 18 fd, 19 bat, 20 delta, 21 xh, 24 proxmox-mcp, 25 codex (the package tarball) | GitHub `digest` (`fb_verify_gh_digest`) |
 | 06 fzf (`fzf_<v>_checksums.txt`), 09 chezmoi (`chezmoi_<v>_checksums.txt`), 13 starship (`<asset>.sha256`), 22 tsh/tctl (`<tarball>.sha256` on the CDN), 01 jq (`sha256sum.txt`, parsed jq-free) | declared sums (`fb_verify_sums`) |
 | 02 nvm, 04 go, 08 zed, 10 rust, 23 op, 26 claude, 27 grok | **named exemptions**, each with its reason in the slot file (`# fb_verify exemption:`) and in the suite: 02/08/26/27 have no artifact of ours to hash or nothing published to check; 04, 10 and 23 are scope **deferrals** (go's pinned path needs its own metadata fetch; rust is a clean seam but a self-updating bootstrap with a sibling `.sha256` that needs its own research; 1Password ships a signature only) |
 
@@ -888,23 +889,60 @@ row above.
   config injects the whole Proxmox tool catalog into every agent on the
   machine, including implementors that have no use for it.
 
-- **codex** (`25_fetch.codex.sh`) is the OpenAI Codex CLI — a single static
-  **musl** binary in a `.tar.gz`, the plain versioned-payload pattern (same shape
-  as slot 13 starship: `fb_rust_triple musl`, `install_versioned_bin`,
-  `fb_prune_versions`). Three deviations, all measured, are documented in the
-  slot header and matter if you touch it:
+- **codex** (`25_fetch.codex.sh`) is the OpenAI Codex CLI, installed as the
+  upstream **package directory**, not a lone binary. codex 0.167 started from a
+  flat `codex-<triple>` file exits with *"this CLI has no complete local package;
+  install a packaged Codex CLI or use the standalone installer"* (its app-server
+  daemon provisions itself by copying the package root). So the slot fetches
+  `codex-package-<triple>.tar.gz` (~200 MB, ~600 MB extracted; it has **no**
+  top-level directory: `bin/{codex,codex-code-mode-host,codex-exec-server}`,
+  `codex-package.json`, `codex-path/rg`, `codex-resources/{bwrap,voice/…}` are the
+  archive roots) and publishes it as `~/.local/apps/codex-<ver>/`, with
+  `~/.local/bin/codex -> …/codex-<ver>/bin/codex`. Observed, not an established
+  algorithm: package discovery follows the resolved executable path, both
+  directly and through a symlink; `codex doctor` shows a `package …` for a package
+  root and none for a lone file, but it is **not** a completeness oracle.
+  - **A hand-rolled directory payload**, the slot 07 nvim shape
+    (`fb_stage_payload` / `mkdir` + untar into the stage / probe the stage /
+    `fb_publish_payload` / link / `fb_prune_versions` on both paths). It does
+    **not** use `install_versioned_bin` or `fb_versioned_current`, which refuse a
+    directory, so it carries its own fast path.
+  - **`codex_pkg_ok` is the completeness gate**, run on the existing payload (fast
+    path) and on the staged tree before the publish. It is manifest-driven:
+    `layoutVersion` 1, `variant` `codex`, `version`/`target` equal to this run's,
+    and `entrypoint`/`execServer`/`resourcesDir`/`pathDir` equal to the expected
+    values; the three binaries (`codex`, `codex-code-mode-host`,
+    `codex-exec-server`) executable and not symlinks; `codex-resources/bwrap`,
+    `codex-path/rg` and `codex-resources/voice/manifest.json` present; then
+    `codex --version`. (`codex-code-mode-host` is a required sibling but is **not**
+    manifest-declared; `execServer` is.) It is a conservative approximation of
+    upstream's own check, not an implementation of it. A flat file or a hollow
+    directory of the same name is therefore *not* current and is repaired by a
+    download.
+  - **jq.** The fast path now needs jq (it parses the manifest). With jq missing
+    `codex_pkg_ok` fails, the slot falls through to the download, which fails in
+    `gh_asset_url` and leaves the existing install in place.
+  - **Migration** off the flat layout (4a8fa81/6abd15a) is automatic and
+    one-shot, on both paths: a same-version flat `codex-<ver>` file is replaced in
+    place by `fb_publish_payload`, and the hand-placed `codex-code-mode-host`
+    sibling symlink and `codex-code-mode-host-<ver>` payloads are swept
+    (`migrate_legacy_codex`) once a complete package is live. **Same-version
+    migration has no rollback copy** across the `rm -rf` + `mv`: deliberately no
+    `.legacy` copy, because the payload is re-downloadable and a rerun repairs. A
+    validation or extract failure happens before the publish and leaves the
+    previous install untouched. Run it with no live codex session.
   - **The tag is `rust-v<version>`**, not `v<version>`. `openai/codex` ships many
     products from one repo and tags the CLI `rust-v0.167.0`, so the strip is
     `${TAG_NAME#rust-v}` and the pinned path rebuilds `rust-v${VERSION}` —
     `FB_PIN_CODEX=0.167.0`.
-  - **Exact-name asset match** (`. == ("codex-" + $arch + ".tar.gz")`, `$arch` a
-    full Rust triple), because the release is full of sibling binaries
-    (`codex-app-server-…`, `codex-exec-…`, `bwrap-…`) and `.zst`/`.sigstore`
-    twins. Same `==` discipline as starship's `.sha256` guard.
-  - **The inner binary carries the triple** (`codex-x86_64-unknown-linux-musl`),
-    so the slot installs that file **as** `codex`. Teardown is a plain
-    `remove_bin` loop entry (`codex-[0-9]*` is derivable), so it is in the
-    `for b in …` list with no extra glob.
+  - **Exact-name asset match** (`. == ("codex-package-" + $arch + ".tar.gz")`,
+    `$arch` a full Rust triple), because the release is full of siblings
+    (`codex-<triple>`, `codex-app-server-…`, `codex-npm-…`, `bwrap-…`) and
+    `.zst`/`.sigstore` twins.
+  - **Teardown**: `remove_bin codex` (a `for b in …` loop entry) clears the package
+    directory (`rm -rf codex-[0-9]*`); the separate `remove_bin
+    codex-code-mode-host` special case is kept only as legacy cleanup for hosts that
+    never migrated.
 - **claude** (`26_fetch.claude.sh`) and **grok** (`27_fetch.grok.sh`) are
   **installer-invoking** slots, the nvm (02) / rust (10) family, **not** static
   payloads: each is a self-managing, self-updating harness that owns its own tree
