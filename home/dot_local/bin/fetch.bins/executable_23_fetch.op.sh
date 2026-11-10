@@ -5,6 +5,9 @@
 
 set -euo pipefail
 
+# fb_verify exemption: deferred: 1Password ships a GPG signature only, no checksum file; belongs with the signature follow-on.
+# See "Download integrity" in doc/fetch-bins.md.
+
 # 1Password CLI (op v2) installer.
 #
 # Follows the tsh (slot 22) pattern closely. Key differences from the

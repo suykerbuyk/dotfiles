@@ -104,6 +104,8 @@ install_code_mode_host() {
         '. == ("codex-code-mode-host-" + $arch + ".tar.gz")' "$TRIPLE" "" "$PIN_TAG")"
     tb="${FB_TMP}/${CMH_NAME}.tar.gz"
     gh_download "$url" "$tb"
+    # Integrity before the companion tarball is extracted.
+    fb_verify_gh_digest "$tb" openai/codex "$url" "$PIN_TAG"
     tar -xzf "$tb" -C "$FB_TMP"
 
     # Stage beside the destination (same filesystem -> atomic publish), verify
@@ -142,6 +144,9 @@ ASSET_URL="$(gh_asset_url openai/codex \
 
 TARBALL="${FB_TMP}/codex.tar.gz"
 gh_download "$ASSET_URL" "$TARBALL"
+# Integrity before the main tarball is extracted. The companion is verified separately
+# inside install_code_mode_host; the .sigstore bundles are a follow-on.
+fb_verify_gh_digest "$TARBALL" openai/codex "$ASSET_URL" "$PIN_TAG"
 tar -xzf "$TARBALL" -C "$FB_TMP"
 
 # DEVIATION 3: the extracted file is codex-<triple>; install it AS `codex`.

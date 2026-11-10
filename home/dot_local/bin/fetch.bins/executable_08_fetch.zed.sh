@@ -5,6 +5,9 @@
 
 set -euo pipefail
 
+# fb_verify exemption: zed is a versionless redirect with no published digest or sums to check against.
+# See "Download integrity" in doc/fetch-bins.md.
+
 # Zed installer (GUI). Uses require_display_or_skip for tty/WSL headless.
 # Preserves desktop integration. Uses lib helpers where possible (CDN URL
 # is not GitHub, so we keep custom download). See Context.fetch.bins.refactor.md.

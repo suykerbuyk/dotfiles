@@ -2558,7 +2558,7 @@ assert_eq "the jq-free path shares the same cache" \
 # -s, not -e: a zero-length file from an interrupted write must not be served as
 # a hit forever. Pre-create an empty cache and confirm the fetch still happens.
 assert_eq "an empty cache file is refetched, not served" \
-    "$(ghsb ': > "${FB_TMP}/gh-release-Foo_bar.json"; gh_latest_tag Foo/bar >/dev/null')" "1"
+    "$(ghsb ': > "${FB_TMP}/gh-release-Foo_bar-latest.json"; gh_latest_tag Foo/bar >/dev/null')" "1"
 # The token must never reach argv, which is world-readable in /proc and shows up
 # in ps and in any set -x trace. It goes through curl's config on stdin.
 assert_eq "a token is passed on stdin, never on the command line" \
@@ -2667,6 +2667,806 @@ assert_eq "prev payload is EMPTY when the symlink target is gone" \
 
 assert "_lib.sh declares fb_pin"             "grep -qE '^fb_pin\(\)' $FBLIB"
 assert "_lib.sh declares fb_prune_versions"  "grep -qE '^fb_prune_versions\(\)' $FBLIB"
+
+# --- fb_verify_* : download integrity (library core) ------------------------
+# fbsb merges stdout+stderr, runs rm -rf, then printf's — so $? is the printf's
+# and neither the child's exit status nor which stream a diagnostic used can be
+# observed. fbrun keeps both, leaves the sandbox standing until fbrun_clean, and
+# drops a done-marker as the snippet's LAST statement so an early abort (a syntax
+# error, a set -e trip before the point under test) cannot pass as an expected
+# empty result. Runs in THIS shell (not a subshell) so assert counters survive.
+fbrun_clean() { [[ -n "${FBR_SB:-}" ]] && rm -rf "$FBR_SB"; FBR_SB=""; }
+fbrun() {
+    fbrun_clean
+    FBR_SB="$(mktemp -d)"; mkdir -p "$FBR_SB/apps" "$FBR_SB/bin" "$FBR_SB/tmp"
+    # A fresh COPY of the fixture per run: a verify failure deletes the file it
+    # refused, and that must never take the shared fixture with it.
+    [[ -f "${FBT_FIX:-}" ]] && cp "$FBT_FIX" "$FBR_SB/tmp/work.bin"
+    export FBT_WORK="$FBR_SB/tmp/work.bin"
+    APP_DIR="$FBR_SB/apps" BIN_DIR="$FBR_SB/bin" FB_TMP="$FBR_SB/tmp" FBR_DONE="$FBR_SB/done" \
+        bash -c '. "$1" >/dev/null 2>&1; shift; eval "$@"; : > "$FBR_DONE"' \
+        bash "$REPO/$FBLIB" "$1" <"${FBR_STDIN:-/dev/null}" >"$FBR_SB/out" 2>"$FBR_SB/err"
+    FBR_RC=$?
+    FBR_OUT="$(cat "$FBR_SB/out")"; FBR_ERR="$(cat "$FBR_SB/err")"
+    [[ -e "$FBR_SB/done" ]] && FBR_DONE=1 || FBR_DONE=0
+    return 0
+}
+# assert_fbrun <name> <want-rc> <stderr-regex|-> [stdout-regex|-]
+# A success verdict also needs the done-marker; a failure verdict needs the
+# INTENDED diagnostic, so an unrelated early abort cannot satisfy it.
+assert_fbrun() {
+    local n="$1" rc="$2" ere="${3:--}" ore="${4:--}" why=""
+    [[ "$FBR_RC" == "$rc" ]] || why="rc=$FBR_RC want $rc (stderr: ${FBR_ERR:0:200})"
+    [[ "$rc" != 0 || "$FBR_DONE" == 1 ]] || why="${why:+$why; }snippet never completed"
+    [[ "$ere" == - || "$FBR_ERR" =~ $ere ]] || why="${why:+$why; }stderr [$FBR_ERR] !~ [$ere]"
+    [[ "$ore" == - || "$FBR_OUT" =~ $ore ]] || why="${why:+$why; }stdout [$FBR_OUT] !~ [$ore]"
+    if [[ -z "$why" ]]; then ok "$n"; else bad "$n" "$why"; fi
+}
+FBT_DIR="$(mktemp -d)"
+FBT_FIX="$FBT_DIR/payload.bin"; printf 'fetch.bins payload\n' > "$FBT_FIX"
+# Independent oracle: NOT the helper under test.
+fbt_sha() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1" | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1;  then shasum -a 256 < "$1" | cut -d' ' -f1
+    else python3 -I -c 'import hashlib,sys;print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())' < "$1"; fi
+}
+FBT_SHA="$(fbt_sha "$FBT_FIX")"
+FBT_EMPTY=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+FBT_BAD=0000000000000000000000000000000000000000000000000000000000000000
+export FBT_FIX FBT_SHA FBT_EMPTY FBT_BAD FBT_DIR
+# stub dir: each stub logs that it ran, so "chosen" can't hide "never tried"
+fbt_stub() { # <name> <body>
+    mkdir -p "$FBT_DIR/stub"; printf '#!/bin/sh\n%s\n' "$2" > "$FBT_DIR/stub/$1"; chmod +x "$FBT_DIR/stub/$1"; }
+fbt_stub_reset() { rm -rf "$FBT_DIR/stub"; : > "$FBT_DIR/stublog"; export FBT_STUB="$FBT_DIR/stub" FBT_STUBLOG="$FBT_DIR/stublog"; }
+
+for _fn in fb_verify_policy fb_sha256_backend fb_sha256_of fb_checksum_lookup fb_verify_sha256 \
+           fb_verify_sums fb_verify_gh_digest gh_asset_name fb_url_basename _gh_release_cache_path; do
+    assert "_lib.sh declares $_fn" "grep -qE '^$_fn\\(\\)' $FBLIB"
+done
+unset _fn
+
+# default: ONE lib line, ONE test constant (flip both together)
+EXPECT_DEFAULT=warn
+assert "the FB_VERIFY default is a single line in _lib.sh" \
+    "[[ \$(nocomment $FBLIB | grep -c ': \"\${FB_VERIFY:=') == 1 ]]"
+# the default applies when the lib is SOURCED, so FB_VERIFY must be absent from
+# the child's environment (a user's own export must not decide this assert)
+_fbv_save="${FB_VERIFY-__unset__}"; unset FB_VERIFY
+fbrun 'fb_verify_policy'
+[[ "$_fbv_save" == __unset__ ]] || export FB_VERIFY="$_fbv_save"
+unset _fbv_save
+assert_fbrun "FB_VERIFY unset resolves to the operator-ruled default ($EXPECT_DEFAULT)" 0 - "^${EXPECT_DEFAULT}\$"
+for _m in strict warn off; do
+    fbrun "FB_VERIFY=$_m fb_verify_policy"
+    assert_fbrun "FB_VERIFY=$_m is accepted" 0 - "^$_m\$"
+done
+fbrun 'FB_VERIFY=wran fb_verify_policy'
+assert_fbrun "an unknown FB_VERIFY value is a hard error, not a silent default" 1 'FB_VERIFY'
+
+# --- the normaliser: ONE rule (stdin hashing => no filename; exactly one 64-hex) ---
+H1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+H2=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+export H1 H2
+for _shape in "$H1  -" "$H1" "SHA256 (stdin) = $H1" "SHA256(stdin)= $H1" "SHA2-256(stdin)= $H1" "(stdin)= $H1" "$(printf '%s' "$H1" | tr a-f A-F)  -"; do
+    export FBT_SHAPE="$_shape"
+    fbrun 'printf "%s\n" "$FBT_SHAPE" | _fb_sha256_norm'
+    assert_fbrun "normaliser accepts: $_shape" 0 - "^$H1\$"
+done
+unset _shape
+H65="${H1}a"; export H65
+for _bad in "$H1 $H2" "$H65  -" "$H1  $H2" "" "no hash here" "$(printf '%s\n%s' "$H1" "x")" "$H1"$'\n'; do
+    export FBT_SHAPE="$_bad"
+    fbrun 'printf "%s\n" "$FBT_SHAPE" | _fb_sha256_norm'
+    assert_fbrun "normaliser REJECTS: [${_bad:0:40}]" 1 - '^$'
+done
+unset _bad
+
+# --- backends: real digest via each, pinned; skipped is not passed ----------
+_ran=0
+for _b in sha256sum shasum sha256 openssl python3; do
+    if command -v "$_b" >/dev/null 2>&1; then
+        export FBT_B="$_b"; _ran=$((_ran+1))
+        fbrun 'FB_SHA256_BACKEND="$FBT_B" fb_sha256_of "$FBT_FIX"'
+        assert_fbrun "backend $_b hashes a file correctly (stdin redirect)" 0 - "^${FBT_SHA}\$"
+    else
+        skip "backend $_b not on this host (shape covered by the normaliser fixtures)"
+    fi
+done
+assert "at least one real backend EXECUTED (a table of skips is not coverage)" "[[ $_ran -ge 1 ]]"
+unset _b _ran
+fbrun 'FB_SHA256_BACKEND=nosuchhasher fb_sha256_of "$FBT_FIX"'
+assert_fbrun "a pinned backend that is absent is a hard error, not a fallthrough" 1 'FB_SHA256_BACKEND'
+
+# --- operability, not presence --------------------------------------------
+fbt_stub_reset
+fbt_stub sha256sum 'echo called >> "$FBT_STUBLOG"; exit 1'
+fbrun 'PATH="$FBT_STUB:$PATH"; echo "BE=$(fb_sha256_backend)"; fb_sha256_of "$FBT_FIX"'
+assert_fbrun "a sha256sum that exists, is executable and exits non-zero is skipped" 0 - "BE=(shasum|sha256|openssl|python3)(\$|[^a-z0-9])"
+assert "...the broken stub was actually tried (not just never reached)" "[[ -s $FBT_STUBLOG ]]"
+assert "...and a LATER backend produced the correct digest" "[[ \"\$FBR_OUT\" == *$FBT_SHA ]]"
+fbt_stub_reset
+fbt_stub sha256sum 'echo called >> "$FBT_STUBLOG"; cat >/dev/null; echo "'"$FBT_BAD"'  -"'
+fbrun 'PATH="$FBT_STUB:$PATH"; echo "BE=$(fb_sha256_backend)"'
+assert_fbrun "a hasher that exits 0 but prints the wrong empty-input digest is skipped" 0 - "BE=(shasum|sha256|openssl|python3)(\$|[^a-z0-9])"
+assert "...and was tried" "[[ -s $FBT_STUBLOG ]]"
+
+# --- the stdin trap / a hung hasher (bounded by a portable watchdog) ---------
+fbt_stub_reset
+fbt_stub sha256sum 'echo called >> "$FBT_STUBLOG"; sleep 30'
+_t0=$SECONDS
+fbrun 'PATH="$FBT_STUB:$PATH"; export FB_VERIFY_PROBE_TIMEOUT=1; echo "BE=$(fb_sha256_backend)"'
+assert_fbrun "a hung hasher is bounded and the next backend is used" 0 - "BE=(shasum|sha256|openssl|python3)(\$|[^a-z0-9])"
+assert "...within the watchdog bound (no GNU timeout), not the 30 s sleep" "[[ $((SECONDS - _t0)) -lt 20 ]]"
+fbt_stub_reset
+fbt_stub sha256sum 'echo called >> "$FBT_STUBLOG"; cat >/dev/null; echo "'"$FBT_EMPTY"'  -"'
+# a stub that reads stdin would block on a terminal/pipe; the probe must hand it EOF
+fbrun 'PATH="$FBT_STUB:$PATH"; echo "BE=$(fb_sha256_backend)"'
+assert_fbrun "the probe gives stdin EOF (</dev/null): a stdin-reading hasher does not hang" 0 - "BE=sha256sum"
+# fbrun closes the CHILD's stdin, so the test above would pass even if the probe merely
+# inherited it. This one gives the caller PENDING bytes: the hasher must see ZERO of them
+# (so a probe fed /dev/stdin is rejected — the stub then prints garbage) and the caller's
+# stdin must still be intact afterwards.
+fbt_stub_reset
+fbt_stub sha256sum 'n=$(cat | wc -c | tr -d " "); echo "$n" >> "$FBT_STUBLOG"; if [ "$n" -eq 0 ]; then echo "'"$FBT_EMPTY"'  -"; else echo garbage; fi'
+printf 'PENDING-CALLER-BYTES\n' > "$FBT_DIR/pending.in"
+FBR_STDIN="$FBT_DIR/pending.in"
+# Job control ON and no $( ): bash gives a background job /dev/null as stdin only when job
+# control is OFF, so under set -m the explicit </dev/null is what actually protects the
+# caller — and a probe fed /dev/stdin instead would really leak (verified by mutation).
+fbrun 'set -m; PATH="$FBT_STUB:$PATH"; fb_sha256_backend > "$FB_TMP/be" 2>/dev/null; echo "BE=$(cat "$FB_TMP/be")"; echo "REST=$(cat)"'
+unset FBR_STDIN
+assert_fbrun "probe stdin: the hasher is chosen, having read EXACTLY zero bytes of the caller's pending stdin" 0 - 'BE=sha256sum'
+assert "...the stub observed 0 bytes (not the pending 21)" "[[ \"\$(sort -u $FBT_STUBLOG | tr -d '\\n')\" == 0 ]]"
+assert "...and the caller's own stdin was left untouched" "[[ \"\$FBR_OUT\" == *'REST=PENDING-CALLER-BYTES' ]]"
+
+# C2: a timed-out REAL hash is a hard failure even when the backend swallows SIGTERM and
+# exits 0 — the guard's marker, not the backend's exit status, decides.
+fbt_stub_reset
+fbt_stub sha256sum 'n=$(cat | wc -c | tr -d " "); if [ "$n" -eq 0 ]; then echo "'"$FBT_EMPTY"'  -"; else trap "exit 0" TERM; while :; do sleep 1 & wait $!; done; fi'
+for _m in warn strict; do
+    fbrun 'PATH="$FBT_STUB:$PATH"; export FB_VERIFY_TIMEOUT=1 FB_VERIFY='"$_m"'; fb_verify_sha256 "$FBT_WORK" "$FBT_SHA" fx; echo "STATUS=$FB_VERIFY_STATUS"'
+    assert_fbrun "timed-out real hash with a TERM handler that exits 0 is a HARD failure ($_m)" 1 'timed out'
+    assert "...and was never reported verified ($_m)" "[[ \"\$FBR_OUT\" != *verified* && \"\$FBR_OUT\" != *STATUS=verified* ]]"
+done
+unset _m
+
+# --- absence vs failure: a probe-passing backend that fails on the real file ----
+for _case in 'exit 3' 'printf "%s  -\n%s  -\n" "$FBT_EMPTY" "$FBT_EMPTY"' 'echo garbage' 'echo "$FBT_EMPTY  -"'; do
+    fbt_stub_reset
+    fbt_stub sha256sum 'n=$(cat | wc -c); if [ "$n" -eq 0 ]; then echo "'"$FBT_EMPTY"'  -"; else '"$_case"'; fi'
+    for _m in warn strict; do
+        fbrun 'PATH="$FBT_STUB:$PATH"; export FB_VERIFY='"$_m"'; fb_verify_sha256 "$FBT_WORK" "$FBT_SHA" fx'
+        assert_fbrun "probe-passing hasher failing on the real file is a HARD error ($_m): ${_case:0:28}" 1 'hash'
+        assert "...and is NOT reported as 'no operable' (never downgraded to warn)" "[[ \"\$FBR_ERR\" != *'no operable'* ]]"
+    done
+done
+unset _case _m
+
+# --- verification core --------------------------------------------------------
+for _m in warn strict; do
+    fbrun 'export FB_VERIFY='"$_m"'; fb_verify_sha256 "$FBT_WORK" "$FBT_SHA" fx; echo "STATUS=$FB_VERIFY_STATUS"'
+    assert_fbrun "match verifies ($_m): status line on stdout, file kept" 0 - '^verified sha256 fx'$'\n''STATUS=verified$'
+    assert "...stderr is silent on a clean match ($_m)" "[[ -z \"\$FBR_ERR\" ]]"
+    fbrun 'export FB_VERIFY='"$_m"'; cp "$FBT_FIX" "$FB_TMP/d"; fb_verify_sha256 "$FB_TMP/d" "$FBT_BAD" fx'
+    assert_fbrun "MISMATCH is a hard fail ($_m) naming both digests" 1 "$FBT_BAD.*$FBT_SHA|$FBT_SHA.*$FBT_BAD"
+    assert "...mismatch diagnostics are on stderr, not stdout ($_m)" "[[ -z \"\$FBR_OUT\" ]]"
+    assert "...and the unverified file was DELETED ($_m)" "[[ ! -e $FBR_SB/tmp/d ]]"
+done
+for _bad in "" "abc" "${FBT_SHA:0:63}" "${FBT_SHA}0" "sha1:${FBT_SHA:0:40}" "$(printf 'z%.0s' $(seq 1 64))"; do
+    export FBT_EXP="$_bad"
+    fbrun 'cp "$FBT_FIX" "$FB_TMP/d"; fb_verify_sha256 "$FB_TMP/d" "$FBT_EXP" fx'
+    assert_fbrun "malformed expected [${_bad:0:20}] is a hard error, never verified" 1 'expected'
+done
+unset _bad
+fbrun 'fb_verify_sha256 "$FBT_WORK" "$(printf %s "$FBT_SHA" | tr a-f A-F)" fx; echo "STATUS=$FB_VERIFY_STATUS"'
+assert_fbrun "upper-case expected hex matches" 0 - 'STATUS=verified'
+fbrun 'fb_verify_sha256 "$FB_TMP/nonexistent" "$FBT_SHA" fx'
+assert_fbrun "a missing file is a hard error" 1 'fx|nonexistent'
+
+# --- off: no verification attempted, one loud line, never silent ---------------
+fbrun 'FB_VERIFY=off; fb_verify_sha256 "$FBT_WORK" "$FBT_BAD" fx; echo "STATUS=$FB_VERIFY_STATUS"'
+assert_fbrun "off: nothing compared (a bad digest does not fail), one warn line, status=skipped" 0 'warn:.*FB_VERIFY=off.*fx.*NOT verified' 'STATUS=skipped'
+
+# --- U1: no operable hasher, on a GENUINELY hermetic PATH ----------------------
+# PROBE_PATH (above) keeps /usr/bin:/bin, so env -i alone hides nothing. Build a
+# directory of only the non-hasher tools the helpers use, plus exit-127 hasher
+# stubs, and make it the ONLY PATH. The canary proves the PATH is not leaky.
+HERM="$FBT_DIR/herm"; mkdir -p "$HERM"
+for _t in sed tr grep awk cat rm mkdir mktemp sleep kill head wc dirname basename cut tail sort cp printf od; do
+    _p="$(command -v "$_t" 2>/dev/null || true)"; [[ -n "$_p" && -x "$_p" ]] && ln -sf "$_p" "$HERM/$_t"
+done
+for _h in sha256sum shasum sha256 openssl python3 python; do
+    printf '#!/bin/sh\nexit 127\n' > "$HERM/$_h"; chmod +x "$HERM/$_h"
+done
+export HERM
+fbrun 'PATH="$HERM"; for h in sha256sum shasum sha256 openssl python3; do "$h" </dev/null >/dev/null 2>&1 && echo "LEAK:$h"; done; echo CANARY-OK'
+assert_fbrun "canary: no real hasher resolves on the hermetic PATH" 0 - '^CANARY-OK$'
+for _m in strict warn; do
+    fbrun 'PATH="$HERM"; export FB_VERIFY='"$_m"'; fb_verify_sha256 "$FBT_WORK" "$FBT_SHA" fx; echo "STATUS=$FB_VERIFY_STATUS"'
+    if [[ $_m == strict ]]; then
+        assert_fbrun "U1 no hasher under strict: hard fail" 1 'no operable'
+    else
+        assert_fbrun "U1 no hasher under warn: loud warn, proceeds, status=skipped" 0 'warn:.*fx.*UNVERIFIED.*FB_VERIFY=strict' 'STATUS=skipped'
+    fi
+done
+unset _m _t _p _h
+
+# --- fb_checksum_lookup: literal equality, conflicts fail ----------------------
+fbt_lk() { # <sums-content-printf-fmt-args...> ; name in $FBT_NAME
+    export FBT_SUMS="$1" FBT_NAME="$2"
+    fbrun 'printf "%b" "$FBT_SUMS" > "$FB_TMP/s"; fb_checksum_lookup "$FB_TMP/s" "$FBT_NAME"'
+}
+fbt_lk "$H1  x.tar.gz\n$H2  x.tar.gz.sha256\n" x.tar.gz;           assert_fbrun "lookup: exact name, not the .sha256 sibling" 0 - "^$H1\$"
+fbt_lk "$H1 *x.tar.gz\n" x.tar.gz;                                  assert_fbrun "lookup: binary-mode '*name' form" 0 - "^$H1\$"
+fbt_lk "$H1  ./x.tar.gz\n" x.tar.gz;                                assert_fbrun "lookup: './name' form" 0 - "^$H1\$"
+fbt_lk "$H1  age-keygen\n$H2  age\n" age;                           assert_fbrun "lookup: 'age' does not hit 'age-keygen'" 0 - "^$H2\$"
+fbt_lk "$H1  a+b.tar.gz\n$H2  aXb.tar.gz\n" 'a+b.tar.gz';           assert_fbrun "lookup: regex metacharacters are literal ('+')" 0 - "^$H1\$"
+fbt_lk "$H1  x[1].tgz\n$H2  x1.tgz\n" 'x[1].tgz';                   assert_fbrun "lookup: regex metacharacters are literal ('[ ]')" 0 - "^$H1\$"
+fbt_lk "$H1  x.tar.gz\n$H1  x.tar.gz\n" x.tar.gz;                   assert_fbrun "lookup: identical duplicate entries collapse" 0 - "^$H1\$"
+fbt_lk "$H1  x.tar.gz\n$H2  x.tar.gz\n" x.tar.gz;                   assert_fbrun "lookup: CONFLICTING entries for one name fail (rc 3, distinct from absent)" 3 'conflict'
+fbt_lk "$H1  other.tgz\n" x.tar.gz;                                 assert_fbrun "lookup: absent name is rc!=0 with empty stdout" 1 - '^$'
+fbt_lk "$H1\n" x.tar.gz;                                            assert_fbrun "lookup: a bare-hex one-line file (starship .sha256) is accepted" 0 - "^$H1\$"
+fbt_lk "$H1  x.tar.gz\r\n" x.tar.gz;                                assert_fbrun "lookup: CRLF line endings tolerated" 0 - "^$H1\$"
+
+# --- fb_verify_sums: declared material; stripped/conflicting => fail -----------
+# gh_download is stubbed IN the child (a function shadows the lib's), so no network.
+SUMSDEF='gh_download() { echo "$1" >> "$FB_TMP/dl.log"; if [ -n "${FBT_SUMS_FILE:-}" ] && [ -s "$FBT_SUMS_FILE" ]; then cp "$FBT_SUMS_FILE" "$2"; else echo "Error: download failed for $1" >&2; exit 1; fi; }'
+printf '%s  payload.bin\n' "$FBT_SHA" > "$FBT_DIR/sums.good"
+printf '%s  payload.bin\n' "$FBT_BAD" > "$FBT_DIR/sums.bad"
+printf '%s  other.bin\n'   "$FBT_SHA" > "$FBT_DIR/sums.noname"
+printf '%s  payload.bin\n%s  payload.bin\n' "$FBT_SHA" "$FBT_BAD" > "$FBT_DIR/sums.conflict"
+export FBT_URLD=https://example.invalid/dl/payload.bin FBT_URLS=https://example.invalid/dl/SUMS
+for _m in warn strict; do
+    export FBT_SUMS_FILE="$FBT_DIR/sums.good"
+    fbrun "$SUMSDEF"'; export FB_VERIFY='"$_m"'; cp "$FBT_FIX" "$FB_TMP/local-alias"; fb_verify_sums "$FB_TMP/local-alias" "$FBT_URLD" "$FBT_URLS" lbl; echo "STATUS=$FB_VERIFY_STATUS"'
+    assert_fbrun "sums: the name comes from the DOWNLOAD URL, not the renamed local file ($_m)" 0 - '^verified sha256 lbl'$'\n''STATUS=verified$'
+    export FBT_SUMS_FILE="$FBT_DIR/sums.bad"
+    fbrun "$SUMSDEF"'; export FB_VERIFY='"$_m"'; cp "$FBT_FIX" "$FB_TMP/d"; fb_verify_sums "$FB_TMP/d" "$FBT_URLD" "$FBT_URLS" lbl'
+    assert_fbrun "sums: mismatch fails ($_m)" 1 'mismatch|MISMATCH'
+    export FBT_SUMS_FILE="$FBT_DIR/sums.noname"
+    fbrun "$SUMSDEF"'; export FB_VERIFY='"$_m"'; fb_verify_sums "$FBT_WORK" "$FBT_URLD" "$FBT_URLS" lbl'
+    assert_fbrun "sums: asset absent from the declared sums file fails ($_m)" 1 'payload.bin'
+    export FBT_SUMS_FILE="$FBT_DIR/sums.conflict"
+    fbrun "$SUMSDEF"'; export FB_VERIFY='"$_m"'; fb_verify_sums "$FBT_WORK" "$FBT_URLD" "$FBT_URLS" lbl'
+    assert_fbrun "sums: conflicting entries fail ($_m)" 1 'conflict'
+    export FBT_SUMS_FILE=""
+    fbrun "$SUMSDEF"'; export FB_VERIFY='"$_m"'; fb_verify_sums "$FBT_WORK" "$FBT_URLD" "$FBT_URLS" lbl'
+    assert_fbrun "sums: declared material unavailable (404) fails ($_m) — a stripped sums file is the downgrade" 1 'download failed'
+done
+export FBT_SUMS_FILE="$FBT_DIR/sums.bad"
+fbrun "$SUMSDEF"'; FB_VERIFY=off; fb_verify_sums "$FBT_WORK" "$FBT_URLD" "$FBT_URLS" lbl; echo "STATUS=$FB_VERIFY_STATUS"'
+assert_fbrun "sums under off: skipped with one warn line" 0 'FB_VERIFY=off' 'STATUS=skipped'
+assert "...and NO sums download was attempted under off" "[[ ! -e $FBR_SB/tmp/dl.log ]]"
+unset FBT_SUMS_FILE
+
+# --- status lifetime: verified-then-skipped in ONE shell ----------------------
+fbrun 'PATH="$HERM"; FB_VERIFY=warn
+       FB_SHA256_BACKEND= ; fb_verify_sha256 "$FBT_WORK" "$FBT_SHA" a 2>/dev/null; echo "A=$FB_VERIFY_STATUS"'
+assert_fbrun "(setup) U1 skip under warn sets skipped" 0 - 'A=skipped'
+fbrun 'fb_verify_sha256 "$FBT_WORK" "$FBT_SHA" a >/dev/null; echo "A=$FB_VERIFY_STATUS"
+       PATH="$HERM"; fb_verify_sha256 "$FBT_WORK" "$FBT_SHA" b 2>/dev/null >/dev/null; echo "B=$FB_VERIFY_STATUS"
+       FB_VERIFY=off; fb_verify_sha256 "$FBT_WORK" "$FBT_SHA" c 2>/dev/null >/dev/null; echo "C=$FB_VERIFY_STATUS"'
+assert_fbrun "a skipped second artifact does not inherit the first's 'verified'" 0 - 'A=verified'$'\n''B=skipped'$'\n''C=skipped'
+
+# --- value-returning helpers: only the value on stdout ------------------------
+fbrun 'fb_url_basename "https://h/x/y/asset-1.2.tar.gz?token=1#f"'
+assert_fbrun "fb_url_basename strips path, query and fragment" 0 - '^asset-1.2.tar.gz$'
+fbrun 'fb_url_basename "https://h/x/"'
+assert_fbrun "fb_url_basename on a trailing slash fails (no empty identity)" 1
+fbrun 'fb_sha256_of "$FBT_FIX" 2>/dev/null'
+assert_fbrun "fb_sha256_of prints exactly the digest, nothing else, on stdout" 0 - "^${FBT_SHA}\$"
+
+
+# --- fb_verify_gh_digest: every shape of the release metadata -----------------
+# One fixture per row of the classification. Everything malformed or ambiguous
+# FAILS in every mode; ONLY a cleanly missing/null digest reaches policy.
+fbt_asset() { # <digest-json-fragment or ->  -> one asset object for https://x/a.tar.gz
+    local d="$1"
+    if [[ "$d" == - ]]; then printf '{"name":"a.tar.gz","browser_download_url":"https://x/a.tar.gz"}'
+    else printf '{"name":"a.tar.gz","browser_download_url":"https://x/a.tar.gz","digest":%s}' "$d"; fi
+}
+gdj() { # <name> <release-doc> <mode> <want-rc> <stderr-re|-> [stdout-re|-]
+    export FBT_DOC="$2"
+    fbrun 'export FB_VERIFY='"$3"'; c="$(_gh_release_cache_path Foo/bar "")"; printf "%s" "$FBT_DOC" > "$c"
+           fb_verify_gh_digest "$FBT_WORK" Foo/bar https://x/a.tar.gz; echo "STATUS=$FB_VERIFY_STATUS"'
+    assert_fbrun "digest [$3]: $1" "$4" "${5:--}" "${6:--}"
+}
+for _m in warn strict; do
+    gdj "invalid JSON document fails" 'not json at all' $_m 1 'assets array'
+    gdj ".assets is not an array fails" '{"assets":{}}' $_m 1 'assets array'
+    gdj "URL matches 0 assets fails" '{"assets":[]}' $_m 1 '0 release assets'
+    gdj "URL matches 2 assets fails" "{\"assets\":[$(fbt_asset '"sha256:'$FBT_SHA'"'),$(fbt_asset '"sha256:'$FBT_SHA'"')]}" $_m 1 '2 release assets'
+    gdj "a numeric digest fails (not downgraded to 'absent')" "{\"assets\":[$(fbt_asset 5)]}" $_m 1 'number'
+    gdj "an object digest fails" "{\"assets\":[$(fbt_asset '{}')]}" $_m 1 'object'
+    gdj "an empty-string digest fails" "{\"assets\":[$(fbt_asset '""')]}" $_m 1 'empty string'
+    gdj "an unsupported algorithm (sha512:) fails" "{\"assets\":[$(fbt_asset '"sha512:abc"')]}" $_m 1 'unsupported algorithm'
+    gdj "sha256: with 63 hex fails" "{\"assets\":[$(fbt_asset '"sha256:'${FBT_SHA:0:63}'"')]}" $_m 1 'not 64 hex'
+    gdj "sha256: with non-hex fails" "{\"assets\":[$(fbt_asset '"sha256:'${FBT_SHA:0:60}'zzzz"')]}" $_m 1 'not 64 hex'
+    gdj "a digest with a TRAILING NEWLINE fails (command substitution must not strip it first)" "{\"assets\":[$(fbt_asset '"sha256:'$FBT_SHA'\n"')]}" $_m 1 'not 64 hex'
+    gdj "a digest with a leading space fails" "{\"assets\":[$(fbt_asset '" sha256:'$FBT_SHA'"')]}" $_m 1 'unsupported algorithm'
+    gdj "a WRONG digest is a mismatch" "{\"assets\":[$(fbt_asset '"sha256:'$FBT_BAD'"')]}" $_m 1 'MISMATCH'
+    gdj "a correct digest verifies" "{\"assets\":[$(fbt_asset '"sha256:'$FBT_SHA'"')]}" $_m 0 - 'STATUS=verified'
+    assert "...a correct digest leaves stderr silent ($_m)" "[[ -z \"\$FBR_ERR\" ]]"
+done
+# U2 — the only default-dependent rows: missing key and JSON null
+for _frag in - null; do
+    gdj "missing/null digest ($_frag) under strict FAILS" "{\"assets\":[$(fbt_asset $_frag)]}" strict 1 'publishes no digest'
+    gdj "missing/null digest ($_frag) under warn proceeds LOUDLY" "{\"assets\":[$(fbt_asset $_frag)]}" warn 0 'warn:.*a.tar.gz.*UNVERIFIED.*FB_VERIFY=strict' 'STATUS=skipped'
+done
+gdj "digest metadata under off: not read at all" 'not json at all' off 0 'FB_VERIFY=off' 'STATUS=skipped'
+unset _m _frag
+
+# --- asset identity + request accounting, through the REAL gh_release_json ----
+# A counting curl stub serves a release document; a second stub fails if invoked.
+fbt_curl_stub() { # <count-file> <doc-file>
+    mkdir -p "$FBT_DIR/curl"
+    cat > "$FBT_DIR/curl/curl" <<'CURLSTUB'
+#!/bin/sh
+echo "$*" >> "$FBT_CURLLOG"
+out=""; prev=""
+for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+[ -n "${FBT_CURL_FAIL:-}" ] && exit 22
+cat "$FBT_RELDOC" > "${out:-/dev/stdout}"
+CURLSTUB
+    chmod +x "$FBT_DIR/curl/curl"
+}
+fbt_curl_stub
+export FBT_CURLLOG="$FBT_DIR/curl.log"
+printf '%s' '{"tag_name":"v1.0","assets":[
+ {"name":"tool-1.0-x86_64-linux-gnu.tar.gz","browser_download_url":"https://x/dl/tool-1.0-x86_64-linux-gnu.tar.gz","digest":"sha256:'"$FBT_SHA"'"},
+ {"name":"tool-1.0-x86_64-linux-gnu.tar.gz.sha256","browser_download_url":"https://x/dl/tool-1.0-x86_64-linux-gnu.tar.gz.sha256"}]}' > "$FBT_DIR/rel.json"
+export FBT_RELDOC="$FBT_DIR/rel.json"
+: > "$FBT_CURLLOG"
+fbrun 'PATH="$FBT_DIR/curl:$PATH"; export FBT_DIR
+       u="$(gh_asset_url Foo/bar "endswith(\".tar.gz\")")"
+       gh_asset_name Foo/bar "$u"; echo; wc -l < "$FBT_CURLLOG" | tr -d " "'
+assert_fbrun "latest flow: asset name is the UPSTREAM name, exactly one request" 0 - '^tool-1.0-x86_64-linux-gnu.tar.gz'$'\n''1$'
+: > "$FBT_CURLLOG"
+fbrun 'PATH="$FBT_DIR/curl:$PATH"; export FBT_DIR
+       u="$(gh_asset_url Foo/bar "endswith(\".tar.gz\")" "" "" v1.0)"
+       gh_asset_name Foo/bar "$u" v1.0; echo; wc -l < "$FBT_CURLLOG" | tr -d " "'
+assert_fbrun "pinned flow: same name, still exactly one request (the tag reaches the cache key)" 0 - '^tool-1.0-x86_64-linux-gnu.tar.gz'$'\n''1$'
+: > "$FBT_CURLLOG"
+fbrun 'PATH="$FBT_DIR/curl:$PATH"; export FBT_DIR
+       u="$(gh_asset_url Foo/bar "true")"
+       gh_asset_name Foo/bar "$u"'
+assert_fbrun "broot-style first-asset selection ('true') resolves its name from the URL" 0 - '^tool-1.0-x86_64-linux-gnu.tar.gz$'
+: > "$FBT_CURLLOG"
+fbrun 'PATH="$FBT_DIR/curl:$PATH"; export FBT_DIR
+       u="$(gh_asset_url Foo/bar "contains(\"musl\")" 2>/dev/null)" || u=""
+       [ -z "$u" ] && u="$(gh_asset_url Foo/bar "endswith(\".tar.gz\") and contains(\"gnu\")")"
+       gh_asset_name Foo/bar "$u"'
+assert_fbrun "delta-style musl->gnu fallback: the name follows the RESOLVED asset" 0 - '^tool-1.0-x86_64-linux-gnu.tar.gz$'
+: > "$FBT_CURLLOG"
+fbrun 'PATH="$FBT_DIR/curl:$PATH"; export FBT_DIR
+       u="$(gh_asset_url Foo/bar "endswith(\".tar.gz\")")"
+       cp "$FBT_WORK" "$FB_TMP/codex.tar.gz"
+       fb_verify_gh_digest "$FB_TMP/codex.tar.gz" Foo/bar "$u"; echo "STATUS=$FB_VERIFY_STATUS"'
+assert_fbrun "a RENAMED local file verifies against the upstream asset (identity comes from the URL)" 0 - 'STATUS=verified'
+# D5: gh_asset_name is cache-ONLY. A tag that is not the one the slot used is a
+# bug to surface — never a reason to refetch.
+: > "$FBT_CURLLOG"
+fbrun 'PATH="$FBT_DIR/curl:$PATH"; export FBT_DIR
+       u="$(gh_asset_url Foo/bar "endswith(\".tar.gz\")")"
+       n0="$(wc -l < "$FBT_CURLLOG" | tr -d " ")"
+       gh_asset_name Foo/bar "$u" v9.9 || echo "RC=$?"
+       echo "extra=$(( $(wc -l < "$FBT_CURLLOG" | tr -d " ") - n0 ))"'
+assert_fbrun "wrong tag: gh_asset_name FAILS with zero extra requests (no silent refetch)" 0 'no cached release document' 'RC=1'$'\n''extra=0$'
+: > "$FBT_CURLLOG"
+fbrun 'PATH="$FBT_DIR/curl:$PATH"; export FBT_DIR FBT_CURL_FAIL=1
+       gh_asset_name Foo/bar https://x/dl/tool.tgz'
+assert_fbrun "cold cache: gh_asset_name fails and never invokes curl" 1 'no cached release document'
+assert "...curl was never invoked" "[[ ! -s $FBT_CURLLOG ]]"
+fbrun 'c="$(_gh_release_cache_path Foo/bar "")"
+       printf "%s" "{\"assets\":[{\"name\":\"a.tgz\\n\",\"browser_download_url\":\"https://x/a.tgz\"}]}" > "$c"
+       gh_asset_name Foo/bar https://x/a.tgz'
+assert_fbrun "an asset name with a trailing newline is rejected, not silently trimmed" 1 'no usable name'
+fbrun 'PATH="$FBT_DIR/curl:$PATH"; export FBT_DIR
+       gh_asset_url Foo/bar "endswith(\".tar.gz\")" >/dev/null
+       gh_asset_name Foo/bar https://x/dl/not-in-release.tar.gz'
+assert_fbrun "a URL that is not in the cached release fails (hand-built URLs cannot borrow an identity)" 1 '0 release assets'
+# no token ever reaches argv through the new helpers (argv inspection only — this
+# is NOT an xtrace claim, which is not proven here)
+: > "$FBT_CURLLOG"
+fbrun 'PATH="$FBT_DIR/curl:$PATH"; export FBT_DIR GH_TOKEN=ghp_secrettoken
+       u="$(gh_asset_url Foo/bar "endswith(\".tar.gz\")")"; gh_asset_name Foo/bar "$u" >/dev/null
+       cp "$FBT_WORK" "$FB_TMP/d"; fb_verify_gh_digest "$FB_TMP/d" Foo/bar "$u" >/dev/null'
+assert_fbrun "(setup) token flow through the new helpers completes" 0
+assert "the GH token never appears in any curl argv in the verify flow" "! grep -q 'ghp_secrettoken\\|Bearer' $FBT_CURLLOG"
+
+# --- stdout contract ---------------------------------------------------------
+fbrun 'fb_sha256_backend'
+assert_fbrun "fb_sha256_backend prints exactly one backend name" 0 - '^(sha256sum|shasum|sha256|openssl|python3)$'
+fbrun 'fb_verify_sha256 "$FBT_WORK" "$FBT_SHA" lbl'
+assert_fbrun "an entry point prints only its single status line on stdout" 0 - '^verified sha256 lbl$'
+
+
+# --- slot flows: tampered bytes must block THAT artifact's every consumer ------
+# Executed, not grepped. A copy of the real slot runs against a sandbox _lib.sh
+# (slots resolve the lib through `dirname realpath BASH_SOURCE`, so a COPIED slot
+# loads the sandbox lib) that is the real lib plus ONE override: gh_download serves
+# fixture bytes keyed by URL. Everything downstream is REAL: the release cache,
+# gh_asset_url/gh_asset_name, tar/gunzip/fb_unzip (wrapped only to LOG then call
+# the real tool), cp/chmod, the stage probe, install_versioned_bin and
+# fb_publish_payload. The "binaries" inside the fixture archives are executable
+# scripts that append to an event log BY ABSOLUTE PATH, so executing a tampered
+# artifact at ANY dynamic path (ghostty's "$TMP_IMG", codex's staged probe, the
+# stage probe in install_versioned_bin) leaves evidence even though the slot
+# redirects the probe's own output to /dev/null.
+#
+# Per-artifact scoping: only the TAMPERED artifact's consumer, publish and payload
+# must be absent. Artifacts verified earlier in the same run (codex installs main
+# before the companion) may legitimately have fired.
+FLOW_OK=0
+if [[ "$(uname -s)" == Linux ]]; then FLOW_OK=1; fi
+FLARCH="$(uname -m)"                      # slots 03/05/17-21 use raw uname -m
+FLTMP=""
+fl_reset() {
+    [[ -n "$FLTMP" ]] && rm -rf "$FLTMP"
+    FLTMP="$(mktemp -d)"
+    FL_HOME="$FLTMP/home"; FL_SERVE="$FLTMP/serve"; FL_REL="$FLTMP/rel"; FL_EVENTS="$FLTMP/events"
+    mkdir -p "$FL_HOME/.local/apps" "$FL_HOME/.local/bin" "$FL_SERVE" "$FL_REL" "$FLTMP/fb" "$FLTMP/wrap" "$FLTMP/stage"
+    : > "$FL_EVENTS"
+    FL_ASSETS=""                          # repo -> accumulated asset json (files, one per repo)
+}
+# the stub payload: logs, answers the probes the slots use
+fl_stub() { # <outfile> <GOOD|EVIL> <name>
+    cat > "$1" <<STUB
+#!/bin/sh
+echo "exec:$2:$3 \$*" >> "\$FL_EVENTS"
+case "\$1" in --version|version|--help) echo "$3 1.0.0";; esac
+exit 0
+STUB
+    chmod +x "$1"
+}
+fl_url() { printf 'https://dl.test/%s/%s' "$1" "$2"; }
+fl_key() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' _; }
+# fl_build <kind> <good|evil> <outfile> <layout-path> <bin-name> : builds one fixture archive
+#   kind: tgz | zip | gz | bare ; layout-path: where the stub lives inside (tgz/zip)
+fl_build() {
+    local kind="$1" tag="$2" out="$3" layout="$4" name="$5" d
+    d="$(mktemp -d "$FLTMP/stage/b.XXXXXX")"
+    case "$kind" in
+        bare) fl_stub "$out" "$tag" "$name" ;;
+        gz)   fl_stub "$d/$name" "$tag" "$name"; gzip -c "$d/$name" > "$out" ;;
+        tgz)  local p IFS_SAVE="$IFS"; IFS=:
+              for p in $layout; do mkdir -p "$d/$(dirname "$p")"; fl_stub "$d/$p" "$tag" "$(basename "$p")"; done
+              IFS="$IFS_SAVE"
+              ( cd "$d" && tar -czf "$out" $(printf '%s' "$layout" | tr ':' '\n' | cut -d/ -f1 | sort -u) ) ;;
+        zip)  mkdir -p "$d/$(dirname "$layout")"; fl_stub "$d/$layout" "$tag" "$name"
+              python3 -I - "$d" "$out" "$layout" <<'PYZ'
+import sys, zipfile
+d, out, layout = sys.argv[1:4]
+z = zipfile.ZipFile(out, "w")
+i = zipfile.ZipInfo(layout); i.external_attr = 0o755 << 16
+z.writestr(i, open(d + "/" + layout, "rb").read()); z.close()
+PYZ
+              ;;
+    esac
+}
+# _fl_put <url> <kind> <layout> <bin>: serve GOOD bytes at <url>, keep EVIL beside them
+_fl_put() {
+    local url="$1" good
+    good="$FL_SERVE/$(fl_key "$url")"
+    fl_build "$2" GOOD "$good" "$3" "$4"
+    fl_build "$2" EVIL "$good.EVIL" "$3" "$4"
+}
+# fl_asset <repo> <tag> <asset-name> <kind> <layout> <bin-name>
+# registers the asset in the release doc (digest of the GOOD bytes) and serves it
+fl_asset() {
+    local repo="$1" tag="$2" an="$3" url
+    url="$(fl_url "$repo" "$an")"
+    _fl_put "$url" "$4" "$5" "$6"
+    printf '%s\n' "{\"name\":\"$an\",\"browser_download_url\":\"$url\",\"digest\":\"sha256:$(fbt_sha "$FL_SERVE/$(fl_key "$url")")\"}" >> "$FL_REL/$(fl_key "$repo").assets"
+    printf '%s %s\n' "$repo" "$tag" > "$FL_REL/$(fl_key "$repo").tag"
+}
+# an asset at an explicit URL, no release document (jq's interpolated URL, the Teleport CDN)
+fl_asset_at() { _fl_put "$2" "$3" "$4" "$5"; }
+# a sums file at <sums-url> covering one asset: `hex  name` ...
+fl_sums_at() { # <sums-url> <asset-url> <name>
+    local f="$FL_SERVE/$(fl_key "$1")"
+    printf '%s  %s\n' "$(fbt_sha "$FL_SERVE/$(fl_key "$2")")" "$3" > "$f"
+}
+# ... or as a GitHub release asset
+fl_sums() { # <repo> <sums-asset-name> <asset-name>
+    local repo="$1" sn="$2" an="$3" url
+    url="$(fl_url "$repo" "$sn")"
+    fl_sums_at "$url" "$(fl_url "$repo" "$an")" "$an"
+    printf '%s\n' "{\"name\":\"$sn\",\"browser_download_url\":\"$url\"}" >> "$FL_REL/$(fl_key "$repo").assets"
+}
+fl_sums_bare() { # starship's .sha256 is the bare digest
+    local repo="$1" sn="$2" an="$3" url
+    url="$(fl_url "$repo" "$sn")"
+    fbt_sha "$FL_SERVE/$(fl_key "$(fl_url "$repo" "$an")")" > "$FL_SERVE/$(fl_key "$url")"
+    printf '%s\n' "{\"name\":\"$sn\",\"browser_download_url\":\"$url\"}" >> "$FL_REL/$(fl_key "$repo").assets"
+}
+fl_tamper_any() { # <asset-name>: serve the EVIL bytes under that asset's URL (digest/sums unchanged)
+    local g f
+    for f in "$FL_SERVE"/*_"$(fl_key "$1")" "$FL_SERVE"/*"$(fl_key "$1")"; do
+        [[ -f "$f" && -f "$f.EVIL" ]] && { cp "$f.EVIL" "$f"; return 0; }
+    done
+    echo "fl_tamper_any: no asset $1" >&2; return 1
+}
+fl_finish_release() { # write the release docs the curl stub serves
+    local f repo tag
+    for f in "$FL_REL"/*.tag; do
+        [[ -e "$f" ]] || continue
+        read -r repo tag < "$f"
+        { printf '{"tag_name":"%s","assets":[' "$tag"; paste -sd, "${f%.tag}.assets"; printf ']}'; } > "${f%.tag}.json"
+    done
+}
+# fl_run <slot-file-glob-number> [ENV=VAL...] : runs the slot copy; sets FLR_RC/FLR_OUT/FLR_ERR
+fl_run() {
+    local n="$1" slot; shift
+    slot="$(ls "$REPO"/home/dot_local/bin/fetch.bins/executable_${n}_*.sh | head -1)"
+    fl_finish_release
+    cp "$slot" "$FLTMP/fb/slot.sh"; chmod +x "$FLTMP/fb/slot.sh"
+    cat > "$FLTMP/fb/_lib.sh" <<SLIB
+. "$REPO/$FBLIB"
+gh_download() {
+    local k src
+    k="\$(printf '%s' "\$1" | tr -c 'A-Za-z0-9._-' _)"
+    echo "download \$1" >> "\$FL_EVENTS"
+    src="$FL_SERVE/\$k"
+    if [ ! -f "\$src" ]; then echo "Error: download failed for \$1" >&2; exit 1; fi
+    cp "\$src" "\$2"
+}
+eval "\$(declare -f fb_unzip | sed '1s/fb_unzip/_fl_real_unzip/')"
+fb_unzip() { echo "unzip \$*" >> "\$FL_EVENTS"; _fl_real_unzip "\$@"; }
+SLIB
+    # real jq on the sandbox PATH unless the slot installed a sentinel (slot 01 is jq-free)
+    [[ -e "$FLTMP/wrap/jq" ]] || ln -sf "$(command -v jq)" "$FLTMP/wrap/jq"
+    # logging, non-suppressing wrappers for the extractors
+    mkdir -p "$FLTMP/wrap"
+    for t in tar gunzip; do
+        printf '#!/bin/sh\necho "%s $*" >> "$FL_EVENTS"\nexec %s "$@"\n' "$t" "$(command -v $t)" > "$FLTMP/wrap/$t"; chmod +x "$FLTMP/wrap/$t"
+    done
+    # the curl stub: GitHub API docs from fixtures, the Teleport find endpoint
+    cat > "$FLTMP/wrap/curl" <<'FLCURL'
+#!/bin/sh
+echo "curl $*" >> "$FL_EVENTS"
+out=""; prev=""; url=""
+for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; url="$a"; done
+case "$url" in
+  https://api.github.com/repos/*/releases/*)
+      r="${url#https://api.github.com/repos/}"; r="${r%%/releases/*}"
+      f="$FL_REL/$(printf '%s' "$r" | tr -c 'A-Za-z0-9._-' _).json"
+      [ -f "$f" ] || exit 22
+      if [ -n "$out" ]; then cat "$f" > "$out"; else cat "$f"; fi ;;
+  https://*/v1/webapi/find) printf '{"auto_update":{"tools_version":"%s"}}' "${FL_TSH_VERSION:-18.0.0}" ;;
+  *) exit 22 ;;
+esac
+FLCURL
+    chmod +x "$FLTMP/wrap/curl"
+    env -i HOME="$FL_HOME" PATH="$FLTMP/wrap:/usr/bin:/bin" APP_DIR="$FL_HOME/.local/apps" BIN_DIR="$FL_HOME/.local/bin" \
+        XDG_CONFIG_HOME="$FL_HOME/.config" XDG_DATA_HOME="$FL_HOME/.local/share" TMPDIR="$FLTMP" \
+        FL_EVENTS="$FL_EVENTS" FL_REL="$FL_REL" DISPLAY=:0 "$@" \
+        bash "$FLTMP/fb/slot.sh" </dev/null >"$FLTMP/out" 2>"$FLTMP/err"
+    FLR_RC=$?
+    FLR_OUT="$(cat "$FLTMP/out")"; FLR_ERR="$(cat "$FLTMP/err")"
+    FLR_EV="$(cat "$FL_EVENTS")"
+}
+fl_ev() { grep -c -- "$1" "$FL_EVENTS" || true; }
+
+
+FLAMD="$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')"
+FLTRIPLE="${FLARCH}-unknown-linux-musl"
+FLLIBC=musl; [[ "$FLARCH" == x86_64 ]] || FLLIBC=gnu      # delta has no aarch64 musl build
+# fl_setup <slot> <good|evil> <asset-to-tamper> : builds the fixture world for one slot
+fl_setup() {
+    local n="$1" mode="$2" tamper="$3" r="$FLTRIPLE"
+    fl_reset
+    case "$n" in
+    03) fl_asset BurntSushi/ripgrep 1.0.0 "ripgrep-1.0.0-$r.tar.gz" tgz "ripgrep-1.0.0-$r/rg" rg ;;
+    05) fl_asset Canop/broot v1.0.0 "broot_1.0.0.zip" zip "$r/broot" broot ;;
+    06) fl_asset junegunn/fzf v1.0.0 "fzf-1.0.0-linux_$FLAMD.tar.gz" tgz fzf fzf
+        fl_sums junegunn/fzf fzf_1.0.0_checksums.txt "fzf-1.0.0-linux_$FLAMD.tar.gz" ;;
+    07) fl_asset neovim/neovim v1.0.0 "nvim-linux-$FLARCH.tar.gz" tgz "nvim-linux-$FLARCH/bin/nvim" nvim ;;
+    11) fl_asset ninja-build/ninja v1.0.0 "$([[ $FLARCH == x86_64 ]] && echo ninja-linux.zip || echo ninja-linux-aarch64.zip)" zip ninja ninja ;;
+    12) fl_asset mgoltzsche/podman-static v1.0.0 "podman-linux-$FLAMD.tar.gz" tgz "podman-linux-$FLAMD/usr/local/bin/podman" podman ;;
+    13) fl_asset starship/starship v1.0.0 "starship-$r.tar.gz" tgz starship starship
+        fl_sums_bare starship/starship "starship-$r.tar.gz.sha256" "starship-$r.tar.gz" ;;
+    14) fl_asset FiloSottile/age v1.0.0 "age-v1.0.0-linux-$FLAMD.tar.gz" tgz "age/age:age/age-keygen" age ;;
+    15) fl_asset tree-sitter/tree-sitter v1.0.0 "tree-sitter-linux-$([[ $FLARCH == x86_64 ]] && echo x64 || echo arm64).gz" gz x tree-sitter ;;
+    16) fl_asset pkgforge-dev/ghostty-appimage v1.0.0 "Ghostty-1.0.0-$FLARCH.AppImage" bare x ghostty ;;
+    17) fl_asset herdrdev/herdr v1.0.0 "herdr-linux-$FLARCH" bare x herdr ;;
+    18) fl_asset sharkdp/fd v1.0.0 "fd-v1.0.0-$r.tar.gz" tgz "fd-v1.0.0-$r/fd" fd ;;
+    19) fl_asset sharkdp/bat v1.0.0 "bat-v1.0.0-$r.tar.gz" tgz "bat-v1.0.0-$r/bat" bat ;;
+    20) fl_asset dandavison/delta 1.0.0 "delta-1.0.0-${FLARCH}-unknown-linux-$FLLIBC.tar.gz" tgz "delta-1.0.0-${FLARCH}-unknown-linux-$FLLIBC/delta" delta ;;
+    21) fl_asset ducaale/xh v1.0.0 "xh-v1.0.0-$r.tar.gz" tgz "xh-v1.0.0-$r/xh" xh ;;
+    22) fl_asset_at cdn.teleport.dev "https://cdn.teleport.dev/teleport-v18.0.0-linux-$FLAMD-bin.tar.gz" tgz "teleport/tsh:teleport/tctl" tsh
+        fl_sums_at "https://cdn.teleport.dev/teleport-v18.0.0-linux-$FLAMD-bin.tar.gz.sha256" "https://cdn.teleport.dev/teleport-v18.0.0-linux-$FLAMD-bin.tar.gz" teleport-v18.0.0-linux-$FLAMD-bin.tar.gz ;;
+    24) fl_asset gordcurrie/proxmox-mcp v1.0.0 "proxmox-mcp_linux_$FLAMD" bare x proxmox-mcp ;;
+    25) fl_asset openai/codex rust-v1.0.0 "codex-$r.tar.gz" tgz "codex-$r" codex
+        fl_asset openai/codex rust-v1.0.0 "codex-code-mode-host-$r.tar.gz" tgz "codex-code-mode-host-$r" codex-code-mode-host ;;
+    01) fl_asset_at jqlang/jq "https://github.com/jqlang/jq/releases/download/jq-1.0.0/jq-linux-$FLAMD" bare x jq
+        fl_sums_at "https://github.com/jqlang/jq/releases/download/jq-1.0.0/sha256sum.txt" "https://github.com/jqlang/jq/releases/download/jq-1.0.0/jq-linux-$FLAMD" "jq-linux-$FLAMD"
+        printf '%s %s\n' jqlang/jq jq-1.0.0 > "$FL_REL/$(fl_key jqlang/jq).tag"
+        : > "$FL_REL/$(fl_key jqlang/jq).assets"
+        printf '#!/bin/sh\necho JQ-CALLED >> "$FL_EVENTS"\nexit 1\n' > "$FLTMP/wrap/jq"; chmod +x "$FLTMP/wrap/jq" ;;
+    09) fl_asset twpayne/chezmoi v1.0.0 "chezmoi_1.0.0_linux_$FLAMD.tar.gz" tgz chezmoi chezmoi
+        fl_sums twpayne/chezmoi chezmoi_1.0.0_checksums.txt "chezmoi_1.0.0_linux_$FLAMD.tar.gz" ;;
+    esac
+    [[ "$mode" == evil ]] && fl_tamper_any "$tamper"
+    return 0
+}
+
+# fl_check <slot> <tool> <payload-rel> <tamper-asset> <consumer-event|-> <prev:yes|no> [ENV=VAL...]
+#   good : rc 0, 'verified sha256', GOOD exec seen, payload present, no EVIL
+#   evil : rc != 0, MISMATCH, NO EVIL exec, consumer event absent, payload ABSENT, nothing linked
+#   fast : an already-current payload => no download at all
+#   prev : a tampered NEW artifact leaves the previous payload and its symlink untouched
+FL_COVERED=""
+fl_check() {
+    FL_COVERED="$FL_COVERED $1"
+    local n="$1" tool="$2" payload="$3" tamper="$4" cons="$5" prev="$6" w; shift 6
+    w="flow $n"
+    fl_setup "$n" good ""
+    fl_run "$n" "$@"
+    assert_eq "$w good bytes: slot exits 0" "$FLR_RC" "0"
+    [[ $FLR_RC -eq 0 ]] || printf '       [%s stderr] %s\n' "$w" "${FLR_ERR:0:600}"
+    assert "$w good bytes: 'verified sha256' is reported" "[[ \"\$FLR_OUT\" == *'verified sha256'* ]]"
+    assert "$w good bytes: the payload is published" "[[ -e $FL_HOME/.local/apps/$payload ]]"
+    assert "$w good bytes: the verified binary is what runs (GOOD exec logged)" "[[ \$(fl_ev 'exec:GOOD') -ge 1 ]]"
+    assert "$w good bytes: no EVIL exec" "[[ \$(fl_ev 'exec:EVIL') -eq 0 ]]"
+    if [[ "$cons" != - ]]; then
+        assert "$w good bytes: the consumer ($cons) ran after the verify (positive control)" "[[ \$(fl_ev '^$cons ') -ge 1 ]]"
+    fi
+    # --- the verify precedes the consumer: with the tamper, the SAME slot must stop
+    fl_setup "$n" evil "$tamper"
+    fl_run "$n" "$@"
+    assert "$w TAMPERED: the slot fails" "[[ $FLR_RC -ne 0 ]]"
+    assert "$w TAMPERED: the mismatch is the diagnostic" "[[ \"\$FLR_ERR\" == *MISMATCH* ]]"
+    assert "$w TAMPERED: the tampered binary was never executed" "[[ \$(fl_ev 'exec:EVIL') -eq 0 ]]"
+    if [[ "$cons" != - ]]; then
+        assert "$w TAMPERED: its consumer ($cons) never ran" "[[ \$(fl_ev '^$cons ') -eq 0 ]]"
+    fi
+    assert "$w TAMPERED: nothing was published" "[[ ! -e $FL_HOME/.local/apps/$payload ]]"
+    assert "$w TAMPERED: nothing is linked on PATH" "[[ ! -e $FL_HOME/.local/bin/$tool ]]"
+    if [[ "$prev" == yes ]]; then
+        # --- fast path: an already-current payload downloads nothing
+        fl_setup "$n" good ""
+        fl_stub "$FL_HOME/.local/apps/$payload" GOOD "$tool"
+        fl_run "$n" "$@"
+        assert "$w fast path: current payload, no download event" "[[ $FLR_RC -eq 0 && \$(fl_ev '^download ') -eq 0 ]]"
+        # --- previous payload survives a tampered upgrade
+        fl_setup "$n" evil "$tamper"
+        fl_stub "$FL_HOME/.local/apps/$tool-0.0.1" GOOD "$tool"
+        ln -sfn "$FL_HOME/.local/apps/$tool-0.0.1" "$FL_HOME/.local/bin/$tool"
+        fl_run "$n" "$@"
+        assert "$w TAMPERED over a previous install: fails, previous payload + link untouched" \
+            "[[ $FLR_RC -ne 0 && \$(readlink $FL_HOME/.local/bin/$tool) == $FL_HOME/.local/apps/$tool-0.0.1 && -x $FL_HOME/.local/apps/$tool-0.0.1 ]]"
+    fi
+}
+
+# codex runs TWO flows in one shell: main (installed first) then the companion.
+# Per-artifact scoping: tampering the companion legitimately leaves main's payload.
+fl_check_codex() {
+    FL_COVERED="$FL_COVERED 25"
+    local main="codex-$FLTRIPLE.tar.gz" cmh="codex-code-mode-host-$FLTRIPLE.tar.gz" a
+    fl_setup 25 good ""; a="$FL_HOME/.local/apps"; fl_run 25
+    assert_eq "flow 25 codex, nothing tampered: exits 0" "$FLR_RC" "0"
+    assert "flow 25 codex, nothing tampered: BOTH artifacts verified (two verify lines)" "[[ \$(grep -c 'verified sha256' $FLTMP/out) -eq 2 ]]"
+    assert "flow 25 codex, nothing tampered: main and companion published" "[[ -e $a/codex-1.0.0 && -e $a/codex-code-mode-host-1.0.0 ]]"
+    fl_setup 25 evil "$main"; a="$FL_HOME/.local/apps"; fl_run 25
+    assert "flow 25 codex MAIN tampered: fails with the mismatch" "[[ $FLR_RC -ne 0 && \"\$FLR_ERR\" == *MISMATCH* ]]"
+    assert "flow 25 codex MAIN tampered: main never extracted/executed/published" \
+        "[[ \$(fl_ev '^tar ') -eq 0 && \$(fl_ev 'exec:EVIL') -eq 0 && ! -e $a/codex-1.0.0 ]]"
+    assert "flow 25 codex MAIN tampered: the companion was never reached" "[[ ! -e $a/codex-code-mode-host-1.0.0 && \$(fl_ev 'code-mode-host') -eq 0 ]]"
+    fl_setup 25 evil "$cmh"; a="$FL_HOME/.local/apps"; fl_run 25
+    assert "flow 25 codex COMPANION tampered: fails with the mismatch" "[[ $FLR_RC -ne 0 && \"\$FLR_ERR\" == *MISMATCH* ]]"
+    assert "flow 25 codex COMPANION tampered: the earlier VERIFIED main legitimately installed" \
+        "[[ -e $a/codex-1.0.0 && \$(fl_ev "exec:GOOD:codex-$FLTRIPLE") -ge 1 ]]"
+    assert "flow 25 codex COMPANION tampered: only main was extracted; the companion never ran or published" \
+        "[[ \$(fl_ev '^tar ') -eq 1 && \$(fl_ev 'exec:EVIL') -eq 0 && ! -e $a/codex-code-mode-host-1.0.0 && ! -e $a/codex-code-mode-host ]]"
+}
+
+if [[ $FLOW_OK == 1 ]]; then
+    sec "slot flows: tampered bytes never reach a consumer or a publish"
+    fl_check 03 rg rg-1.0.0 "ripgrep-1.0.0-$FLTRIPLE.tar.gz" tar yes
+    fl_check 05 broot broot-1.0.0 broot_1.0.0.zip unzip yes
+    fl_check 06 fzf fzf-1.0.0 "fzf-1.0.0-linux_$FLAMD.tar.gz" tar yes
+    fl_check 07 nvim nvim-1.0.0 "nvim-linux-$FLARCH.tar.gz" tar no
+    fl_check 11 ninja ninja-1.0.0 "$([[ $FLARCH == x86_64 ]] && echo ninja-linux.zip || echo ninja-linux-aarch64.zip)" unzip yes
+    fl_check 12 podman podman-1.0.0 "podman-linux-$FLAMD.tar.gz" tar no
+    fl_check 13 starship starship-1.0.0 "starship-$FLTRIPLE.tar.gz" tar yes
+    fl_check 14 age age-1.0.0 "age-v1.0.0-linux-$FLAMD.tar.gz" tar no
+    fl_check 15 tree-sitter tree-sitter-1.0.0 "tree-sitter-linux-$([[ $FLARCH == x86_64 ]] && echo x64 || echo arm64).gz" gunzip yes
+    fl_check 16 ghostty ghostty-1.0.0.AppImage "Ghostty-1.0.0-$FLARCH.AppImage" - yes
+    fl_check 17 herdr herdr-1.0.0 "herdr-linux-$FLARCH" - yes
+    fl_check 18 fd fd-1.0.0 "fd-v1.0.0-$FLTRIPLE.tar.gz" tar yes
+    fl_check 19 bat bat-1.0.0 "bat-v1.0.0-$FLTRIPLE.tar.gz" tar yes
+    fl_check 20 delta delta-1.0.0 "delta-1.0.0-${FLARCH}-unknown-linux-$FLLIBC.tar.gz" tar yes
+    fl_check 21 xh xh-1.0.0 "xh-v1.0.0-$FLTRIPLE.tar.gz" tar yes
+    fl_check 22 tsh teleport-18.0.0 "teleport-v18.0.0-linux-$FLAMD-bin.tar.gz" tar no TSH_FETCH_FORCE=1 TSH_FETCH_PROXY=proxy.test
+    fl_check 24 proxmox-mcp proxmox-mcp-1.0.0 "proxmox-mcp_linux_$FLAMD" - yes
+    fl_check 01 jq jq-1.0.0 "jq-linux-$FLAMD" - yes JQ_FETCH_FORCE=1
+    assert "flow 01 jq: the jq-free bootstrap never called jq (sentinel jq untouched)" "[[ \$(fl_ev 'JQ-CALLED') -eq 0 ]]"
+    fl_check 09 chezmoi chezmoi-1.0.0 "chezmoi_1.0.0_linux_$FLAMD.tar.gz" tar yes
+    fl_check_codex
+    # C1: a missing DECLARED sums asset. FB_VERIFY=off must still install (the escape hatch
+    # for an old pinned release / a renamed checksum asset); warn and strict must hard-fail.
+    fl_drop_asset() { # <repo> <asset-name>
+        local f="$FL_REL/$(fl_key "$1").assets"
+        grep -v "\"name\":\"$2\"" "$f" > "$f.new" || true; mv "$f.new" "$f"
+    }
+    fl_check_sums_missing() { # <slot> <payload> <repo> <sums-asset>
+        local n="$1" payload="$2" repo="$3" sums="$4" m
+        for m in off warn strict; do
+            fl_setup "$n" good ""; fl_drop_asset "$repo" "$sums"
+            fl_run "$n" FB_VERIFY=$m
+            if [[ $m == off ]]; then
+                assert "flow $n sums asset REMOVED, FB_VERIFY=off: installs, with the one skip line" \
+                    "[[ $FLR_RC -eq 0 && -e $FL_HOME/.local/apps/$payload && \"\$FLR_ERR\" == *'FB_VERIFY=off'* ]]"
+                assert "flow $n sums asset REMOVED, FB_VERIFY=off: nothing was reported verified" "[[ \"\$FLR_OUT\" != *'verified sha256'* ]]"
+            else
+                assert "flow $n sums asset REMOVED, FB_VERIFY=$m: HARD-fails, nothing published" \
+                    "[[ $FLR_RC -ne 0 && ! -e $FL_HOME/.local/apps/$payload && \"\$FLR_ERR\" == *'no matching asset'* ]]"
+            fi
+        done
+        FL_COVERED="$FL_COVERED $n"
+    }
+    fl_check_sums_missing 13 starship-1.0.0 starship/starship "starship-$FLTRIPLE.tar.gz.sha256"
+    fl_check_sums_missing 06 fzf-1.0.0 junegunn/fzf fzf_1.0.0_checksums.txt
+    fl_check_sums_missing 09 chezmoi-1.0.0 twpayne/chezmoi chezmoi_1.0.0_checksums.txt
+else
+    skip "slot flow tests are Linux-host fixtures (uname -s is $(uname -s))"
+fi
+[[ -n "$FLTMP" ]] && rm -rf "$FLTMP"
+
+
+# --- the download-integrity census --------------------------------------------
+# Mirrors the install_bin census: DIRECT verifiers (the slot's own file calls
+# fb_verify_*), separately-excluded LIBRARY routes (01/09/14 are thin wrappers whose
+# verification lives in fetch_jq/fetch_chezmoi/fetch_age, so their slot files carry no
+# call and must not be miscounted as exemptions), and a NAMED exempt set that must
+# match exactly. A new slot with neither a verify call nor a named exemption fails.
+FBD="home/dot_local/bin/fetch.bins"
+FB_ALL_SLOTS="$(ls $FBD/executable_[0-9]*.sh | sed 's|.*/executable_\([0-9][0-9]\)_.*|\1|' | sort | tr '\n' ' ')"
+FB_DIRECT="$(for f in $FBD/executable_[0-9]*.sh; do
+    nocomment "$f" | grep -qE '(^|[[:space:];])fb_verify_(gh_digest|sums|sums_gh)[[:space:]]' && basename "$f" | sed 's|executable_\([0-9][0-9]\)_.*|\1|'
+done | sort | tr '\n' ' ')"
+FB_ROUTES="01 09 14 "
+FB_EXEMPT_WANT="02 04 08 10 23 26 27 "
+assert_eq "direct verifiers are exactly the slots that call fb_verify_*" "$FB_DIRECT" \
+    "03 05 06 07 11 12 13 15 16 17 18 19 20 21 22 24 25 "
+FB_EXEMPT_GOT="$(for n in $FB_ALL_SLOTS; do
+    case " $FB_DIRECT$FB_ROUTES" in *" $n "*) ;; *) printf '%s ' "$n" ;; esac
+done)"
+assert_eq "the exempt set (no direct call, no library route) is EXACTLY the named list" "$FB_EXEMPT_GOT" "$FB_EXEMPT_WANT"
+for _n in $FB_EXEMPT_WANT; do
+    assert "exempt slot $_n carries its reason (# fb_verify exemption:)" \
+        "grep -q '^# fb_verify exemption:' $FBD/executable_${_n}_*.sh"
+done
+# the library routes: the wrapper still delegates, and the verify is IN the lib body
+for _r in "01:fetch_jq" "09:fetch_chezmoi" "14:fetch_age"; do
+    assert "slot ${_r%%:*} still delegates to ${_r#*:}" "nocomment $FBD/executable_${_r%%:*}_*.sh | grep -qE '^${_r#*:}\$'"
+    assert "${_r#*:} verifies its download inside the library body" \
+        "nocomment $FBLIB | awk '/^${_r#*:}\\(\\)/{f=1} f&&/^}\$/{exit} f' | grep -qE 'fb_verify_(gh_digest|sums|sums_gh) '"
+done
+unset _n _r
+# every verifier (direct or library-routed) has an EXECUTED flow fixture
+if [[ $FLOW_OK == 1 ]]; then
+    assert_eq "every verifying slot has an executed flow test" \
+        "$(printf '%s\n' $FL_COVERED | sort -u | tr '\n' ' ')" "$(printf '%s\n' $FB_DIRECT $FB_ROUTES | sort -u | tr '\n' ' ')"
+else
+    skip "flow coverage census (Linux-host fixtures)"
+fi
+# a tripwire, NOT proof: hashing has one implementation. A grep misses aliases and other
+# spellings; the real guarantee is the flow tests, where a tampered archive is caught only
+# if the shared core ran.
+assert "no slot spells its own hashing (sha256sum/shasum/openssl dgst/hashlib)" \
+    "[[ -z \$(for f in $FBD/executable_[0-9]*.sh; do nocomment \$f | grep -E 'sha256sum|shasum|openssl dgst|hashlib'; done) ]]"
+assert "sha256sum -c is never reintroduced (BSD lacks it, busybox varies)" \
+    "[[ -z \$(nocomment $FBLIB | grep -E 'sha256sum -c|shasum -c') ]]"
+# the docs name every helper (a convention check, not a security proof)
+for _fn in fb_verify_policy fb_sha256_backend fb_sha256_of fb_checksum_lookup fb_verify_sha256 \
+           fb_verify_sums fb_verify_gh_digest gh_asset_name fb_url_basename; do
+    assert "doc/fetch-bins.md documents $_fn" "grep -q '$_fn' home/doc/fetch-bins.md"
+done
+assert "doc/fetch-bins.md states the strict mitigation prominently" \
+    "grep -q 'FB_VERIFY=strict. is the fail-closed setting' home/doc/fetch-bins.md"
+unset _fn
 
 # --- fb_pin -----------------------------------------------------------------
 assert_eq "fb_pin returns the pin when set" \
@@ -3021,8 +3821,13 @@ assert_eq "remove_bin still works with no extra globs" \
 # holds a version rested on that working.
 assert "gh_release_json can request a specific tag" \
     "nocomment $FBLIB | awk '/^gh_release_json\(\)/{f=1} f&&/^}\$/{exit} f' | grep -q 'releases/tags/'"
+# The key is single-sourced in _gh_release_cache_path (gh_asset_name and the
+# digest verifier must resolve the SAME entry gh_release_json wrote), so the
+# tag-in-key property is asserted there, and gh_release_json must route through it.
 assert "the release cache is keyed on the tag, not just the repo" \
-    "nocomment $FBLIB | awk '/^gh_release_json\(\)/{f=1} f&&/^}\$/{exit} f' | grep -qF 'gh-release-\${key}'"
+    "nocomment $FBLIB | awk '/^_gh_release_cache_path\(\)/{f=1} f&&/^}\$/{exit} f' | grep -qF 'gh-release-\${key}' && nocomment $FBLIB | awk '/^_gh_release_cache_path\(\)/{f=1} f&&/^}\$/{exit} f' | grep -qF 'tag//'"
+assert "gh_release_json builds its cache path through _gh_release_cache_path" \
+    "nocomment $FBLIB | awk '/^gh_release_json\(\)/{f=1} f&&/^}\$/{exit} f' | grep -qF '_gh_release_cache_path'"
 assert "gh_asset_url forwards its 5th argument as the tag" \
     "nocomment $FBLIB | awk '/^gh_asset_url\(\)/{f=1} f&&/^}\$/{exit} f' | grep -qF 'gh_release_json \"\$repo\" \"\${5:-}\"'"
 # A 404 on /releases/tags/<tag> is indistinguishable at curl's exit status from

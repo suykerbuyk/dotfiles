@@ -71,6 +71,11 @@ ASSET_URL="$(gh_asset_url junegunn/fzf \
 
 TARBALL="${FB_TMP}/fzf.tar.gz"
 gh_download "$ASSET_URL" "$TARBALL"
+# Integrity against the release's own fzf_<version>_checksums.txt, before extraction. The
+# name checked is the upstream asset's, resolved from the URL, not the local alias. The
+# sums lookup lives behind the policy gate so FB_VERIFY=off can bypass a missing asset.
+fb_verify_sums_gh "$TARBALL" "$ASSET_URL" junegunn/fzf fzf "$PIN_TAG" "$VERSION" \
+    '. == ("fzf_" + $arch + "_checksums.txt")'
 
 tar -xzf "$TARBALL" -C "$FB_TMP"
 

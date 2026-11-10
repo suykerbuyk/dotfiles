@@ -5,6 +5,9 @@
 
 set -euo pipefail
 
+# fb_verify exemption: nvm is cloned/installed by its own installer; there is no release artifact of ours to hash.
+# See "Download integrity" in doc/fetch-bins.md.
+
 # nvm installer (runs official install.sh script). Uses lib for safety guard
 # and helpers. nvm is special (script-based, sources itself).
 # See Context.fetch.bins.refactor.md.

@@ -240,6 +240,9 @@ ASSET_URL="https://cdn.teleport.dev/teleport-v${VERSION}-${OS}-${ARCH}-bin.tar.g
 TARBALL="${FB_TMP}/teleport.tar.gz"
 echo "→ Downloading Teleport client tools ${VERSION} (${OS}/${ARCH}, ~207 MB)..."
 gh_download "$ASSET_URL" "$TARBALL"
+# Integrity against the CDN's own <tarball>.sha256, before extraction. No GitHub involved,
+# so the identity is the tail of the URL we just fetched.
+fb_verify_sums "$TARBALL" "$ASSET_URL" "${ASSET_URL}.sha256" "teleport ${VERSION}"
 
 # Stage INSIDE $APP_DIR so the final move is a same-filesystem rename(2). See
 # header note 6: FB_TMP is on tmpfs and $APP_DIR is not, so a move out of

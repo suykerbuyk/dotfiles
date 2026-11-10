@@ -62,6 +62,13 @@ ASSET_URL="$(gh_asset_url starship/starship \
 TARBALL="${FB_TMP}/starship.tar.gz"
 gh_download "$ASSET_URL" "$TARBALL"
 
+# Integrity against the sibling .sha256 asset, before extraction. Declared material: the
+# exact selector below keeps it distinct from the tarball (and args 3-5 keep it on the
+# same cached release document), and a missing .sha256 is a hard failure under warn/strict
+# — but the lookup sits behind the policy gate, so FB_VERIFY=off can still bypass it.
+fb_verify_sums_gh "$TARBALL" "$ASSET_URL" starship/starship starship "$PIN_TAG" "$TRIPLE" \
+    '. == ("starship-" + $arch + ".tar.gz.sha256")'
+
 # The tarball holds a bare `starship` at the top level (no wrapper dir).
 tar -xzf "$TARBALL" -C "$FB_TMP"
 

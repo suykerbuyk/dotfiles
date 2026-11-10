@@ -228,6 +228,9 @@ PODMAN_PREV_DIR="$(fb_prev_payload podman /usr/local/bin/podman)"
 
 TARBALL="${FB_TMP}/podman.tar.gz"
 gh_download "$ASSET_URL" "$TARBALL"
+# Integrity before the tarball is extracted into the stage. No pin on this slot, so
+# no tag: the asset lookup above read /releases/latest.
+fb_verify_gh_digest "$TARBALL" mgoltzsche/podman-static "$ASSET_URL"
 
 # Staged beside the payload rather than extracted into it. This tree matters
 # more than most: gen_configs writes absolute paths INTO the version dir, so a

@@ -195,6 +195,9 @@ fi
 
 TARBALL="${FB_TMP}/delta.tar.gz"
 gh_download "$ASSET_URL" "$TARBALL"
+# ASSET_URL is whichever of the musl/gnu probes resolved, so the digest checked is that
+# asset's — never a hardcoded name.
+fb_verify_gh_digest "$TARBALL" dandavison/delta "$ASSET_URL" "$PIN_TAG"
 
 tar -xzf "$TARBALL" -C "$FB_TMP"
 # ${VERSION}, not ${TAG_NAME}: delta's tag carries no "v". See note 2 above.

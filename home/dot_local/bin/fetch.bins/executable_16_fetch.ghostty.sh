@@ -214,6 +214,9 @@ echo "→ Downloading ghostty $VERSION ($ARCH AppImage, ~48 MB)..."
 TMP_IMG="$(fb_stage_payload "$APPIMAGE")"
 trap 'rm -f "$TMP_IMG"; rm -rf "$FB_TMP"' EXIT
 gh_download "$ASSET_URL" "$TMP_IMG"
+# Integrity BEFORE the image is made executable and run (--version below executes it).
+# A community build, so the one place a verified digest matters most.
+fb_verify_gh_digest "$TMP_IMG" "$REPO" "$ASSET_URL" "$PIN_TAG"
 chmod +x "$TMP_IMG"
 
 # Verification gate BEFORE anything is placed on PATH (install_bin's contract,

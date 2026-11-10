@@ -65,6 +65,8 @@ ASSET_URL="$(gh_asset_url BurntSushi/ripgrep 'contains("musl") and contains($arc
 
 TARBALL="${FB_TMP}/rg.tar.gz"
 gh_download "$ASSET_URL" "$TARBALL"
+# Integrity, before the tarball is parsed: GitHub's recorded sha256 for THIS asset.
+fb_verify_gh_digest "$TARBALL" BurntSushi/ripgrep "$ASSET_URL" "$PIN_TAG"
 
 tar -xzf "$TARBALL" -C "$FB_TMP"
 BIN_PATH="${FB_TMP}/ripgrep-${VERSION}-${ARCH}-unknown-${OS}-musl"

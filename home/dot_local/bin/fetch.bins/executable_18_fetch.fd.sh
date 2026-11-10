@@ -111,6 +111,7 @@ ASSET_URL="$(gh_asset_url sharkdp/fd \
 
 TARBALL="${FB_TMP}/fd.tar.gz"
 gh_download "$ASSET_URL" "$TARBALL"
+fb_verify_gh_digest "$TARBALL" sharkdp/fd "$ASSET_URL" "$PIN_TAG"
 
 tar -xzf "$TARBALL" -C "$FB_TMP"
 SRC_DIR="${FB_TMP}/${BIN_NAME}-${TAG_NAME}-${ARCH}-unknown-${OS}-musl"

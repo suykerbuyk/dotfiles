@@ -5,6 +5,9 @@
 
 set -euo pipefail
 
+# fb_verify exemption: deferred: go.dev publishes per-file sha256 in its dl JSON, but a pinned run skips that lookup; needs its own metadata fetch (follow-on).
+# See "Download integrity" in doc/fetch-bins.md.
+
 # Go installer (uses official go.dev JSON, not GitHub). Uses lib for safety,
 # temp discipline, and install_bin. Preserves version check.
 # See Context.fetch.bins.refactor.md.

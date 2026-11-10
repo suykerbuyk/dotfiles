@@ -5,6 +5,9 @@
 
 set -euo pipefail
 
+# fb_verify exemption: deferred (a scope choice, not a seam problem): rustup-init is a gh_download shape with a clean verify-before-exec seam, but it is a self-updating toolchain bootstrap whose .sha256 sibling needs separate research (follow-on).
+# See "Download integrity" in doc/fetch-bins.md.
+
 # Rust installer (runs the official rustup-init static binary). Uses lib for the
 # safety guard, temp discipline, and gh_download (works for any URL, not just
 # GitHub). Rust is special — like nvm — in that it is a self-updating toolchain

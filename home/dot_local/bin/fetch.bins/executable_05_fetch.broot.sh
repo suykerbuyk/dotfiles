@@ -69,6 +69,9 @@ ASSET_URL="$(gh_asset_url Canop/broot 'true' '' "" "$PIN_TAG")"  # first asset
 
 TARBALL="${FB_TMP}/broot.zip"  # actually a zip
 gh_download "$ASSET_URL" "$TARBALL"
+# Integrity before fb_unzip reads the archive. The name is resolved from the URL, so the
+# first-asset pick above is verified as whatever it actually chose.
+fb_verify_gh_digest "$TARBALL" Canop/broot "$ASSET_URL" "$PIN_TAG"
 
 fb_unzip "$TARBALL" "$FB_TMP"   # no system 'unzip' needed (see _lib.sh fb_unzip)
 BIN_SRC="$FB_TMP/${ARCH}-unknown-${OS}-musl/broot"

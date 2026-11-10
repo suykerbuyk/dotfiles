@@ -5,6 +5,9 @@
 
 set -euo pipefail
 
+# fb_verify exemption: installer-invoking (curl | bash): there is no archive of ours to hash; verifying the script is a follow-on decision.
+# See "Download integrity" in doc/fetch-bins.md.
+
 # claude installer (Anthropic Claude Code). Like nvm (slot 02) and rust (slot
 # 10), claude is a SELF-MANAGING, SELF-UPDATING harness that owns its own tree
 # (~/.local/share/claude/versions/<v>, with ~/.local/bin/claude symlinked at the

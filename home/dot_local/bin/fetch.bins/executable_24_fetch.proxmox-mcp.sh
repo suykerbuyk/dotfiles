@@ -7,9 +7,9 @@ set -euo pipefail
 
 # proxmox-mcp installer (MCP server for Proxmox VE, Go, gordcurrie/proxmox-mcp).
 # The release ships BARE, UNCOMPRESSED binaries named proxmox-mcp_<os>_<arch> —
-# no tarball, no zip, no checksums file. Upstream publishes no signature or
-# .sha256, so TLS plus "it runs" is the whole integrity story here, same as
-# every other bare-binary slot.
+# no tarball, no zip. Upstream publishes no signature and no per-binary .sha256 (its
+# checksums.txt asset is not used here); the integrity story is TLS plus GitHub's own
+# per-asset sha256 digest, verified before the binary is made executable, plus "it runs".
 #
 # THE PROBE IS --help, AND THAT IS LOAD-BEARING (measured 2026-09-04 against
 # v0.11.1):
@@ -113,6 +113,8 @@ echo "→ Downloading proxmox-mcp $VERSION (${OS}/${ARCH}, ~9.5 MB)..."
 TMP_BIN="$(fb_stage_payload "$PAYLOAD")"
 trap 'rm -f "$TMP_BIN"; rm -rf "$FB_TMP"' EXIT
 gh_download "$ASSET_URL" "$TMP_BIN"
+# Integrity before the binary is made executable and run (--help below executes it).
+fb_verify_gh_digest "$TMP_BIN" "$REPO" "$ASSET_URL" "$PIN_TAG"
 chmod +x "$TMP_BIN"
 
 # Verification gate BEFORE anything is placed on PATH (install_bin's contract,

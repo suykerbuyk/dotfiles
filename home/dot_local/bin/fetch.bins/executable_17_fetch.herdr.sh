@@ -64,6 +64,7 @@ ASSET_URL="$(gh_asset_url herdrdev/herdr \
     '. == ("herdr-linux-" + $arch)' "$ARCH" "" "$PIN_TAG")"
 
 gh_download "$ASSET_URL" "${FB_TMP}/${BIN_NAME}"
+fb_verify_gh_digest "${FB_TMP}/${BIN_NAME}" herdrdev/herdr "$ASSET_URL" "$PIN_TAG"
 
 HERDR_PREV="$(fb_prev_payload "$BIN_NAME")"
 install_versioned_bin "${FB_TMP}/${BIN_NAME}" "$BIN_NAME" "$VERSION" --version

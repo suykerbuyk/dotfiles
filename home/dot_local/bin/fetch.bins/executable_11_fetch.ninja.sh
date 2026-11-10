@@ -67,6 +67,8 @@ ASSET_URL="$(gh_asset_url ninja-build/ninja '. == $arch' "$ASSET" "" "$PIN_TAG")
 
 ZIP="${FB_TMP}/ninja.zip"
 gh_download "$ASSET_URL" "$ZIP"
+# Integrity before fb_unzip reads the archive.
+fb_verify_gh_digest "$ZIP" ninja-build/ninja "$ASSET_URL" "$PIN_TAG"
 
 fb_unzip "$ZIP" "$FB_TMP"   # single 'ninja' binary at the zip root
 

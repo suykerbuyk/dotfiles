@@ -93,6 +93,8 @@ NVIM_PREV_DIR="$(fb_prev_payload nvim /bin/nvim)"
 
 
 gh_download "$ASSET_URL" "$TARBALL"
+# Integrity before the tarball is extracted into the stage.
+fb_verify_gh_digest "$TARBALL" neovim/neovim "$ASSET_URL" "$PIN_TAG"
 
 # Staged beside the payload, not extracted straight into it: an interrupted tar
 # otherwise leaves a half-populated VIMRUNTIME at the live path. Same filesystem,

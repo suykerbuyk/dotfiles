@@ -64,6 +64,8 @@ ASSET_URL="$(gh_asset_url tree-sitter/tree-sitter \
 
 GZ="${FB_TMP}/tree-sitter.gz"
 gh_download "$ASSET_URL" "$GZ"
+# Integrity of the .gz itself, before gunzip decompresses it.
+fb_verify_gh_digest "$GZ" tree-sitter/tree-sitter "$ASSET_URL" "$PIN_TAG"
 gunzip -f "$GZ"  # yields ${FB_TMP}/tree-sitter
 
 TS_PREV="$(fb_prev_payload "$BIN_NAME")"

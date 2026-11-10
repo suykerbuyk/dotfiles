@@ -320,14 +320,12 @@ gh_pinned_tag_hint() {
 
 gh_release_json() {
     local repo="$1" tag="${2:-}"
-    local url dir="${FB_TMP:-}" cache key token
+    local url dir="${FB_TMP:-}" cache token
 
     if [[ -n "$tag" ]]; then
         url="https://api.github.com/repos/${repo}/releases/tags/${tag}"
-        key="${repo//\//_}-${tag//\//_}"
     else
         url="https://api.github.com/repos/${repo}/releases/latest"
-        key="${repo//\//_}-latest"
     fi
 
     # A standalone caller may source _lib.sh without fb_init, which is what
@@ -336,7 +334,7 @@ gh_release_json() {
     if [[ -z "$dir" || ! -d "$dir" ]]; then
         dir="$(mktemp -d)"
     fi
-    cache="${dir}/gh-release-${key}.json"
+    cache="$(_gh_release_cache_path "$repo" "$tag" "$dir")"
 
     # -s, not -e: a zero-length file from an interrupted or failed write must not
     # be mistaken for a successful fetch and served as a cache hit forever.
@@ -706,6 +704,462 @@ gh_download() {
         rm -f "$dest"
         exit 1
     fi
+}
+
+# ----------------------------------------------------------------------
+# Download integrity (fb_verify_*)
+#
+# Nothing here is a mandatory step of gh_download: the six payload shapes
+# hand-roll download -> extract -> publish, so a slot opts in with one call
+# between ITS download and the first USE of that artifact (extraction,
+# decompression, or execution — whichever its flow does first).
+#
+# THE DEFAULT. FB_VERIFY=warn|strict|off. The default is the one line below and
+# nowhere else; flipping it is a one-word edit here plus EXPECT_DEFAULT in the
+# suite. `warn` proceeds, LOUDLY, when a download genuinely cannot be verified
+# (no operable hasher, or upstream publishes no digest). `strict` refuses.
+# Whatever the default, these ALWAYS fail closed: a digest mismatch, malformed
+# or ambiguous material, declared sums that are missing/conflicting, and a
+# hasher that passed its probe and then failed on the real file.
+#
+# FB_VERIFY=off attempts no verification at all: no hashing, no lookup. Each
+# artifact prints exactly one `warn:` line, never silence.
+#
+# HONEST LIMITS. A checksum from the release's own origin defeats corruption,
+# CDN/mirror tampering and transport downgrade. It does NOT authenticate a
+# compromised publisher (only signatures do — a follow-on), and under `warn` a
+# release that silently loses its upstream digest proceeds like one that never
+# had it. FB_VERIFY=strict is the mitigation for that residual.
+# ----------------------------------------------------------------------
+: "${FB_VERIFY:=warn}"
+FB_VERIFY_STATUS=""
+_FB_SHA256_EMPTY="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+fb_verify_policy() {
+    case "${FB_VERIFY}" in
+        strict|warn|off) printf '%s\n' "${FB_VERIFY}" ;;
+        *)
+            echo "Error: FB_VERIFY must be strict, warn or off (got '${FB_VERIFY}')." >&2
+            return 1
+            ;;
+    esac
+}
+
+# Reads a hasher's complete stdout on stdin; prints the one 64-hex digest.
+# Every backend is fed by stdin REDIRECTION, so none ever prints a filename and
+# there is nothing to disambiguate: the output must hold EXACTLY ONE digest-
+# length hex run (>= 40, which excludes the A2/256/d fragments in openssl's
+# `SHA2-256(stdin)=` prefix), of EXACTLY 64 characters, on a single line. Zero,
+# several, or an overlong run (never trimmed to a 64-char substring) is
+# malformed.
+_fb_sha256_norm() {
+    local raw runs
+    # A sentinel byte survives $( ), which would otherwise strip trailing newlines
+    # BEFORE the single-line check ("hex\n\n" must not pass as "hex"). Exactly one
+    # trailing newline is the normal shape of a hasher's output and is allowed.
+    raw="$(cat; printf x)"
+    raw="${raw%x}"
+    raw="${raw%$'\n'}"
+    case "$raw" in *$'\n'*) return 1 ;; esac
+    runs="$(printf '%s\n' "$raw" | tr 'A-F' 'a-f' | grep -Eo '[0-9a-f]{40,}' || true)"
+    [[ -n "$runs" ]] || return 1
+    case "$runs" in *$'\n'*) return 1 ;; esac
+    [[ "${#runs}" -eq 64 ]] || return 1
+    printf '%s' "$runs"
+}
+
+# _fb_bounded <seconds> <outfile> <backend> <infile>
+# Runs one backend on <infile> as stdin, stdout to <outfile>, under a portable
+# watchdog (background job + guard subshell; no GNU timeout). Returns the
+# backend's status, or non-zero if the guard had to kill it. The backend is
+# exec'd in its own subshell so the pid we signal IS the hasher. A hasher stuck
+# in uninterruptible sleep can outlive the bound; that limit is documented, not
+# solved.
+_fb_bounded() {
+    local secs="$1" out="$2" be="$3" in="$4" pid wd rc marker
+    case "$be" in
+        sha256sum) ( exec sha256sum <"$in" >"$out" 2>/dev/null ) & ;;
+        shasum)    ( exec shasum -a 256 <"$in" >"$out" 2>/dev/null ) & ;;
+        sha256)    ( exec sha256 -q <"$in" >"$out" 2>/dev/null ) & ;;
+        openssl)   ( exec openssl dgst -sha256 <"$in" >"$out" 2>/dev/null ) & ;;
+        python3)   ( exec python3 -I -c 'import hashlib,sys
+h=hashlib.sha256()
+while True:
+    b=sys.stdin.buffer.read(1048576)
+    if not b: break
+    h.update(b)
+print(h.hexdigest())' <"$in" >"$out" 2>/dev/null ) & ;;
+        *) return 127 ;;
+    esac
+    pid=$!
+    # The guard drops a marker BEFORE it signals anything. The backend's own exit
+    # status cannot be trusted after a kill: a hasher with a `trap 'exit 0' TERM`
+    # reports success for a hash that never finished.
+    marker="${out}.timeout"
+    rm -f "$marker"
+    (
+        sleep "$secs" & sp=$!
+        trap 'kill "$sp" 2>/dev/null; exit 0' TERM
+        wait "$sp" 2>/dev/null
+        : > "$marker"
+        kill -TERM "$pid" 2>/dev/null
+        sleep 1 & sp=$!
+        wait "$sp" 2>/dev/null
+        kill -KILL "$pid" 2>/dev/null
+    ) >/dev/null 2>&1 &
+    wd=$!
+    rc=0
+    wait "$pid" 2>/dev/null || rc=$?
+    kill -TERM "$wd" 2>/dev/null || true
+    wait "$wd" 2>/dev/null || true
+    if [[ -e "$marker" ]]; then
+        rm -f "$marker"
+        return 124
+    fi
+    return "$rc"
+}
+
+# Operability, never presence: the candidate is RUN on empty input (stdin is
+# /dev/null — a bare invocation can consume the caller's stdin or block) and must
+# exit 0 AND print exactly the known empty-input digest. Status and content.
+_fb_backend_probe() {
+    local be="$1" out digest
+    out="$(mktemp "${FB_TMP:-${TMPDIR:-/tmp}}/fb-probe.XXXXXX")" || return 1
+    if _fb_bounded "${FB_VERIFY_PROBE_TIMEOUT:-5}" "$out" "$be" /dev/null \
+       && digest="$(_fb_sha256_norm < "$out")" \
+       && [[ "$digest" == "$_FB_SHA256_EMPTY" ]]; then
+        rm -f "$out"
+        return 0
+    fi
+    rm -f "$out"
+    return 1
+}
+
+# Prints the first backend that passes the probe. rc 1: none did (the caller's
+# policy decides). rc 2: FB_SHA256_BACKEND pinned one that is absent/unoperable
+# — a hard error, never a silent fallthrough (FB_UNZIP_BACKEND's rule).
+fb_sha256_backend() {
+    local be
+    if [[ -n "${FB_SHA256_BACKEND:-}" ]]; then
+        if _fb_backend_probe "$FB_SHA256_BACKEND"; then
+            printf '%s' "$FB_SHA256_BACKEND"
+            return 0
+        fi
+        echo "Error: FB_SHA256_BACKEND='${FB_SHA256_BACKEND}' is not an operable sha256 backend." >&2
+        return 2
+    fi
+    for be in sha256sum shasum sha256 openssl python3; do
+        if _fb_backend_probe "$be"; then
+            printf '%s' "$be"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Prints the lowercase 64-hex digest of <file>. rc 3: no operable hasher (the
+# ONLY "absence" outcome). rc 1: a hash FAILURE — a backend that passed its probe
+# and then failed on the real file (unreadable, bad status, malformed output,
+# watchdog kill). That is never reclassified as absence, and no other backend is
+# tried: one that misbehaves on this file is not trusted for the next.
+fb_sha256_of() {
+    local f="$1" be rc=0 out digest
+    if [[ ! -f "$f" || ! -r "$f" ]]; then
+        echo "Error: cannot hash '${f}': not a readable file." >&2
+        return 1
+    fi
+    be="$(fb_sha256_backend)" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) return 3 ;;
+        *) return 1 ;;
+    esac
+    out="$(mktemp "${FB_TMP:-${TMPDIR:-/tmp}}/fb-hash.XXXXXX")" || return 1
+    if ! _fb_bounded "${FB_VERIFY_TIMEOUT:-300}" "$out" "$be" "$f"; then
+        rm -f "$out"
+        echo "Error: hash failure: ${be} failed (or timed out) hashing ${f}." >&2
+        return 1
+    fi
+    if ! digest="$(_fb_sha256_norm < "$out")"; then
+        rm -f "$out"
+        echo "Error: hash failure: ${be} printed malformed output for ${f}." >&2
+        return 1
+    fi
+    rm -f "$out"
+    # A hasher that ignores its input and always prints the empty-input digest
+    # sails through the probe; a non-empty file can never legitimately hash to it.
+    if [[ -s "$f" && "$digest" == "$_FB_SHA256_EMPTY" ]]; then
+        echo "Error: hash failure: ${be} returned the empty-input digest for non-empty ${f}." >&2
+        return 1
+    fi
+    printf '%s' "$digest"
+}
+
+# <sumfile> <asset-name>: prints the digest recorded for EXACTLY that name.
+# Literal comparison (awk ==, never a regex built from the name: names contain
+# `.`, `+`, `[`). Accepts `hex  name`, `hex *name`, `hex  ./name`, CRLF, and a
+# one-line bare-hex file (starship's .sha256). Identical duplicates collapse;
+# conflicting entries are a hard error (rc 3); absent is rc 1 with no stdout.
+fb_checksum_lookup() {
+    local sumfile="$1" name="$2"
+    [[ -n "$name" && -r "$sumfile" ]] || return 1
+    awk -v n="$name" '
+        { sub(/\r$/, "") }
+        NF == 0 { next }
+        { nlines++ }
+        NF == 1 && length($1) == 64 && $1 !~ /[^0-9a-fA-F]/ { bare = tolower($1); next }
+        {
+            h = $1
+            if (length(h) != 64 || h ~ /[^0-9a-fA-F]/) next
+            rest = $0; sub(/^[^ \t]+[ \t]+/, "", rest)
+            if (substr(rest, 1, 1) == "*") rest = substr(rest, 2)
+            if (substr(rest, 1, 2) == "./") rest = substr(rest, 3)
+            if (rest == n) {
+                h = tolower(h)
+                if (seen && seenh != h) conflict = 1
+                seen = 1; seenh = h
+            }
+        }
+        END {
+            if (conflict) { print "Error: conflicting checksum entries for " n " in " FILENAME > "/dev/stderr"; exit 3 }
+            if (seen) { print seenh; exit 0 }
+            if (bare != "" && nlines == 1) { print bare; exit 0 }
+            exit 1
+        }' "$sumfile"
+}
+
+# The cannot-verify outcomes (U1: no operable hasher, U2: no upstream digest).
+# The ONLY place the default matters: strict fails, warn proceeds loudly.
+_fb_cannot_verify() {
+    local label="$1" reason="$2" mode
+    mode="$(fb_verify_policy)" || exit 1
+    if [[ "$mode" == strict ]]; then
+        echo "Error: cannot verify ${label}: ${reason} (FB_VERIFY=strict; nothing was installed)." >&2
+        exit 1
+    fi
+    echo "warn: ${label} is UNVERIFIED: ${reason}. Proceeding because FB_VERIFY=warn;" \
+         "set FB_VERIFY=strict to refuse unverifiable downloads." >&2
+    FB_VERIFY_STATUS="skipped"
+    return 0
+}
+
+_fb_verify_off() {
+    local label="$1"
+    echo "warn: FB_VERIFY=off — ${label} NOT verified." >&2
+    FB_VERIFY_STATUS="skipped"
+}
+
+# <file> <expected-hex> [label]  — the core compare.
+fb_verify_sha256() {
+    local f="$1" expected="${2:-}" label="${3:-}" mode actual rc=0
+    FB_VERIFY_STATUS=""
+    [[ -n "$label" ]] || label="${f##*/}"
+    mode="$(fb_verify_policy)" || exit 1
+    if [[ "$mode" == off ]]; then
+        _fb_verify_off "$label"
+        return 0
+    fi
+    if [[ ! -f "$f" ]]; then
+        echo "Error: cannot verify ${label}: no file at ${f}." >&2
+        exit 1
+    fi
+    # Empty, short, garbled: never "equal". The "" == "" trap.
+    if [[ "${#expected}" -ne 64 || "$expected" =~ [^0-9a-fA-F] ]]; then
+        echo "Error: expected sha256 for ${label} is not 64 hex characters ('${expected:0:20}…'); refusing." >&2
+        rm -f "$f"
+        exit 1
+    fi
+    actual="$(fb_sha256_of "$f")" || rc=$?
+    case "$rc" in
+        0) ;;
+        3)
+            _fb_cannot_verify "$label" "no operable sha256 hasher (tried sha256sum, shasum, sha256, openssl, python3)"
+            return 0
+            ;;
+        *) rm -f "$f"; exit 1 ;;
+    esac
+    expected="$(printf '%s' "$expected" | tr 'A-F' 'a-f')"
+    if [[ "$actual" != "$expected" ]]; then
+        rm -f "$f"
+        echo "Error: sha256 MISMATCH for ${label}." >&2
+        echo "       expected ${expected}" >&2
+        echo "       actual   ${actual}" >&2
+        echo "       The download was deleted; nothing was installed." >&2
+        exit 1
+    fi
+    FB_VERIFY_STATUS="verified"
+    echo "verified sha256 ${label}"
+}
+
+# <file> <download-url> <sums-url> [label] [name]
+# Declared material: the slot says upstream publishes this sums file, so it being
+# unavailable, lacking the name, or conflicting is a hard failure (a stripped
+# sums file is the downgrade). The asset's identity is the tail of the URL that
+# was actually downloaded — never the renamed local path. A GitHub slot passes
+# [name] from gh_asset_name to use the release metadata's own spelling.
+fb_verify_sums() {
+    local f="$1" url="$2" sums_url="$3" label="${4:-}" name="${5:-}" mode sums hex rc=0
+    FB_VERIFY_STATUS=""
+    [[ -n "$name" ]] || name="$(fb_url_basename "$url")" || exit 1
+    [[ -n "$label" ]] || label="$name"
+    mode="$(fb_verify_policy)" || exit 1
+    if [[ "$mode" == off ]]; then
+        _fb_verify_off "$label"
+        return 0
+    fi
+    sums="$(mktemp "${FB_TMP:-${TMPDIR:-/tmp}}/fb-sums.XXXXXX")" || exit 1
+    gh_download "$sums_url" "$sums"
+    hex="$(fb_checksum_lookup "$sums" "$name")" || rc=$?
+    rm -f "$sums"
+    case "$rc" in
+        0) ;;
+        1)
+            echo "Error: ${sums_url} has no entry for ${name}; refusing to install ${label} unverified." >&2
+            rm -f "$f"
+            exit 1
+            ;;
+        *) rm -f "$f"; exit 1 ;;
+    esac
+    fb_verify_sha256 "$f" "$hex" "$label"
+}
+
+# <file> <download-url> <repo> <label> <tag> <arch-arg> <sums-selector>
+# The GitHub flavour of fb_verify_sums for a sums file that is itself a release
+# asset. The sums URL and the asset name are VERIFICATION-specific lookups, and
+# gh_asset_url exits when its asset is missing — so doing them eagerly in the slot
+# made FB_VERIFY=off unable to bypass a missing/renamed sums asset, which is exactly
+# when the escape hatch is needed. The policy is read here through the one reader and
+# the lookups run only if verification is wanted. A missing DECLARED sums asset still
+# hard-fails under warn and strict (gh_asset_url's own exit), unchanged.
+fb_verify_sums_gh() {
+    local f="$1" url="$2" repo="$3" label="$4" tag="${5:-}" arch="${6:-}" selector="$7" mode sums_url name
+    FB_VERIFY_STATUS=""
+    mode="$(fb_verify_policy)" || exit 1
+    if [[ "$mode" == off ]]; then
+        _fb_verify_off "$label"
+        return 0
+    fi
+    sums_url="$(gh_asset_url "$repo" "$selector" "$arch" "" "$tag")" || { rm -f "$f"; exit 1; }
+    name="$(gh_asset_name "$repo" "$url" "$tag")" || { rm -f "$f"; exit 1; }
+    fb_verify_sums "$f" "$url" "$sums_url" "$label" "$name"
+}
+
+# Release-document cache path, single-sourced with gh_release_json so the two
+# can never disagree about the key. <dir> defaults to FB_TMP.
+_gh_release_cache_path() {
+    local repo="$1" tag="${2:-}" dir="${3:-${FB_TMP:-}}" key
+    [[ -n "$dir" ]] || return 1
+    if [[ -n "$tag" ]]; then
+        key="${repo//\//_}-${tag//\//_}"
+    else
+        key="${repo//\//_}-latest"
+    fi
+    printf '%s' "${dir}/gh-release-${key}.json"
+}
+
+# Selects, from the CACHED release document, the single asset whose download URL
+# equals <url>. Cache-only: it is always called right after the slot's own
+# gh_asset_url/gh_download populated that exact entry, so an absent entry means
+# the tag does not match what the slot used (a bug to surface), never a reason to
+# issue a request. Prints the asset .name. Exactly one match, non-empty string.
+gh_asset_name() {
+    local repo="$1" url="$2" tag="${3:-}" cache n name
+    cache="$(_gh_release_cache_path "$repo" "$tag")" || cache=""
+    if [[ -z "$cache" || ! -s "$cache" ]]; then
+        echo "Error: no cached release document for ${repo}${tag:+ (tag $tag)}; pass the same tag the asset lookup used." >&2
+        return 1
+    fi
+    if ! n="$(jq -r --arg u "$url" '[.assets[]? | select(.browser_download_url == $u)] | length' < "$cache" 2>/dev/null)"; then
+        echo "Error: release document for ${repo} is not valid JSON." >&2
+        return 1
+    fi
+    if [[ "$n" != 1 ]]; then
+        echo "Error: ${n} release assets match ${url} in ${repo}; expected exactly 1." >&2
+        return 1
+    fi
+    # sentinel: $( ) must not strip a trailing newline out of the name before the check
+    name="$(jq -r --arg u "$url" '.assets[] | select(.browser_download_url == $u) | .name | if type == "string" then . else "" end' < "$cache"; printf x)"
+    name="${name%x}"
+    name="${name%$'\n'}"
+    if [[ -z "$name" || "$name" == *$'\n'* ]]; then
+        echo "Error: the matching asset for ${url} has no usable name." >&2
+        return 1
+    fi
+    printf '%s' "$name"
+}
+
+# The tail of a URL, query and fragment stripped: the identity of what we fetched
+# when there is no release metadata (jq's interpolated URL, the Teleport CDN).
+fb_url_basename() {
+    local u="${1%%[?#]*}"
+    u="${u##*/}"
+    [[ -n "$u" ]] || { echo "Error: no file name in URL '${1}'." >&2; return 1; }
+    printf '%s' "$u"
+}
+
+# <file> <repo> <download-url> [tag]
+# Digest flavour: GitHub records `digest: "sha256:<hex>"` per asset, in the
+# release document gh_asset_url already cached — no extra request, no extra
+# download. Every malformed or ambiguous shape is a FAIL in every mode: invalid
+# JSON, `.assets` not an array, 0 or >1 matching assets, a non-string/empty
+# digest, an unsupported algorithm, a malformed sha256. Only a cleanly missing
+# or null digest is the cannot-verify case (warn proceeds, strict fails); there
+# is deliberately no attempt to classify a release by age.
+fb_verify_gh_digest() {
+    local f="$1" repo="$2" url="$3" tag="${4:-}" mode cache label t v n
+    FB_VERIFY_STATUS=""
+    label="${f##*/}"
+    mode="$(fb_verify_policy)" || exit 1
+    if [[ "$mode" == off ]]; then
+        _fb_verify_off "$label"
+        return 0
+    fi
+    cache="$(_gh_release_cache_path "$repo" "$tag")" || cache=""
+    if [[ -z "$cache" || ! -s "$cache" ]]; then
+        echo "Error: no cached release document for ${repo}${tag:+ (tag $tag)}; cannot read the asset digest." >&2
+        rm -f "$f"; exit 1
+    fi
+    if ! jq -e '(.assets | type) == "array"' < "$cache" >/dev/null 2>&1; then
+        echo "Error: release document for ${repo} is not valid JSON with an assets array; refusing ${label}." >&2
+        rm -f "$f"; exit 1
+    fi
+    n="$(jq -r --arg u "$url" '[.assets[] | select(.browser_download_url == $u)] | length' < "$cache")"
+    if [[ "$n" != 1 ]]; then
+        echo "Error: ${n} release assets match ${url} in ${repo}; expected exactly 1; refusing ${label}." >&2
+        rm -f "$f"; exit 1
+    fi
+    label="$(gh_asset_name "$repo" "$url" "$tag")" || { rm -f "$f"; exit 1; }
+    t="$(jq -r --arg u "$url" '.assets[] | select(.browser_download_url == $u) | if has("digest") then (.digest | type) else "absent" end' < "$cache")"
+    case "$t" in
+        absent|null)
+            _fb_cannot_verify "$label" "upstream publishes no digest for this asset"
+            return 0
+            ;;
+        string) ;;
+        *)
+            echo "Error: the digest of ${label} is a JSON ${t}, not a string; refusing." >&2
+            rm -f "$f"; exit 1
+            ;;
+    esac
+    # sentinel: a digest of "sha256:<hex>\n" must keep its newline through $( ) so the
+    # length check below sees it (jq -r adds exactly one newline of its own)
+    v="$(jq -r --arg u "$url" '.assets[] | select(.browser_download_url == $u) | .digest' < "$cache"; printf x)"
+    v="${v%x}"
+    v="${v%$'\n'}"
+    case "$v" in
+        sha256:*) ;;
+        "")
+            echo "Error: the digest of ${label} is an empty string; refusing." >&2
+            rm -f "$f"; exit 1
+            ;;
+        *)
+            echo "Error: the digest of ${label} uses an unsupported algorithm ('${v:0:12}…'); refusing." >&2
+            rm -f "$f"; exit 1
+            ;;
+    esac
+    v="${v#sha256:}"
+    case "$v" in *$'\n'*) v="x" ;; esac
+    fb_verify_sha256 "$f" "$v" "$label"
 }
 
 # ----------------------------------------------------------------------
@@ -1340,6 +1794,9 @@ fetch_jq() {
 
     url="https://github.com/jqlang/jq/releases/download/${tag}/jq-${os}-${arch}"
     gh_download "$url" "${FB_TMP}/jq"
+    # jq-free bootstrap: the release's sha256sum.txt is parsed with awk, never jq, and the
+    # asset name is the tail of the interpolated URL we just fetched.
+    fb_verify_sums "${FB_TMP}/jq" "$url" "https://github.com/jqlang/jq/releases/download/${tag}/sha256sum.txt" jq
     prev="$(fb_prev_payload jq)"
     install_versioned_bin "${FB_TMP}/jq" jq "$ver" --version
     fb_prune_versions "$payload" "$prev" 'jq-[0-9]*' 'jq'
@@ -1383,6 +1840,10 @@ fetch_chezmoi() {
     url="$(gh_asset_url twpayne/chezmoi 'endswith("_" + $os + "_" + $arch + ".tar.gz")' "$arch" "$os" "$pin_tag")"
     tarball="${FB_TMP}/chezmoi.tar.gz"
     gh_download "$url" "$tarball"
+    # Integrity against the release's chezmoi_<version>_checksums.txt before extraction; the
+    # name is the upstream asset's, resolved from the URL, not the local alias.
+    fb_verify_sums_gh "$tarball" "$url" twpayne/chezmoi chezmoi "$pin_tag" "$ver" \
+        '. == ("chezmoi_" + $arch + "_checksums.txt")'
     tar -xzf "$tarball" -C "$FB_TMP" chezmoi 2>/dev/null || tar -xzf "$tarball" -C "$FB_TMP"
     prev="$(fb_prev_payload chezmoi)"
     install_versioned_bin "${FB_TMP}/chezmoi" chezmoi "$ver" --version
@@ -1442,6 +1903,9 @@ fetch_age() {
     url="$(gh_asset_url FiloSottile/age 'contains("-'"$os"'-") and endswith("-" + $arch + ".tar.gz")' "$arch" "" "$pin_tag")"
     tarball="${FB_TMP}/age.tar.gz"
     gh_download "$url" "$tarball"
+    # Integrity before extraction; a bootstrap slot, so no-hasher/no-digest still installs
+    # under the default policy — a mismatch never does.
+    fb_verify_gh_digest "$tarball" FiloSottile/age "$url" "$pin_tag"
     tar -xzf "$tarball" -C "$FB_TMP"
     dir="${FB_TMP}/age"
 

@@ -358,6 +358,119 @@ Key `_lib.sh` helpers:
   is always installed as `_<tool>`, whatever it is called upstream. Full scheme,
   and why the rename is load-bearing: [shell.md](shell.md).
 
+### Download integrity (`fb_verify_*`)
+
+Before this section existed, fetch.bins verified **nothing**: a tarball that still
+executed was installed and put on `PATH`, and several of these tools (the agent
+harnesses, `age`, `tsh`) have broad host access. Each download is now checked
+against upstream's own recorded SHA-256, **between that slot's download and the
+first use of that same artifact** — extraction, decompression, or execution,
+whichever its flow does first (ghostty and proxmox-mcp run the downloaded file
+at the probe, so for them the verify precedes `chmod +x`).
+
+> **`FB_VERIFY=strict` is the fail-closed setting, and it is the mitigation for the
+> residual described below.** The default is `warn`. Set `FB_VERIFY=strict` (in
+> `~/.config/shell/env.d/*.sh`, or inline) on any machine where a download that
+> cannot be verified should refuse to install rather than proceed with a warning.
+
+**It is opt-in per slot, not a framework default.** The six payload shapes hand-roll
+their download → extract → publish steps, so there is no shared pipeline to hook;
+a callback framework would be the abstraction `install_versioned_bin` already
+declined. Coverage is kept honest by an **exact census** in the suite instead.
+
+#### The helpers (all in `_lib.sh`)
+
+| helper | what it does |
+|---|---|
+| `fb_verify_policy` | Prints the effective mode, `strict`, `warn` or `off`. An unknown value is a hard error (a typo on a security knob must not select a default). **The default is the single line `: "${FB_VERIFY:=warn}"` in `_lib.sh`**, plus `EXPECT_DEFAULT` in the suite — flip both together. |
+| `fb_sha256_backend` | Prints the first hasher that passes an **operability** probe, never `command -v`: each candidate is *run* on `</dev/null` and must exit 0 **and** print exactly the empty-input digest. Order: `sha256sum`, `shasum -a 256`, `sha256 -q`, `openssl dgst -sha256`, `python3`. `FB_SHA256_BACKEND=<name>` pins one (like `FB_UNZIP_BACKEND`); a pin that is absent is an error, never a silent fallthrough. |
+| `fb_sha256_of <file>` | Prints the digest. Every backend hashes by stdin **redirection**, so none ever prints a filename; the normaliser then requires exactly one 64-hex token (rejects zero, several, or an overlong run). rc 3 is "no operable hasher"; rc 1 is a **hash failure** — a hasher that passed its probe and then failed on the real file, which is never reclassified as "no hasher". A hasher that ignores its input and prints the empty digest for a non-empty file is also a failure. |
+| `fb_checksum_lookup <sumfile> <name>` | The digest recorded for **exactly** that name (literal comparison — names contain `.`, `+`, `[`). Understands `hex  name`, `hex *name`, `./name`, CRLF, and a one-line bare-hex `.sha256`. Conflicting entries for one name are an error, never a pick. |
+| `fb_verify_sha256 <file> <hex> [label]` | The core compare. An empty/short/non-hex expected value is an error, never "equal". **A mismatch always fails, deletes the file, and names both digests.** |
+| `fb_verify_sums <file> <download-url> <sums-url> [label] [name]` | **Declared material**: downloads the sums file and verifies against it. Sums file missing, lacking the name, or conflicting is a hard failure, because stripping a declared checksum file is the downgrade. |
+| `fb_verify_sums_gh <file> <download-url> <repo> <label> <tag> <arch-arg> <sums-selector>` | `fb_verify_sums` for a sums file that is itself a GitHub release asset (starship, fzf, chezmoi). The sums-asset lookup and the asset-name lookup are **verification-specific**, and `gh_asset_url` exits when its asset is missing — so they run only *after* the policy is read through `fb_verify_policy`. Under `FB_VERIFY=off` neither runs, so a missing or renamed checksum asset (an old pinned release) cannot block the install; under `warn` and `strict` a missing declared sums asset still hard-fails. |
+| `fb_verify_gh_digest <file> <repo> <download-url> [tag]` | GitHub records `digest: "sha256:<hex>"` per release asset; this reads it from the release document `gh_asset_url` already cached, so it costs **no extra request and no extra download**. |
+| `gh_asset_name <repo> <url> [tag]` | The asset's **upstream** name, from the same cached document, selected by URL equality (exactly one match). It is cache-only and fails if the entry is absent rather than refetching: it is always called right after the slot's own lookup, so a miss means the tag the slot used and the tag passed here disagree. |
+| `fb_url_basename <url>` | The tail of a URL (query/fragment stripped) — the identity of what was fetched when there is no release metadata (jq's interpolated URL, the Teleport CDN). |
+
+**Identity comes from the URL that was downloaded, never from a local path.**
+Slots rename downloads locally (`codex.tar.gz`, `starship.tar.gz`, `${FB_TMP}/jq`),
+and `gh_asset_url` returns only `.browser_download_url`. Hashing or looking up a
+local alias against upstream metadata would silently verify the wrong identity, so
+`fb_verify_gh_digest` takes the URL and `gh_asset_name` maps it back to the name.
+broot's first-asset selection (`'true'`) is *not* content-pinned: the
+`.name`-equals-URL-basename check is only an identity-consistency check, and
+hashing whichever asset was chosen is still sound. delta's musl→gnu fallback is
+verified on the asset that actually resolved.
+
+#### Policy
+
+| situation | `strict` | `warn` (default) | `off` |
+|---|---|---|---|
+| checksum **mismatch** | FAIL, file deleted | FAIL, file deleted | not compared |
+| declared sums file missing / lacks the name / conflicting | FAIL | FAIL | skipped |
+| malformed or ambiguous release metadata (bad JSON, `.assets` not an array, 0 or >1 matching assets, non-string / empty / non-`sha256:` / short digest) | FAIL | FAIL | skipped |
+| a hasher that passed its probe then failed on the real file | FAIL | FAIL | skipped |
+| **no operable hasher** | **FAIL** | **loud `warn:`, proceeds** | skipped |
+| **upstream publishes no digest** (key missing or `null`) | **FAIL** | **loud `warn:`, proceeds** | skipped |
+
+Only the last two rows depend on the default. `FB_VERIFY=off` attempts no
+verification at all — no hashing, no sums-file or sums-asset lookup, no digest read — and prints exactly one
+`warn: FB_VERIFY=off — <label> NOT verified.` per artifact, never silence. The
+`FB_VERIFY_STATUS` variable is set to `verified` or `skipped` by every entry point on
+every non-fatal path, so a second artifact that is skipped cannot inherit a stale
+`verified` from the first. A hasher stuck in a hang is bounded by a portable
+watchdog (a background job, `kill`, no GNU `timeout`): the probe by
+`FB_VERIFY_PROBE_TIMEOUT` (default 5 s), a real hash by `FB_VERIFY_TIMEOUT`
+(default 300 s). A timeout there is a hash *failure* even if the hasher swallows SIGTERM and exits 0: the watchdog records that it fired, independent of the backend's exit status. An uninterruptible
+(D-state) hasher can still outlive the bound; that is documented, not solved.
+
+#### Honest limits — read these before relying on it
+
+* **A checksum from the release's own origin defeats corruption, CDN/mirror
+  tampering and transport downgrade. It does not authenticate a compromised
+  publisher.** Only a signature does; verifying the codex `.sigstore` bundles, the
+  1Password `.sig`, and a pinned Anthropic key for claude/grok is a deliberate
+  **follow-on**, not part of this change.
+* **The downgrade residual.** Under the default `warn`, a release whose asset
+  *silently loses its previously present `.digest`* is indistinguishable from one
+  that never had it, and it proceeds with a `warn:` line. This was accepted
+  explicitly when `warn` was chosen as the default; there is deliberately **no**
+  release-age classifier (a per-repo "earliest digest-bearing release" cannot be
+  derived from current + pinned samples, and assets within one release differ).
+  **`FB_VERIFY=strict` is the mitigation**: under it a missing digest fails. Slots
+  with an independent declared sums file (01 jq, 06 fzf, 09 chezmoi, 13 starship,
+  22 tsh) are not exposed to this residual — the sums file is separate material.
+* **Fast paths are unaffected.** A payload already on disk is trusted as before;
+  this checks downloads, not installed state.
+* **bash.** The new helpers use no `${x^^}`/`${x,,}`, `mapfile`, namerefs or
+  associative arrays and no `sha256sum -c`. That does **not** make fetch.bins
+  bash-3.2-safe: `fb_pin` uses `${tool^^}` and the lib uses `${osrelease,,}`, so
+  the fetchers already need bash ≥ 4 on native macOS. A separate follow-on should
+  fix those and run a real bash-3.2 integration pass.
+
+#### Coverage census
+
+| slot(s) | flavour |
+|---|---|
+| 03 rg, 05 broot, 07 nvim, 11 ninja, 12 podman, 14 age, 15 tree-sitter, 16 ghostty, 17 herdr, 18 fd, 19 bat, 20 delta, 21 xh, 24 proxmox-mcp, 25 codex (**both** tarballs) | GitHub `digest` (`fb_verify_gh_digest`) |
+| 06 fzf (`fzf_<v>_checksums.txt`), 09 chezmoi (`chezmoi_<v>_checksums.txt`), 13 starship (`<asset>.sha256`), 22 tsh/tctl (`<tarball>.sha256` on the CDN), 01 jq (`sha256sum.txt`, parsed jq-free) | declared sums (`fb_verify_sums`) |
+| 02 nvm, 04 go, 08 zed, 10 rust, 23 op, 26 claude, 27 grok | **named exemptions**, each with its reason in the slot file (`# fb_verify exemption:`) and in the suite: 02/08/26/27 have no artifact of ours to hash or nothing published to check; 04, 10 and 23 are scope **deferrals** (go's pinned path needs its own metadata fetch; rust is a clean seam but a self-updating bootstrap with a sibling `.sha256` that needs its own research; 1Password ships a signature only) |
+
+The suite requires the exempt set to equal that list **exactly**, so a new slot with
+neither a verify call nor a named exemption fails it. 01, 09 and 14 are thin
+wrappers: their verification lives in `fetch_jq`, `fetch_chezmoi` and `fetch_age`
+and is asserted there (the `install_bin` census makes the same direct-versus-library
+distinction). Every verifying slot has an **executed** flow test: a copy of the real
+slot runs against fixture archives whose "binaries" log their own execution, and a
+tampered archive must leave its extractor, its execution and its publish unrun and
+the previous install untouched.
+
+Upstream coverage, measured read-only on 2026-11-09 across every in-scope repo's
+latest release: **every asset in every repo carried a populated `digest`**. Older
+pinned releases were not sampled; one that predates the field takes the "no digest"
+row above.
+
 ### Notes on specific tools
 - **Go** (`04_fetch.go.sh`) is symlinked **in place** at `~/.local/apps/<version>/bin/go`
   — never copied out — so `GOROOT` resolves correctly. The symlinks are re-asserted
@@ -707,9 +820,10 @@ Key `_lib.sh` helpers:
 
 - **proxmox-mcp** (slot **24**) is an MCP server for Proxmox VE
   (`gordcurrie/proxmox-mcp`, Go). Upstream ships **bare uncompressed binaries**
-  named `proxmox-mcp_<os>_<arch>` — no archive, no checksums, no signature — for
-  linux/darwin on amd64+arm64, plus a windows `.exe`. No FreeBSD build, so the
-  slot skips there.
+  named `proxmox-mcp_<os>_<arch>` — no archive, no signature, and a `checksums.txt`
+  asset that this slot does not use (GitHub's per-asset `digest` is what it verifies;
+  see *Download integrity*) — for linux/darwin on amd64+arm64, plus a windows `.exe`.
+  No FreeBSD build, so the slot skips there.
 
   **The probe is `--help`, and that is load-bearing.** This binary has *no*
   version flag: `--version` is `flag provided but not defined` (rc 2), so it

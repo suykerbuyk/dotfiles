@@ -5,6 +5,9 @@
 
 set -euo pipefail
 
+# fb_verify exemption: installer-invoking (curl | bash): there is no archive of ours to hash; verifying the script is a follow-on decision.
+# See "Download integrity" in doc/fetch-bins.md.
+
 # grok installer (xAI grok CLI). Like nvm (slot 02), rust (slot 10) and claude
 # (slot 26), grok is a SELF-MANAGING, SELF-UPDATING harness that owns its own
 # tree (~/.grok/: downloads/, bin/grok symlink, version.json, auth, sessions,
