@@ -3074,6 +3074,56 @@ fbrun 'PATH="$FBT_DIR/curl:$PATH"; export FBT_DIR GH_TOKEN=ghp_secrettoken
 assert_fbrun "(setup) token flow through the new helpers completes" 0
 assert "the GH token never appears in any curl argv in the verify flow" "! grep -q 'ghp_secrettoken\\|Bearer' $FBT_CURLLOG"
 
+# --- the bounded runner (_fb_watch / _fb_bounded / _fb_bounded_cmd) -------------------
+# One watchdog for every bounded child. Two properties are guarded here beyond the
+# hasher timeout tests above: the guard never runs the CALLER's EXIT trap, and no guard
+# process outlives a normal return.
+for _fn in _fb_watch _fb_bounded _fb_bounded_cmd; do
+    assert "_lib.sh declares $_fn" "grep -qE '^$_fn\\(\\)' $FBLIB"
+done
+unset _fn
+
+# W1: a slot's EXIT trap is `rm -rf "$FB_TMP"`. A guard killed before it executed a
+# single statement used to run the trap it inherited, deleting the download out from under
+# the slot whenever the bounded child finished instantly (found while stubbing cosign; the
+# hasher path had the same latent bug on HEAD). 40 instant children, then the trap must
+# still be set and must fire exactly once, at the caller's real exit.
+fbt_stub_reset
+fbrun 'fbt_exit() { echo EXIT-TRAP >> "$FBT_STUBLOG"; }
+       trap fbt_exit EXIT
+       i=0; while [ "$i" -lt 40 ]; do i=$((i+1)); _fb_bounded_cmd 5 "$FB_TMP/w$i" true; done
+       echo "DURING=$(grep -c EXIT-TRAP "$FBT_STUBLOG" || true)"
+       echo "TRAP-SET=$(trap -p EXIT | grep -c fbt_exit)"'
+assert_fbrun "W1 40 instant bounded children: the caller's EXIT trap never ran early, and is still installed" 0 - 'DURING=0.*TRAP-SET=1'
+assert_eq "W1 ...and it fires exactly once, at the caller's real exit" "$(grep -c 'EXIT-TRAP' "$FBT_STUBLOG" || true)" "1"
+fbt_stub_reset
+fbrun 'fbt_exit() { echo EXIT-TRAP >> "$FBT_STUBLOG"; }
+       trap fbt_exit EXIT
+       printf "x" > "$FB_TMP/in"
+       i=0; while [ "$i" -lt 40 ]; do i=$((i+1)); _fb_bounded 5 "$FB_TMP/h$i" "$(fb_sha256_backend)" "$FB_TMP/in"; done
+       echo "DURING=$(grep -c EXIT-TRAP "$FBT_STUBLOG" || true)"'
+assert_fbrun "W1 the HASHER watchdog shares the fix: 40 instant hashes, the EXIT trap never ran early" 0 - 'DURING=0'
+
+# W2: no guard outlives a normal return. The guard is a subshell around `sleep <bound>`; a
+# bound no other process uses makes a leftover one countable. The caller kills AND reaps
+# its guard, and the guard's TERM handler kills the sleep it started.
+if command -v pgrep >/dev/null 2>&1; then
+    _wb=$((3000 + RANDOM % 900))
+    export FBT_WB="$_wb"
+    fbrun 'printf "x" > "$FB_TMP/in"; i=0
+           while [ "$i" -lt 20 ]; do i=$((i+1))
+               _fb_bounded_cmd "$FBT_WB" "$FB_TMP/c$i" true
+               _fb_bounded "$FBT_WB" "$FB_TMP/h$i" "$(fb_sha256_backend)" "$FB_TMP/in"
+           done; echo DONE-LOOP'
+    assert_fbrun "W2 (setup) 40 bounded runs with an unusual bound complete" 0 - 'DONE-LOOP'
+    _left="$(pgrep -f "sleep $_wb\$" | wc -l | tr -d ' ')"
+    [[ "$_left" == 0 ]] || { sleep 1; _left="$(pgrep -f "sleep $_wb\$" | wc -l | tr -d ' ')"; }
+    assert_eq "W2 no guard sleep (bound $_wb) outlives the returns of 40 bounded runs" "$_left" "0"
+    unset _wb _left FBT_WB
+else
+    skip "W2 no-orphan-guard check: pgrep is not on this host"
+fi
+
 # --- stdout contract ---------------------------------------------------------
 fbrun 'fb_sha256_backend'
 assert_fbrun "fb_sha256_backend prints exactly one backend name" 0 - '^(sha256sum|shasum|sha256|openssl|python3)$'

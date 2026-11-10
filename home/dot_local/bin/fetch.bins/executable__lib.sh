@@ -782,55 +782,100 @@ _fb_sha256_norm() {
     printf '%s' "$runs"
 }
 
+# _fb_watch <seconds> <outfile> <infile> <merge|null> <command> [args...]
+# THE bounded runner, shared by every bounded child (hashers and cosign). <command> runs
+# with stdin from <infile> and stdout into <outfile>; stderr goes into <outfile> too for
+# `merge` and is discarded for `null`. A guard sleeps <seconds>, then drops a marker
+# BEFORE it signals anything. The child's own exit status cannot be trusted after a
+# kill: a child with a `trap 'exit 0' TERM` reports success for work that never
+# finished. So the marker wins: this returns 124 whenever it exists, whatever the
+# child's status was. Returns the child's status, 124 on timeout, 127 if the command
+# does not exist.
+#
+# The child and the guard are forked from an INTERMEDIATE subshell, and that subshell
+# ignores EXIT before it forks them. The guard is stopped with a plain TERM, and a bash
+# subshell forked straight from the caller that gets a signal before it has executed a
+# single statement dies on it and RUNS the EXIT trap it inherited. A slot's EXIT trap is
+# `rm -rf "$FB_TMP"`, so a child that finishes instantly (an empty-input hash probe, a
+# stubbed cosign) used to get its guard killed that early and delete the very directory
+# the download sits in. No statement inside the guard can close that window (it is "before
+# the first instruction"), and restoring the caller's trap in the parent is wrong inside a
+# `$( )`. Forking the guard from a subshell that has already started closes it without
+# touching the caller's trap; measured, that layer alone is enough on bash 5.2, and the
+# explicit `trap '' EXIT` keeps the intent independent of that detail.
+# A normal return leaves nothing behind: the caller kills and reaps the guard. A caller
+# that is itself KILLED mid-wait orphans the intermediate subshell (with its child and
+# guard) for the rest of the bound; its EXIT trap never runs, so this does not reopen
+# the FB_TMP deletion, but the leftovers live until the bound or the child ends.
+_fb_watch() {
+    local secs="$1" out="$2" in="$3" errmode="$4"
+    shift 4
+    (
+        trap '' EXIT
+        marker="${out}.timeout"
+        rm -f "$marker"
+        if [[ "$errmode" == merge ]]; then
+            ( exec "$@" <"$in" >"$out" 2>&1 ) &
+        else
+            ( exec "$@" <"$in" >"$out" 2>/dev/null ) &
+        fi
+        pid=$!
+        (
+            # the handler is installed BEFORE the sleep is forked, and kills whatever
+            # background jobs exist: no window leaves an orphan `sleep` behind
+            trap 'kill $(jobs -p) 2>/dev/null; exit 0' TERM
+            sleep "$secs" &
+            wait
+            : > "$marker"
+            kill -TERM "$pid" 2>/dev/null
+            sleep 1 &
+            wait
+            kill -KILL "$pid" 2>/dev/null
+        ) >/dev/null 2>&1 &
+        wd=$!
+        rc=0
+        wait "$pid" 2>/dev/null || rc=$?
+        kill -TERM "$wd" 2>/dev/null || true
+        wait "$wd" 2>/dev/null || true
+        if [[ -e "$marker" ]]; then
+            rm -f "$marker"
+            exit 124
+        fi
+        exit "$rc"
+    )
+}
+
 # _fb_bounded <seconds> <outfile> <backend> <infile>
-# Runs one backend on <infile> as stdin, stdout to <outfile>, under a portable
-# watchdog (background job + guard subshell; no GNU timeout). Returns the
-# backend's status, or non-zero if the guard had to kill it. The backend is
-# exec'd in its own subshell so the pid we signal IS the hasher. A hasher stuck
-# in uninterruptible sleep can outlive the bound; that limit is documented, not
-# solved.
+# Runs one hasher backend on <infile> as stdin, stdout to <outfile>, under the watchdog
+# (no GNU timeout). Returns the backend's status, or non-zero if the guard had to kill
+# it. The backend is exec'd in its own subshell so the pid we signal IS the hasher. A
+# hasher stuck in uninterruptible sleep can outlive the bound; that limit is documented,
+# not solved.
 _fb_bounded() {
-    local secs="$1" out="$2" be="$3" in="$4" pid wd rc marker
+    local secs="$1" out="$2" be="$3" in="$4"
     case "$be" in
-        sha256sum) ( exec sha256sum <"$in" >"$out" 2>/dev/null ) & ;;
-        shasum)    ( exec shasum -a 256 <"$in" >"$out" 2>/dev/null ) & ;;
-        sha256)    ( exec sha256 -q <"$in" >"$out" 2>/dev/null ) & ;;
-        openssl)   ( exec openssl dgst -sha256 <"$in" >"$out" 2>/dev/null ) & ;;
-        python3)   ( exec python3 -I -c 'import hashlib,sys
+        sha256sum) _fb_watch "$secs" "$out" "$in" null sha256sum ;;
+        shasum)    _fb_watch "$secs" "$out" "$in" null shasum -a 256 ;;
+        sha256)    _fb_watch "$secs" "$out" "$in" null sha256 -q ;;
+        openssl)   _fb_watch "$secs" "$out" "$in" null openssl dgst -sha256 ;;
+        python3)   _fb_watch "$secs" "$out" "$in" null python3 -I -c 'import hashlib,sys
 h=hashlib.sha256()
 while True:
     b=sys.stdin.buffer.read(1048576)
     if not b: break
     h.update(b)
-print(h.hexdigest())' <"$in" >"$out" 2>/dev/null ) & ;;
+print(h.hexdigest())' ;;
         *) return 127 ;;
     esac
-    pid=$!
-    # The guard drops a marker BEFORE it signals anything. The backend's own exit
-    # status cannot be trusted after a kill: a hasher with a `trap 'exit 0' TERM`
-    # reports success for a hash that never finished.
-    marker="${out}.timeout"
-    rm -f "$marker"
-    (
-        sleep "$secs" & sp=$!
-        trap 'kill "$sp" 2>/dev/null; exit 0' TERM
-        wait "$sp" 2>/dev/null
-        : > "$marker"
-        kill -TERM "$pid" 2>/dev/null
-        sleep 1 & sp=$!
-        wait "$sp" 2>/dev/null
-        kill -KILL "$pid" 2>/dev/null
-    ) >/dev/null 2>&1 &
-    wd=$!
-    rc=0
-    wait "$pid" 2>/dev/null || rc=$?
-    kill -TERM "$wd" 2>/dev/null || true
-    wait "$wd" 2>/dev/null || true
-    if [[ -e "$marker" ]]; then
-        rm -f "$marker"
-        return 124
-    fi
-    return "$rc"
+}
+
+# _fb_bounded_cmd <seconds> <outfile> <command> [args...]
+# The same watchdog for an arbitrary command: stdin /dev/null (a bare invocation must
+# not consume the caller's stdin or block), stdout AND stderr into <outfile>.
+_fb_bounded_cmd() {
+    local secs="$1" out="$2"
+    shift 2
+    _fb_watch "$secs" "$out" /dev/null merge "$@"
 }
 
 # Operability, never presence: the candidate is RUN on empty input (stdin is

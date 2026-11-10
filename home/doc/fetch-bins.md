@@ -421,7 +421,7 @@ verification at all — no hashing, no sums-file or sums-asset lookup, no digest
 `FB_VERIFY_STATUS` variable is set to `verified` or `skipped` by every entry point on
 every non-fatal path, so a second artifact that is skipped cannot inherit a stale
 `verified` from the first. A hasher stuck in a hang is bounded by a portable
-watchdog (a background job, `kill`, no GNU `timeout`): the probe by
+watchdog (`_fb_watch`: a background job, a guard and `kill`, no GNU `timeout`; the child and guard are forked from a subshell whose EXIT trap is already ignored, because a guard killed before it ran a single statement used to run the slot's `rm -rf "$FB_TMP"` EXIT trap and delete the download): the probe by
 `FB_VERIFY_PROBE_TIMEOUT` (default 5 s), a real hash by `FB_VERIFY_TIMEOUT`
 (default 300 s). A timeout there is a hash *failure* even if the hasher swallows SIGTERM and exits 0: the watchdog records that it fired, independent of the backend's exit status. An uninterruptible
 (D-state) hasher can still outlive the bound; that is documented, not solved.
