@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-# fb_verify exemption: installer-invoking (curl | bash): there is no archive of ours to hash; verifying the script is a follow-on decision.
+# fb_verify exemption: installer-invoking (curl | bash): there is no archive of ours to hash. As of the inspected x.ai endpoints grok publishes no checksum or signature, so there is nothing to verify against.
 # See "Download integrity" in doc/fetch-bins.md.
 
 # grok installer (xAI grok CLI). Like nvm (slot 02), rust (slot 10) and claude

@@ -142,14 +142,29 @@ if codex_pkg_ok "$PAYLOAD"; then
 fi
 CODEX_PREV="$(fb_prev_payload "$BIN_NAME" /bin/codex)"
 
+# Trust root for the release's .sigstore bundle: openai/codex's release workflow, as the
+# certificate SAN that Fulcio issued to it through GitHub OIDC. The SAN embeds the tag, so
+# it is built from the tag being installed (measured on 0.165-0.167 and on the 0.169.0
+# alpha: same repo, workflow and issuer; only the tag differs). An EXACT identity, never a
+# regexp: with FB_PIN_CODEX set it pins this release, and it needs no escaping. The bundles
+# exist for linux musl only; on a platform without one fb_verify_sigstore degrades per
+# FB_VERIFY exactly like a missing checksum. See "Signatures" in doc/fetch-bins.md.
+CODEX_SIG_ISSUER='https://token.actions.githubusercontent.com'
+CODEX_SIG_IDENTITY="https://github.com/openai/codex/.github/workflows/rust-release.yml@refs/tags/${TAG_NAME}"
+
 # Exact equality, not startswith -- see deviation 2.
 ASSET_URL="$(gh_asset_url openai/codex \
     '. == ("codex-package-" + $arch + ".tar.gz")' "$TRIPLE" "" "$PIN_TAG")"
 
 TARBALL="${FB_TMP}/codex-package.tar.gz"
 gh_download "$ASSET_URL" "$TARBALL"
-# Integrity before the tarball is extracted; the .sigstore bundles are a follow-on.
+# Integrity, then authenticity, both before the tarball is extracted: the cached-document
+# digest first (cheap; a corrupt download never pays for a bundle fetch or cosign's TUF
+# lookup), then the signature. FB_VERIFY_STATUS reflects only the LAST verifier, so:
+# never branch on FB_VERIFY_STATUS after both verifies. A skipped signature overwrites the
+# digest's "verified", and reading it as "the download is verified" would be wrong.
 fb_verify_gh_digest "$TARBALL" openai/codex "$ASSET_URL" "$PIN_TAG"
+fb_verify_sigstore "$TARBALL" openai/codex "$ASSET_URL" "$CODEX_SIG_IDENTITY" "$CODEX_SIG_ISSUER" "$PIN_TAG"
 
 STAGE="$(fb_stage_payload "$PAYLOAD")"
 trap 'rm -rf "$STAGE"; rm -rf "$FB_TMP"' EXIT

@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-# fb_verify exemption: installer-invoking (curl | bash): there is no archive of ours to hash; verifying the script is a follow-on decision.
+# fb_verify exemption: installer-invoking (curl | bash): there is no archive of ours to hash. As of the inspected 2.1.311 release Anthropic publishes a GPG-signed manifest.json that the official installer does not check; verifying it was declined by the operator.
 # See "Download integrity" in doc/fetch-bins.md.
 
 # claude installer (Anthropic Claude Code). Like nvm (slot 02) and rust (slot

@@ -392,6 +392,7 @@ declined. Coverage is kept honest by an **exact census** in the suite instead.
 | `fb_verify_sums_gh <file> <download-url> <repo> <label> <tag> <arch-arg> <sums-selector>` | `fb_verify_sums` for a sums file that is itself a GitHub release asset (starship, fzf, chezmoi). The sums-asset lookup and the asset-name lookup are **verification-specific**, and `gh_asset_url` exits when its asset is missing — so they run only *after* the policy is read through `fb_verify_policy`. Under `FB_VERIFY=off` neither runs, so a missing or renamed checksum asset (an old pinned release) cannot block the install; under `warn` and `strict` a missing declared sums asset still hard-fails. |
 | `fb_verify_gh_digest <file> <repo> <download-url> [tag]` | GitHub records `digest: "sha256:<hex>"` per release asset; this reads it from the release document `gh_asset_url` already cached, so it costs **no extra request and no extra download**. |
 | `gh_asset_name <repo> <url> [tag]` | The asset's **upstream** name, from the same cached document, selected by URL equality (exactly one match). It is cache-only and fails if the entry is absent rather than refetching: it is always called right after the slot's own lookup, so a miss means the tag the slot used and the tag passed here disagree. |
+| `fb_verify_sigstore <file> <repo> <download-url> <identity> <issuer> [tag]` | **Signature** flavour (codex only; see *Signatures*). Finds `<asset name>.sigstore` in the cached release document, probes cosign for **operability** (`cosign version` must exit 0 and report `GitVersion`), downloads the bundle into `FB_TMP`, then runs `cosign verify-blob --bundle … --certificate-identity <identity> --certificate-oidc-issuer <issuer> <file>` under a watchdog. Success needs exit 0 **and** `Verified OK` in cosign's output. The identity is exact: there is no regexp form. |
 | `fb_url_basename <url>` | The tail of a URL (query/fragment stripped) — the identity of what was fetched when there is no release metadata (jq's interpolated URL, the Teleport CDN). |
 
 **Identity comes from the URL that was downloaded, never from a local path.**
@@ -414,8 +415,11 @@ verified on the asset that actually resolved.
 | a hasher that passed its probe then failed on the real file | FAIL | FAIL | skipped |
 | **no operable hasher** | **FAIL** | **loud `warn:`, proceeds** | skipped |
 | **upstream publishes no digest** (key missing or `null`) | **FAIL** | **loud `warn:`, proceeds** | skipped |
+| **no operable cosign** (`fb_verify_sigstore`) | **FAIL** | **loud `warn:`, proceeds** | skipped |
+| **upstream publishes no `.sigstore` bundle** for the asset | **FAIL** | **loud `warn:`, proceeds** | skipped |
+| signature **rejected**, cosign **hung** (`FB_VERIFY_SIG_TIMEOUT`, default 60 s), bundle **declared but undownloadable**, ambiguous bundle assets, malformed release metadata, bad identity/issuer arguments | FAIL, download deleted | FAIL, download deleted | skipped |
 
-Only the last two rows depend on the default. `FB_VERIFY=off` attempts no
+Only the "no operable hasher", "no digest", "no operable cosign" and "no bundle" rows depend on the default. `FB_VERIFY=off` attempts no
 verification at all — no hashing, no sums-file or sums-asset lookup, no digest read — and prints exactly one
 `warn: FB_VERIFY=off — <label> NOT verified.` per artifact, never silence. The
 `FB_VERIFY_STATUS` variable is set to `verified` or `skipped` by every entry point on
@@ -426,13 +430,65 @@ watchdog (`_fb_watch`: a background job, a guard and `kill`, no GNU `timeout`; t
 (default 300 s). A timeout there is a hash *failure* even if the hasher swallows SIGTERM and exits 0: the watchdog records that it fired, independent of the backend's exit status. An uninterruptible
 (D-state) hasher can still outlive the bound; that is documented, not solved.
 
+#### Signatures (codex only)
+
+Slot 25 (codex) also verifies the release's **sigstore** bundle, after the digest and
+before extraction. Trust root: openai/codex's release workflow, as the certificate SAN
+Fulcio issues to it through GitHub OIDC, pinned in the slot beside the asset filter
+(`CODEX_SIG_IDENTITY`, `CODEX_SIG_ISSUER`); there is no central trust file.
+
+* **Exact identity, never a regexp.** The SAN embeds the tag
+  (`https://github.com/openai/codex/.github/workflows/rust-release.yml@refs/tags/rust-v0.167.0`),
+  so the slot builds it from the tag it is installing. With `FB_PIN_CODEX` set that
+  pins one release; it needs no escaping and handles prerelease tags
+  (`rust-v0.169.0-alpha.7` signs with the same workflow and issuer). Residual: on the
+  *unpinned* path the tag comes from the same GitHub API response as the asset, so
+  nothing here stops a rollback to an older legitimately-signed release; only
+  `FB_PIN_CODEX` does.
+* **Bundles exist for linux musl only** (as of the inspected releases). The darwin and
+  windows package tarballs have no `.sigstore`, so on macOS this is the *no bundle*
+  row of the policy table: `warn` proceeds loudly, and **under `FB_VERIFY=strict` a
+  fresh codex download there fails**. An already-complete payload is not re-verified
+  (the fast path never downloads), and a future release may add bundles for more
+  platforms.
+* **cosign is not provisioned by fetch.bins** (no slot, and upstream ships no FreeBSD
+  build), so the degrade path is the common path on most hosts. No minimum cosign
+  version is enforced: the argv and the legacy bundle shape were measured with cosign
+  **v3.1.4** only, and an operable cosign 2.x that rejects them fails closed by its
+  exit status. That is "fails closed", not "supported"; `GitVersion` in the probe
+  proves cosign runs, not that the bundle format is compatible.
+* **Network.** cosign fetches the Sigstore TUF root over the network on first use and
+  caches it in `~/.sigstore`. An unreachable TUF CDN is a **verification failure** in
+  `warn` and `strict` (a network error cannot be told from a bad signature by its
+  message, and guessing would open a downgrade); `FB_VERIFY=off` is the escape. The
+  test suite never runs a real cosign and never touches the network: every cosign in
+  it is a stub that asserts the exact argv.
+* **`FB_VERIFY_STATUS` is last-verifier-wins.** Slot 25 runs two verifiers; a skipped
+  signature overwrites the digest's `verified`. Never branch on it after both.
+* **claude (slot 26)** — Anthropic publishes a GPG-signed `manifest.json`
+  (`https://downloads.claude.ai/claude-code-releases/<ver>/manifest.json` and
+  `manifest.json.sig`; key `https://downloads.claude.ai/keys/claude-code.asc`, fingerprint
+  `31DD DE24 DDFA B679 F42D 7BD2 BAA9 29FF 1A7E CACE`). Its official installer checks only
+  the manifest's SHA-256 and never the signature. fetch.bins keeps the piped installer and
+  **deliberately does not check the signature** (operator decision, 2026-11-10: a post-install
+  check was offered and declined). Whether the downloaded `claude install` enforces it
+  (`manifestSignatureEnforcement: "flag"`) is unverified.
+* **grok (slot 27)** — as of the inspected x.ai endpoints, xAI publishes no checksum or
+  signature, and its installer performs no integrity check at all; there is nothing to pin.
+* Both stay census exemptions (`# fb_verify exemption:`).
+
+To re-measure by hand (scratch only, never `~`): copy a cosign binary into a scratch
+directory, `HOME=<scratch> cosign verify-blob --bundle <asset>.sigstore
+--certificate-identity <SAN for the tag> --certificate-oidc-issuer
+https://token.actions.githubusercontent.com <asset>`; it prints `Verified OK`.
+
 #### Honest limits — read these before relying on it
 
 * **A checksum from the release's own origin defeats corruption, CDN/mirror
   tampering and transport downgrade. It does not authenticate a compromised
-  publisher.** Only a signature does; verifying the codex `.sigstore` bundles, the
-  1Password `.sig`, and a pinned Anthropic key for claude/grok is a deliberate
-  **follow-on**, not part of this change.
+  publisher.** Only a signature does. codex's `.sigstore` bundle is now verified when
+  cosign is operable (see *Signatures*); the 1Password `.sig` is not, and claude's signed
+  manifest is deliberately unchecked.
 * **The downgrade residual.** Under the default `warn`, a release whose asset
   *silently loses its previously present `.digest`* is indistinguishable from one
   that never had it, and it proceeds with a `warn:` line. This was accepted

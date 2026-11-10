@@ -3124,6 +3124,252 @@ else
     skip "W2 no-orphan-guard check: pgrep is not on this host"
 fi
 
+# --- fb_verify_sigstore: cosign verify-blob of a .sigstore bundle (codex) --------
+# STUB cosign only. No test here ever runs a real cosign or touches the network
+# (a real cosign fetches the Sigstore TUF root on first use). The stub logs its argv
+# so "never tried" cannot hide behind "chosen", and its modes drive every branch.
+#
+# HERM_SIG = the hermetic PATH plus the real jq and nothing else. The helper validates
+# the release document (jq) BEFORE it probes cosign, so a jq-less PATH would die as a
+# "malformed document" before ever reaching the absent-cosign branch.
+HERM_SIG="$FBT_DIR/herm_sig"; mkdir -p "$HERM_SIG"
+cp -R "$HERM/." "$HERM_SIG/"
+FBT_REALJQ="$(command -v jq)"; ln -sf "$FBT_REALJQ" "$HERM_SIG/jq"
+FBT_SIGID='https://id.test/wf.yml@refs/tags/v1'; FBT_SIGISS='https://issuer.test'
+FBT_BUNDLEFIX="$FBT_DIR/bundle.sigstore"; printf 'fake bundle bytes\n' > "$FBT_BUNDLEFIX"
+FBT_A='{"name":"a.tar.gz","browser_download_url":"https://x/a.tar.gz"}'
+FBT_B='{"name":"a.tar.gz.sigstore","browser_download_url":"https://x/a.tar.gz.sigstore"}'
+FBT_DOC_YES="{\"assets\":[$FBT_A,$FBT_B]}"
+FBT_DOC_NO="{\"assets\":[$FBT_A]}"
+FBT_DOC_DUP="{\"assets\":[$FBT_A,$FBT_B,$FBT_B]}"
+FBT_COSIGN_BODY='echo "cosign $*" >> "$FBT_STUBLOG"
+case "$1" in
+version)
+    case "${FBT_VMODE:-ok}" in
+        bad) exit 1 ;;
+        nover) echo "hello"; exit 0 ;;
+        swallow) trap "exit 0" TERM; echo "GitVersion:    v3.1.4"; sleep 30 & wait $!; exit 0 ;;
+    esac
+    echo "GitVersion:    v3.1.4"; exit 0 ;;
+verify-blob)
+    case "${FBT_CMODE:-ok}" in
+        ok) echo "Verified OK" >&2; exit 0 ;;
+        fail) echo "Error: none of the expected identities matched what was in the certificate" >&2; exit 1 ;;
+        silent) exit 0 ;;
+        hang) sleep 30; exit 0 ;;
+        swallow) trap "exit 0" TERM; echo "Verified OK" >&2; sleep 30 & wait $!; exit 0 ;;
+    esac ;;
+esac
+exit 0'
+# A jq wrapper that delegates to the real jq except it fails ONE query, with a sentinel:
+# the bundle-count read (--arg b) or the bundle-URL read (--arg bn).
+JQW="$FBT_DIR/jqw"; mkdir -p "$JQW"
+cat > "$JQW/jq" <<'JQWRAP'
+#!/bin/sh
+case "$FBT_JQFAIL:$*" in
+    count:*"--arg b "*) echo "JQ-SENTINEL-COUNT" >&2; exit 5 ;;
+    url:*"--arg bn "*)  echo "JQ-SENTINEL-URL" >&2; exit 5 ;;
+esac
+exec "$FBT_REALJQ" "$@"
+JQWRAP
+chmod +x "$JQW/jq"
+export HERM_SIG FBT_REALJQ FBT_SIGID FBT_SIGISS FBT_BUNDLEFIX
+
+# sg <name> <doc|__NOCACHE__> <FB_VERIFY> <cosign-mode|none> <want-rc> <stderr-re|-> <stdout-re|-> [version-mode]
+#   cosign-mode: none (cosign absent) | ok | fail | silent | hang | swallow
+#   FBT_EXTRA: extra snippet (timeouts); FBT_DLFAIL: bundle download fails; FBT_PATHPRE: PATH prefix
+FBT_EXTRA=""
+sg() {
+    local n="$1" doc="$2" mode="$3" cm="$4" pp="$HERM_SIG"
+    fbt_stub_reset
+    export FBT_DOC="$doc" FBT_VMODE="${8:-ok}" FBT_CMODE="$cm" FBT_EXTRA
+    if [[ "$cm" != none ]]; then fbt_stub cosign "$FBT_COSIGN_BODY"; pp="$FBT_STUB:$HERM_SIG"; fi
+    [[ -z "${FBT_PATHPRE:-}" ]] || pp="$FBT_PATHPRE:$pp"
+    export FBT_PP="$pp"
+    FBT_T0=$SECONDS
+    fbrun 'PATH="$FBT_PP"; export FB_VERIFY='"$mode"'; eval "${FBT_EXTRA:-}"
+           if [ "$FBT_DOC" != __NOCACHE__ ]; then c="$(_gh_release_cache_path Foo/bar "")"; printf "%s" "$FBT_DOC" > "$c"; fi
+           gh_download() { echo "download $1" >> "$FBT_STUBLOG"; [ -z "${FBT_DLFAIL:-}" ] || exit 1; cp "$FBT_BUNDLEFIX" "$2"; }
+           fb_verify_sigstore "$FBT_WORK" Foo/bar https://x/a.tar.gz "$FBT_SIGID" "$FBT_SIGISS"; echo "STATUS=$FB_VERIFY_STATUS"'
+    FBT_ELAPSED=$((SECONDS - FBT_T0))
+    assert_fbrun "sigstore [$mode/$cm]: $n" "$5" "${6:--}" "${7:--}"
+}
+sg_gone()  { assert "sigstore: $1 (refused download deleted)" "[[ ! -e $FBT_WORK ]]"; }
+sg_kept()  { assert "sigstore: $1 (download kept)" "[[ -e $FBT_WORK ]]"; }
+sg_calls() { grep -c "$1" "$FBT_STUBLOG" || true; }
+
+# canary: the hermetic base can parse the fixture, and no cosign resolves on it
+export FBT_DOC="$FBT_DOC_YES"
+fbrun 'PATH="$HERM_SIG"; printf "%s" "$FBT_DOC" | jq -e "(.assets|type)==\"array\"" >/dev/null && echo JQ-OK
+       if command -v cosign >/dev/null 2>&1; then echo COSIGN-LEAK; fi; echo CANARY-DONE'
+assert_fbrun "canary: jq on HERM_SIG parses the fixture release document" 0 - 'JQ-OK'
+assert "canary: no cosign resolves on HERM_SIG" "[[ \"\$FBR_OUT\" != *COSIGN-LEAK* && \"\$FBR_OUT\" == *CANARY-DONE* ]]"
+
+# U1 / U2 / U2b: cosign absent, inoperable, or not cosign. Strict fails, warn is loud.
+sg "U1 cosign absent: loud warn, proceeds" "$FBT_DOC_YES" warn none 0 \
+    'warn:.*a\.tar\.gz signature.*UNVERIFIED.*no operable cosign.*FB_VERIFY=strict' 'STATUS=skipped'
+assert_eq "sigstore: U1 absent: no bundle was downloaded" "$(sg_calls '^download')" "0"
+sg_kept "U1 absent under warn"
+sg "U1 cosign absent: strict refuses" "$FBT_DOC_YES" strict none 1 'cannot verify a\.tar\.gz signature.*no operable cosign'
+sg "U2 cosign version exits 1: treated as inoperable" "$FBT_DOC_YES" warn ok 0 'UNVERIFIED.*no operable cosign' 'STATUS=skipped' bad
+assert "sigstore: U2 the broken cosign WAS probed, and verify-blob was never called" \
+    "[[ \$(grep -c '^cosign version' $FBT_STUBLOG) -ge 1 && \$(grep -c '^cosign verify-blob' $FBT_STUBLOG) -eq 0 ]]"
+sg "U2 inoperable cosign under strict refuses" "$FBT_DOC_YES" strict ok 1 'no operable cosign' - bad
+sg "U2b cosign version prints no GitVersion: inoperable" "$FBT_DOC_YES" warn ok 0 'UNVERIFIED.*no operable cosign' 'STATUS=skipped' nover
+assert_eq "sigstore: U2b verify-blob was never called" "$(sg_calls '^cosign verify-blob')" "0"
+
+# U3: present and OK — exact argv, one stdout line, status verified, no temp left behind
+for _m in warn strict; do
+    sg "U3 verifies" "$FBT_DOC_YES" $_m ok 0 - 'verified sigstore a\.tar\.gz'
+    assert_eq "sigstore [$_m]: U3 stdout is exactly the verified line plus the status echo" \
+        "$FBR_OUT" "verified sigstore a.tar.gz"$'\n'"STATUS=verified"
+    assert_re "sigstore [$_m]: U3 cosign got EXACTLY verify-blob --bundle B --certificate-identity ID --certificate-oidc-issuer ISS FILE" \
+        "$(grep '^cosign verify-blob' "$FBT_STUBLOG")" \
+        "^cosign verify-blob --bundle .*/fb-sig\\.[A-Za-z0-9]+ --certificate-identity https://id\\.test/wf\\.yml@refs/tags/v1 --certificate-oidc-issuer https://issuer\\.test .*/work\\.bin\$"
+    assert_eq "sigstore [$_m]: U3 the bundle was downloaded once, from the declared URL" \
+        "$(grep '^download' "$FBT_STUBLOG")" "download https://x/a.tar.gz.sigstore"
+    assert "sigstore [$_m]: U3 no bundle or capture temp is left in FB_TMP" \
+        "[[ -z \$(ls $FBR_SB/tmp 2>/dev/null | grep -E '^fb-sig') ]]"
+    sg_kept "U3 verified"
+done
+
+# U4 / U5: verification FAILS — in every mode, never downgraded to a warning
+for _m in warn strict; do
+    sg "U4 cosign rejects: hard fail, cosign's text shown" "$FBT_DOC_YES" $_m fail 1 \
+        'sigstore verification FAILED for a\.tar\.gz.*none of the expected identities.*deleted; nothing was installed'
+    sg_gone "U4 rejected"
+    sg "U5 cosign exits 0 but prints no 'Verified OK': hard fail" "$FBT_DOC_YES" $_m silent 1 'sigstore verification FAILED for a\.tar\.gz'
+    sg_gone "U5 silent success"
+done
+
+# U6: no bundle published (the darwin shape). cosign is never consulted.
+sg "U6 no sigstore bundle: loud warn, proceeds" "$FBT_DOC_NO" warn ok 0 \
+    'warn:.*a\.tar\.gz signature.*UNVERIFIED.*no sigstore bundle.*FB_VERIFY=strict' 'STATUS=skipped'
+assert "sigstore: U6 cosign was never invoked and no bundle fetched" "[[ ! -s $FBT_STUBLOG ]]"
+sg "U6 no sigstore bundle: strict refuses" "$FBT_DOC_NO" strict ok 1 'cannot verify a\.tar\.gz signature.*no sigstore bundle'
+
+# U7: a bundle the release DECLARES but that cannot be fetched
+for _m in warn strict; do
+    export FBT_DLFAIL=1
+    sg "U7 declared bundle, download fails: hard fail" "$FBT_DOC_YES" $_m ok 1 'could not download the sigstore bundle for a\.tar\.gz'
+    unset FBT_DLFAIL
+    sg_gone "U7 undownloadable bundle"
+    assert_eq "sigstore [$_m]: U7 verify-blob never ran" "$(sg_calls '^cosign verify-blob')" "0"
+done
+
+# U8: ambiguous bundle assets
+for _m in warn strict; do
+    sg "U8 two assets named a.tar.gz.sigstore: hard fail" "$FBT_DOC_DUP" $_m ok 1 '2 release assets named a\.tar\.gz\.sigstore'
+    sg_gone "U8 ambiguous bundle"
+done
+
+# U9: off — LOCAL label (work.bin, not the upstream a.tar.gz) and a MALFORMED cache: nothing is read
+sg "U9 off: one warn with the LOCAL label, nothing read, nothing run" 'not json at all' off ok 0 \
+    'warn: FB_VERIFY=off.*work\.bin signature NOT verified' 'STATUS=skipped'
+assert "sigstore: U9 off: cosign never invoked, no bundle fetched" "[[ ! -s $FBT_STUBLOG ]]"
+assert "sigstore: U9 off: the label is the local name, not upstream's" "[[ \"\$FBR_ERR\" != *a.tar.gz* ]]"
+
+# U10 / U10b: a hang is a verify FAILURE, bounded; a TERM-swallowing cosign that exits 0
+# and printed 'Verified OK' is STILL a timeout (the watchdog's marker, not the exit status)
+for _m in warn strict; do
+    FBT_EXTRA='export FB_VERIFY_SIG_TIMEOUT=1'
+    sg "U10 hung cosign: failure, bounded" "$FBT_DOC_YES" $_m hang 1 'cosign timed out after 1s verifying a\.tar\.gz'
+    assert "sigstore [$_m]: U10 returned within the bound (not 30s)" "[[ $FBT_ELAPSED -lt 10 ]]"
+    sg_gone "U10 hung"
+    sg "U10b TERM-swallowing cosign that printed Verified OK and exited 0: still a timeout" "$FBT_DOC_YES" $_m swallow 1 \
+        'cosign timed out after 1s verifying a\.tar\.gz'
+    assert "sigstore [$_m]: U10b never reports verified" "[[ \"\$FBR_OUT\" != *'verified sigstore'* ]]"
+    assert "sigstore [$_m]: U10b returned within the bound" "[[ $FBT_ELAPSED -lt 10 ]]"
+    sg_gone "U10b TERM-swallow"
+    FBT_EXTRA=''
+done
+# U10c: the PROBE is bounded by the same watchdog. A probe that swallows TERM and exits 0
+# is a timeout => inoperable => the cannot-verify path. (verify-blob arm exits 1: with the
+# marker rule dropped the probe would pass and the run would FAIL verification instead.)
+FBT_EXTRA='export FB_VERIFY_PROBE_TIMEOUT=1'
+sg "U10c TERM-swallowing probe: inoperable, not verified, not hung" "$FBT_DOC_YES" warn fail 0 'UNVERIFIED.*no operable cosign' 'STATUS=skipped' swallow
+assert "sigstore: U10c returned within the bound" "[[ $FBT_ELAPSED -lt 10 ]]"
+assert_eq "sigstore: U10c verify-blob was never reached" "$(sg_calls '^cosign verify-blob')" "0"
+FBT_EXTRA=''
+
+# U11: bad pin arguments — the "" == "" trap
+_id0="$FBT_SIGID"; _is0="$FBT_SIGISS"
+for _v in "|$_is0" "$_id0|" "$_id0|http://issuer.test" "id with space|$_is0"; do
+    FBT_SIGID="${_v%%|*}"; FBT_SIGISS="${_v#*|}"; export FBT_SIGID FBT_SIGISS
+    sg "U11 bad identity/issuer [$_v]: refused" "$FBT_DOC_YES" warn ok 1 'needs an exact identity'
+    sg_gone "U11 [$_v]"
+    assert_eq "sigstore: U11 [$_v] cosign never invoked" "$(sg_calls '^cosign ')" "0"
+done
+FBT_SIGID="$_id0"; FBT_SIGISS="$_is0"; export FBT_SIGID FBT_SIGISS
+
+# U12: status is per call: verified, then skipped
+export FBT_DOC="$FBT_DOC_YES" FBT_CMODE=ok FBT_VMODE=ok; fbt_stub_reset; fbt_stub cosign "$FBT_COSIGN_BODY"
+export FBT_PP="$FBT_STUB:$HERM_SIG" FBT_PP2="$HERM_SIG"
+fbrun 'export FB_VERIFY=warn; c="$(_gh_release_cache_path Foo/bar "")"; printf "%s" "$FBT_DOC" > "$c"
+       gh_download() { cp "$FBT_BUNDLEFIX" "$2"; }
+       PATH="$FBT_PP"; fb_verify_sigstore "$FBT_WORK" Foo/bar https://x/a.tar.gz "$FBT_SIGID" "$FBT_SIGISS" >/dev/null; echo "A=$FB_VERIFY_STATUS"
+       PATH="$FBT_PP2"; fb_verify_sigstore "$FBT_WORK" Foo/bar https://x/a.tar.gz "$FBT_SIGID" "$FBT_SIGISS" >/dev/null 2>&1; echo "B=$FB_VERIFY_STATUS"'
+assert_fbrun "U12 status follows the LAST call: verified, then skipped (no stale verified)" 0 - 'A=verified.*B=skipped'
+
+# U13: malformed or missing release metadata fails in every mode
+for _m in warn strict; do
+    sg "U13 no cached release document" __NOCACHE__ $_m ok 1 'no cached release document'
+    sg_gone "U13 no cache"
+    sg "U13 .assets is not an array" '{"assets":{}}' $_m ok 1 'assets array'
+    sg "U13 invalid JSON" 'not json at all' $_m ok 1 'assets array'
+    sg "U13 URL matches 0 assets" '{"assets":[]}' $_m ok 1 '0 release assets'
+    sg "U13 URL matches 2 assets" "{\"assets\":[$FBT_A,$FBT_A]}" $_m ok 1 '2 release assets'
+    sg_gone "U13 two assets"
+done
+
+# U14: an unknown FB_VERIFY fails closed AND removes the unverified download
+sg "U14 FB_VERIFY=typo: refused, bad value named" "$FBT_DOC_YES" typo ok 1 "FB_VERIFY must be strict, warn or off \\(got 'typo'\\)"
+sg_gone "U14 policy typo"
+assert_eq "sigstore: U14 cosign never invoked" "$(sg_calls '^cosign ')" "0"
+
+# U15: the bundle needs a real FB_TMP — no /tmp fallback. ISOLATED unit: a fixed cache
+# path independent of FB_TMP, and _fb_cosign_ok stubbed to succeed (no temp, no tool).
+for _c in empty unset notdir; do
+    _scr="$(mktemp -d)"; export FBT_SCR="$_scr" FBT_C="$_c" FBT_DOC="$FBT_DOC_YES"
+    fbt_stub_reset
+    fbrun 'cf="$FBT_WORK.cache"; printf "%s" "$FBT_DOC" > "$cf"
+           _gh_release_cache_path() { printf "%s" "$cf"; }
+           _fb_cosign_ok() { return 0; }
+           gh_download() { echo "download $1" >> "$FBT_STUBLOG"; cp "$FBT_BUNDLEFIX" "$2"; }
+           export TMPDIR="$FBT_SCR"
+           case "$FBT_C" in empty) FB_TMP="" ;; unset) unset FB_TMP ;; notdir) FB_TMP=/nonexistent-fb-tmp-dir ;; esac
+           fb_verify_sigstore "$FBT_WORK" Foo/bar https://x/a.tar.gz "$FBT_SIGID" "$FBT_SIGISS"; echo REACHED'
+    assert_fbrun "U15 FB_TMP $_c at the bundle step: refused" 1 'FB_TMP is not set'
+    sg_gone "U15 FB_TMP $_c"
+    assert_eq "sigstore: U15 FB_TMP $_c: nothing downloaded" "$(sg_calls '^download')" "0"
+    assert_eq "sigstore: U15 FB_TMP $_c: nothing landed in TMPDIR (no /tmp fallback)" "$(ls -A "$_scr" | wc -l | tr -d ' ')" "0"
+    rm -rf "$_scr"
+done
+
+# U16: every jq read after the document check has its own refusal (no bare set -e death
+# leaving the download behind). The wrapper fails ONLY the named query, with a sentinel.
+for _q in count url; do
+    export FBT_JQFAIL="$_q"; FBT_PATHPRE="$JQW"
+    sg "U16 jq failure on the bundle $_q read: refused, not a bare abort" "$FBT_DOC_YES" warn ok 1 \
+        "JQ-SENTINEL-$(printf '%s' "$_q" | tr a-z A-Z).*refusing"
+    FBT_PATHPRE=""; unset FBT_JQFAIL
+    sg_gone "U16 $_q read failed"
+done
+export FBT_JQFAIL=none
+unset _m _v _c _q _scr _id0 _is0
+
+# source asserts for the new helper (comment-stripped)
+assert_eq "fb_verify_sigstore resets FB_VERIFY_STATUS as its FIRST executable statement" \
+    "$(nocomment "$FBLIB" | awk '/^fb_verify_sigstore\(\)/{f=1;next} f&&/^[[:space:]]*local /{next} f&&NF{print;exit}' | sed 's/^[[:space:]]*//')" 'FB_VERIFY_STATUS=""'
+assert_eq "no '|| true' swallows a fb_verify_sigstore failure anywhere in the lib" \
+    "$(nocomment "$FBLIB" | grep -c 'fb_verify_sigstore.*|| true')" "0"
+assert_eq "the lib never offers a regexp identity (an unpinned identity is theatre)" \
+    "$(nocomment "$FBLIB" | grep -c 'certificate-identity-regexp')" "0"
+for _fn in fb_verify_sigstore _fb_cosign_ok; do
+    assert "_lib.sh declares $_fn" "grep -qE '^$_fn\\(\\)' $FBLIB"
+done
+unset _fn
+
 # --- stdout contract ---------------------------------------------------------
 fbrun 'fb_sha256_backend'
 assert_fbrun "fb_sha256_backend prints exactly one backend name" 0 - '^(sha256sum|shasum|sha256|openssl|python3)$'
@@ -3218,7 +3464,7 @@ fl_codex_without() { # <member>: the complete layout minus one member
 # real JSON, all eight fields; FL_CODEX_MANIFEST_FIELD/_VALUE override ONE field (value is JSON)
 fl_codex_manifest() {
     local j
-    j="$(jq -nc --arg t "$FLTRIPLE" '{layoutVersion:1,version:"1.0.0",target:$t,variant:"codex",entrypoint:"bin/codex",execServer:"bin/codex-exec-server",resourcesDir:"codex-resources",pathDir:"codex-path"}')"
+    j="$(jq -nc --arg t "$FLTRIPLE" --arg v "${FL_CODEX_VERSION:-1.0.0}" '{layoutVersion:1,version:$v,target:$t,variant:"codex",entrypoint:"bin/codex",execServer:"bin/codex-exec-server",resourcesDir:"codex-resources",pathDir:"codex-path"}')"
     if [[ -n "${FL_CODEX_MANIFEST_FIELD:-}" ]]; then
         j="$(printf '%s' "$j" | jq -c --arg f "$FL_CODEX_MANIFEST_FIELD" --argjson v "$FL_CODEX_MANIFEST_VALUE" '.[$f] = $v')"
     fi
@@ -3250,6 +3496,72 @@ fl_codex_reject() { # <label> <layout> [manifest-field json-value]
     assert "$w: the slot fails with the incomplete diagnostic" "[[ $FLR_RC -ne 0 && \"\$FLR_ERR\" == *incomplete* ]]"
     assert "$w: nothing published, linked or left staged" \
         "[[ ! -e $a/codex-1.0.0 && ! -L $FL_HOME/.local/bin/codex && ! -e $FL_HOME/.local/bin/codex && -z \$(ls -d $a/codex-1.0.0.new.* 2>/dev/null) ]]"
+}
+fl_check_codex_sig() {
+    local w="flow 25 sigstore" a id iss l1 l2 snap0 snap1
+    id="https://github.com/openai/codex/.github/workflows/rust-release.yml@refs/tags/rust-v1.0.0"
+    iss="https://token.actions.githubusercontent.com"
+    # --- good: both verifiers, the identity is built from the tag, order, and the stub is the only cosign
+    fl_setup 25 good ""; a="$FL_HOME/.local/apps"; fl_run 25
+    assert_eq "$w good: slot exits 0" "$FLR_RC" "0"
+    [[ $FLR_RC -eq 0 ]] || printf '       [%s stderr] %s\n' "$w" "${FLR_ERR:0:600}"
+    assert "$w good: 'verified sha256' is reported BEFORE 'verified sigstore'" \
+        "[[ \"\$FLR_OUT\" == *'verified sha256'*'verified sigstore'* ]]"
+    assert "$w good: the package is published" "[[ -d $a/codex-1.0.0 ]]"
+    assert_eq "$w good: cosign verify-blob ran exactly once" "$(fl_ev '^cosign verify-blob')" "1"
+    assert_eq "$w good: the identity is built from the tag, with the GitHub OIDC issuer" \
+        "$(grep -c -- "--certificate-identity $id --certificate-oidc-issuer $iss " "$FL_EVENTS")" "1"
+    l1="$(grep -n '^cosign verify-blob' "$FL_EVENTS" | head -1 | cut -d: -f1)"
+    l2="$(grep -n '^tar ' "$FL_EVENTS" | head -1 | cut -d: -f1)"
+    assert "$w order: both anchors exist (verify-blob event, tar event)" "[[ -n '$l1' && -n '$l2' ]]"
+    assert "$w order: verify-blob precedes extraction" "[[ -n '$l1' && -n '$l2' && $l1 -lt $l2 ]]"
+    assert_eq "$w stub: every cosign-resolved line is THIS sandbox's stub" \
+        "$(grep '^cosign-resolved=' "$FL_EVENTS" | sort -u)" "cosign-resolved=$FLTMP/wrap/cosign"
+    assert_eq "$w stub: no system cosign path ever appears in the events" \
+        "$(grep -c '/usr/bin/cosign\|/usr/local/bin/cosign' "$FL_EVENTS")" "0"
+    assert_eq "$w stub: every 'cosign ' event is version or verify-blob" \
+        "$(grep '^cosign ' "$FL_EVENTS" | grep -cvE '^cosign (version|verify-blob )')" "0"
+    # --- verify FAILS: never extracted, never published; a previous install is untouched
+    fl_setup 25 good ""; a="$FL_HOME/.local/apps"
+    fl_codex_seed "$a/codex-0.0.1"; ln -sfn "$a/codex-0.0.1/bin/codex" "$FL_HOME/.local/bin/codex"
+    snap0="$(fl_codex_snap "$a/codex-0.0.1")"
+    fl_run 25 FL_COSIGN_MODE=fail
+    snap1="$(fl_codex_snap "$a/codex-0.0.1")"
+    assert "$w verify FAILS: the slot fails with the diagnostic" "[[ $FLR_RC -ne 0 && \"\$FLR_ERR\" == *'sigstore verification FAILED'* ]]"
+    assert_eq "$w verify FAILS: the package was never extracted" "$(fl_ev '^tar ')" "0"
+    assert_eq "$w verify FAILS: no package binary was ever executed" "$(fl_ev '^exec:')" "0"
+    assert "$w verify FAILS: nothing published, previous link intact" \
+        "[[ ! -e $a/codex-1.0.0 && \"\$(readlink $FL_HOME/.local/bin/codex)\" == $a/codex-0.0.1/bin/codex ]]"
+    assert_eq "$w verify FAILS: the previous tree is byte-identical" "$snap1" "$snap0"
+    # --- cosign inoperable: warn installs loudly, strict refuses BEFORE extraction
+    fl_setup 25 good ""; a="$FL_HOME/.local/apps"; fl_run 25 FL_COSIGN_MODE=inop
+    assert "$w cosign inoperable, warn: installs with a loud warn, checksum still verified" \
+        "[[ $FLR_RC -eq 0 && \"\$FLR_ERR\" == *UNVERIFIED*'no operable cosign'* && \"\$FLR_OUT\" == *'verified sha256'* && -d $a/codex-1.0.0 ]]"
+    assert_eq "$w cosign inoperable, warn: verify-blob never ran" "$(fl_ev '^cosign verify-blob')" "0"
+    fl_setup 25 good ""; a="$FL_HOME/.local/apps"; fl_run 25 FL_COSIGN_MODE=inop FB_VERIFY=strict
+    assert "$w cosign inoperable, strict: refuses, nothing extracted or published" \
+        "[[ $FLR_RC -ne 0 && ! -e $a/codex-1.0.0 && \$(fl_ev '^tar ') -eq 0 ]]"
+    # --- no bundle in the release (the darwin shape)
+    FL_NOSIG=1; fl_setup 25 good ""; FL_NOSIG=""; a="$FL_HOME/.local/apps"; fl_run 25
+    assert "$w no bundle, warn: installs with the no-bundle warn" \
+        "[[ $FLR_RC -eq 0 && \"\$FLR_ERR\" == *'no sigstore bundle'* && -d $a/codex-1.0.0 ]]"
+    assert_eq "$w no bundle, warn: cosign was never invoked" "$(fl_ev '^cosign ')" "0"
+    FL_NOSIG=1; fl_setup 25 good ""; FL_NOSIG=""; a="$FL_HOME/.local/apps"; fl_run 25 FB_VERIFY=strict
+    assert "$w no bundle, strict: refuses before extraction" "[[ $FLR_RC -ne 0 && ! -e $a/codex-1.0.0 && \$(fl_ev '^tar ') -eq 0 ]]"
+    # --- PRERELEASE: pinned, served ONLY at /releases/tags/<tag>; no latest document exists
+    FL_CODEX_TAG=rust-v1.2.3-alpha.4; FL_CODEX_VERSION=1.2.3-alpha.4; FL_TAGDOC=rust-v1.2.3-alpha.4
+    fl_setup 25 good ""; a="$FL_HOME/.local/apps"
+    fl_run 25 FB_PIN_CODEX=1.2.3-alpha.4
+    FL_CODEX_TAG=""; FL_CODEX_VERSION=""; FL_TAGDOC=""
+    assert_eq "$w prerelease: slot exits 0" "$FLR_RC" "0"
+    [[ $FLR_RC -eq 0 ]] || printf '       [%s prerelease stderr] %s\n' "$w" "${FLR_ERR:0:600}"
+    assert "$w prerelease: the package is published and linked" \
+        "[[ -d $a/codex-1.2.3-alpha.4 && \"\$(readlink $FL_HOME/.local/bin/codex)\" == $a/codex-1.2.3-alpha.4/bin/codex ]]"
+    assert_eq "$w prerelease: the identity ends @refs/tags/rust-v1.2.3-alpha.4" \
+        "$(grep -c -- "--certificate-identity https://github.com/openai/codex/.github/workflows/rust-release.yml@refs/tags/rust-v1.2.3-alpha.4 " "$FL_EVENTS")" "1"
+    assert "$w prerelease: no /releases/latest document exists (the fixture cannot serve one)" "[[ ! -e $FL_REL/openai_codex.json ]]"
+    assert "$w prerelease: the TAGGED release was requested" "[[ \$(fl_ev 'releases/tags/rust-v1.2.3-alpha.4') -ge 1 ]]"
+    assert_eq "$w prerelease: /releases/latest was never requested" "$(fl_ev 'releases/latest')" "0"
 }
 fl_check_codex_layout() {
     local a w="flow 25 package" prior snap0 snap1 cl
@@ -3370,11 +3682,15 @@ fl_tamper_any() { # <asset-name>: serve the EVIL bytes under that asset's URL (d
     echo "fl_tamper_any: no asset $1" >&2; return 1
 }
 fl_finish_release() { # write the release docs the curl stub serves
-    local f repo tag
+    local f repo tag out
     for f in "$FL_REL"/*.tag; do
         [[ -e "$f" ]] || continue
         read -r repo tag < "$f"
-        { printf '{"tag_name":"%s","assets":[' "$tag"; paste -sd, "${f%.tag}.assets"; printf ']}'; } > "${f%.tag}.json"
+        # FL_TAGDOC=<tag>: write ONLY the document served at /releases/tags/<tag>; no
+        # /releases/latest document exists, so a pinned run that reads latest fails.
+        out="${f%.tag}.json"
+        [[ -z "${FL_TAGDOC:-}" ]] || out="${f%.tag}.tag-${FL_TAGDOC}.json"
+        { printf '{"tag_name":"%s","assets":[' "$tag"; paste -sd, "${f%.tag}.assets"; printf ']}'; } > "$out"
     done
 }
 # fl_run <slot-file-glob-number> [ENV=VAL...] : runs the slot copy; sets FLR_RC/FLR_OUT/FLR_ERR
@@ -3410,6 +3726,17 @@ echo "curl $*" >> "$FL_EVENTS"
 out=""; prev=""; url=""
 for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; url="$a"; done
 case "$url" in
+  https://api.github.com/repos/*/releases/tags/*)
+      r="${url#https://api.github.com/repos/}"; r="${r%%/releases/*}"
+      t="${url##*/releases/tags/}"
+      f="$FL_REL/$(printf '%s' "$r" | tr -c 'A-Za-z0-9._-' _).tag-$(printf '%s' "$t" | tr -c 'A-Za-z0-9._-' _).json"
+      [ -f "$f" ] || exit 22
+      if [ -n "$out" ]; then cat "$f" > "$out"; else cat "$f"; fi ;;
+  https://api.github.com/repos/*/releases/latest)
+      r="${url#https://api.github.com/repos/}"; r="${r%%/releases/*}"
+      f="$FL_REL/$(printf '%s' "$r" | tr -c 'A-Za-z0-9._-' _).json"
+      [ -f "$f" ] || exit 22
+      if [ -n "$out" ]; then cat "$f" > "$out"; else cat "$f"; fi ;;
   https://api.github.com/repos/*/releases/*)
       r="${url#https://api.github.com/repos/}"; r="${r%%/releases/*}"
       f="$FL_REL/$(printf '%s' "$r" | tr -c 'A-Za-z0-9._-' _).json"
@@ -3431,6 +3758,26 @@ FLCURL
 fl_ev() { grep -c -- "$1" "$FL_EVENTS" || true; }
 
 
+# The ONLY cosign a flow ever sees: first on PATH, logs its own resolution and argv to the
+# events file (so the ORDER against the tar wrapper is observable and a host cosign cannot
+# leak in unnoticed). FL_COSIGN_MODE: ok (default) | fail (verify-blob rejects) | inop (version exits 1)
+fl_cosign_stub() {
+    cat > "$FLTMP/wrap/cosign" <<'FLCOS'
+#!/bin/sh
+echo "cosign-resolved=$(command -v cosign)" >> "$FL_EVENTS"
+echo "cosign $*" >> "$FL_EVENTS"
+case "$1" in
+  version) [ "${FL_COSIGN_MODE:-ok}" = inop ] && exit 1; echo "GitVersion:    v3.1.4"; exit 0 ;;
+  verify-blob)
+      case "${FL_COSIGN_MODE:-ok}" in
+        fail) echo "Error: none of the expected identities matched what was in the certificate" >&2; exit 1 ;;
+        *) echo "Verified OK" >&2; exit 0 ;;
+      esac ;;
+esac
+exit 0
+FLCOS
+    chmod +x "$FLTMP/wrap/cosign"
+}
 FLAMD="$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')"
 FLTRIPLE="${FLARCH}-unknown-linux-musl"
 FLLIBC=musl; [[ "$FLARCH" == x86_64 ]] || FLLIBC=gnu      # delta has no aarch64 musl build
@@ -3459,7 +3806,10 @@ fl_setup() {
     22) fl_asset_at cdn.teleport.dev "https://cdn.teleport.dev/teleport-v18.0.0-linux-$FLAMD-bin.tar.gz" tgz "teleport/tsh:teleport/tctl" tsh
         fl_sums_at "https://cdn.teleport.dev/teleport-v18.0.0-linux-$FLAMD-bin.tar.gz.sha256" "https://cdn.teleport.dev/teleport-v18.0.0-linux-$FLAMD-bin.tar.gz" teleport-v18.0.0-linux-$FLAMD-bin.tar.gz ;;
     24) fl_asset gordcurrie/proxmox-mcp v1.0.0 "proxmox-mcp_linux_$FLAMD" bare x proxmox-mcp ;;
-    25) fl_asset openai/codex rust-v1.0.0 "codex-package-$r.tar.gz" tgz "$FL_CODEX_LAYOUT" codex ;;
+    25) fl_asset openai/codex "${FL_CODEX_TAG:-rust-v1.0.0}" "codex-package-$r.tar.gz" tgz "$FL_CODEX_LAYOUT" codex
+        # the .sigstore twin (fake bytes: cosign is a stub), unless the case is the no-bundle shape
+        [[ -n "${FL_NOSIG:-}" ]] || fl_asset openai/codex "${FL_CODEX_TAG:-rust-v1.0.0}" "codex-package-$r.tar.gz.sigstore" bare x sig
+        fl_cosign_stub ;;
     01) fl_asset_at jqlang/jq "https://github.com/jqlang/jq/releases/download/jq-1.0.0/jq-linux-$FLAMD" bare x jq
         fl_sums_at "https://github.com/jqlang/jq/releases/download/jq-1.0.0/sha256sum.txt" "https://github.com/jqlang/jq/releases/download/jq-1.0.0/jq-linux-$FLAMD" "jq-linux-$FLAMD"
         printf '%s %s\n' jqlang/jq jq-1.0.0 > "$FL_REL/$(fl_key jqlang/jq).tag"
@@ -3544,6 +3894,7 @@ if [[ $FLOW_OK == 1 ]]; then
     fl_check 09 chezmoi chezmoi-1.0.0 "chezmoi_1.0.0_linux_$FLAMD.tar.gz" tar yes
     fl_check 25 codex codex-1.0.0 "codex-package-$FLTRIPLE.tar.gz" tar no
     fl_check_codex_layout
+    fl_check_codex_sig
     # C1: a missing DECLARED sums asset. FB_VERIFY=off must still install (the escape hatch
     # for an old pinned release / a renamed checksum asset); warn and strict must hard-fail.
     fl_drop_asset() { # <repo> <asset-name>
@@ -3586,6 +3937,24 @@ FB_ALL_SLOTS="$(ls $FBD/executable_[0-9]*.sh | sed 's|.*/executable_\([0-9][0-9]
 FB_DIRECT="$(for f in $FBD/executable_[0-9]*.sh; do
     nocomment "$f" | grep -qE '(^|[[:space:];])fb_verify_(gh_digest|sums|sums_gh)[[:space:]]' && basename "$f" | sed 's|executable_\([0-9][0-9]\)_.*|\1|'
 done | sort | tr '\n' ' ')"
+FB_SIG_GOT="$(for f in $FBD/executable_[0-9]*.sh; do
+    nocomment "$f" | grep -qE '(^|[[:space:];])fb_verify_sigstore[[:space:]]' && basename "$f" | sed 's|executable_\([0-9][0-9]\)_.*|\1|'
+done | sort | tr '\n' ' ')"
+assert_eq "signature-verifying slots are exactly codex (25) by operator ruling" "$FB_SIG_GOT" "25 "
+FB_S25="$FBD/executable_25_fetch.codex.sh"
+assert_eq "slot 25 builds its sigstore identity from the installed tag" \
+    "$(nocomment "$FB_S25" | grep -c 'rust-release\.yml@refs/tags/\${TAG_NAME}')" "1"
+assert_eq "slot 25 pins the GitHub OIDC issuer beside its asset name" \
+    "$(nocomment "$FB_S25" | grep -c "CODEX_SIG_ISSUER='https://token.actions.githubusercontent.com'")" "1"
+assert_eq "slot 25 never uses a regexp identity" "$(nocomment "$FB_S25" | grep -c 'identity-regexp')" "0"
+FB_S25_DIG="$(nocomment "$FB_S25" | grep -n 'fb_verify_gh_digest "\$TARBALL"' | head -1 | cut -d: -f1)"
+FB_S25_SIG="$(nocomment "$FB_S25" | grep -n 'fb_verify_sigstore ' | head -1 | cut -d: -f1)"
+FB_S25_TAR="$(nocomment "$FB_S25" | grep -n 'tar -xzf' | head -1 | cut -d: -f1)"
+assert "slot 25 ordering anchors all exist (digest, sigstore, tar)" "[[ -n '$FB_S25_DIG' && -n '$FB_S25_SIG' && -n '$FB_S25_TAR' ]]"
+assert "slot 25: digest, then sigstore, then extraction" \
+    "[[ -n '$FB_S25_DIG' && -n '$FB_S25_SIG' && -n '$FB_S25_TAR' && $FB_S25_DIG -lt $FB_S25_SIG && $FB_S25_SIG -lt $FB_S25_TAR ]]"
+assert_eq "slot 25 carries the FB_VERIFY_STATUS warning in its own comment" \
+    "$(grep -c 'never branch on FB_VERIFY_STATUS' "$FB_S25")" "1"
 FB_ROUTES="01 09 14 "
 FB_EXEMPT_WANT="02 04 08 10 23 26 27 "
 assert_eq "direct verifiers are exactly the slots that call fb_verify_*" "$FB_DIRECT" \
@@ -3621,7 +3990,7 @@ assert "sha256sum -c is never reintroduced (BSD lacks it, busybox varies)" \
     "[[ -z \$(nocomment $FBLIB | grep -E 'sha256sum -c|shasum -c') ]]"
 # the docs name every helper (a convention check, not a security proof)
 for _fn in fb_verify_policy fb_sha256_backend fb_sha256_of fb_checksum_lookup fb_verify_sha256 \
-           fb_verify_sums fb_verify_gh_digest gh_asset_name fb_url_basename; do
+           fb_verify_sums fb_verify_gh_digest fb_verify_sigstore gh_asset_name fb_url_basename; do
     assert "doc/fetch-bins.md documents $_fn" "grep -q '$_fn' home/doc/fetch-bins.md"
 done
 assert "doc/fetch-bins.md states the strict mitigation prominently" \

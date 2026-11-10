@@ -741,9 +741,9 @@ gh_download() {
 #
 # HONEST LIMITS. A checksum from the release's own origin defeats corruption,
 # CDN/mirror tampering and transport downgrade. It does NOT authenticate a
-# compromised publisher (only signatures do — a follow-on), and under `warn` a
-# release that silently loses its upstream digest proceeds like one that never
-# had it. FB_VERIFY=strict is the mitigation for that residual.
+# compromised publisher (only signatures do: fb_verify_sigstore covers codex, below),
+# and under `warn` a release that silently loses its upstream digest proceeds like
+# one that never had it. FB_VERIFY=strict is the mitigation for that residual.
 # ----------------------------------------------------------------------
 : "${FB_VERIFY:=warn}"
 FB_VERIFY_STATUS=""
@@ -1219,6 +1219,147 @@ fb_verify_gh_digest() {
     v="${v#sha256:}"
     case "$v" in *$'\n'*) v="x" ;; esac
     fb_verify_sha256 "$f" "$v" "$label"
+}
+
+# Operability, never presence: cosign is RUN (`cosign version`, stdin /dev/null,
+# bounded by the probe timeout) and must exit 0 AND report a GitVersion line. Absent,
+# non-zero, hung, or printing something else all mean "no operable cosign". This
+# proves cosign runs, not that its flags match this bundle format: see the doc.
+_fb_cosign_ok() {
+    local out rc=0
+    out="$(mktemp "${FB_TMP:-${TMPDIR:-/tmp}}/fb-cosign.XXXXXX")" || return 1
+    _fb_bounded_cmd "${FB_VERIFY_PROBE_TIMEOUT:-5}" "$out" cosign version || rc=$?
+    if [[ "$rc" -eq 0 ]] && grep -q 'GitVersion:' "$out"; then
+        rm -f "$out"
+        return 0
+    fi
+    rm -f "$out"
+    return 1
+}
+
+# <file> <repo> <download-url> <identity> <issuer> [tag]
+# Sigstore flavour: the release publishes `<asset name>.sigstore` (a cosign bundle)
+# beside the asset, found in the release document gh_asset_url already cached (no
+# extra request for the lookup). <identity> is the EXACT certificate SAN the signer
+# must have, <issuer> its OIDC issuer; there is deliberately no regexp form (an
+# unpinned identity authenticates nothing). Policy, like the checksum family:
+#   off                                 -> one warn line, nothing read or run
+#   no bundle published / no operable cosign -> the cannot-verify case (warn proceeds,
+#                                          strict fails)
+#   malformed or ambiguous metadata, a declared bundle that cannot be fetched, a
+#   rejected signature, a hung cosign   -> FAIL in every mode but off, download deleted
+# The bundle is looked up BEFORE cosign is probed, so a platform with no bundle is
+# never told to install cosign for something that cannot help. cosign fetches the
+# Sigstore TUF root over the network on first use and keeps it in ~/.sigstore; an
+# unreachable TUF CDN is a verification failure here, not "absence": a network error
+# cannot be told from a bad signature by its message, and guessing would open a
+# downgrade. FB_VERIFY=off is the escape hatch.
+# The bundle and cosign's output live under FB_TMP only (no /tmp fallback); the slot's
+# EXIT trap that removes FB_TMP is the backstop for anything this function's own
+# cleanup misses (a kill -9).
+fb_verify_sigstore() {
+    local f="$1" repo="$2" url="$3" identity="${4:-}" issuer="${5:-}" tag="${6:-}"
+    local mode cache label name n burl bundle cap rc=0 secs
+    FB_VERIFY_STATUS=""
+    label="${f##*/} signature"
+    mode="$(fb_verify_policy)" || { rm -f "$f"; exit 1; }
+    if [[ "$mode" == off ]]; then
+        _fb_verify_off "$label"
+        return 0
+    fi
+    if [[ ! -f "$f" ]]; then
+        echo "Error: cannot verify ${label}: no file at ${f}." >&2
+        exit 1
+    fi
+    # Empty, malformed, garbled: never a pin. The "" == "" trap.
+    case "$identity" in
+        ""|*[[:space:]]*) identity="" ;;
+    esac
+    case "$issuer" in
+        https://?*) case "$issuer" in *[[:space:]]*) issuer="" ;; esac ;;
+        *) issuer="" ;;
+    esac
+    if [[ -z "$identity" || -z "$issuer" ]]; then
+        echo "Error: fb_verify_sigstore needs an exact identity and an https issuer with no whitespace; refusing ${label}." >&2
+        rm -f "$f"; exit 1
+    fi
+    cache="$(_gh_release_cache_path "$repo" "$tag")" || cache=""
+    if [[ -z "$cache" || ! -s "$cache" ]]; then
+        echo "Error: no cached release document for ${repo}${tag:+ (tag $tag)}; cannot look up the sigstore bundle." >&2
+        rm -f "$f"; exit 1
+    fi
+    if ! jq -e '(.assets | type) == "array"' < "$cache" >/dev/null 2>&1; then
+        echo "Error: release document for ${repo} is not valid JSON with an assets array; refusing ${label}." >&2
+        rm -f "$f"; exit 1
+    fi
+    # gh_asset_name requires exactly one asset for <url>, a usable string name, and valid JSON
+    name="$(gh_asset_name "$repo" "$url" "$tag")" || { rm -f "$f"; exit 1; }
+    label="${name} signature"
+    n="$(jq -r --arg b "${name}.sigstore" '[.assets[] | select(.name == $b)] | length' < "$cache")" || {
+        echo "Error: could not read the sigstore bundle entry of ${repo}'s release document; refusing ${label}." >&2
+        rm -f "$f"; exit 1
+    }
+    case "$n" in
+        0)
+            _fb_cannot_verify "$label" "upstream publishes no sigstore bundle for this asset"
+            return 0
+            ;;
+        1) ;;
+        *)
+            echo "Error: ${n} release assets named ${name}.sigstore in ${repo}; expected at most 1; refusing ${label}." >&2
+            rm -f "$f"; exit 1
+            ;;
+    esac
+    if ! _fb_cosign_ok; then
+        _fb_cannot_verify "$label" "no operable cosign (\`cosign version\` must exit 0 and report GitVersion)"
+        return 0
+    fi
+    burl="$(jq -r --arg bn "${name}.sigstore" '.assets[] | select(.name == $bn) | .browser_download_url | if type == "string" then . else "" end' < "$cache")" || {
+        echo "Error: could not read the sigstore bundle URL of ${repo}'s release document; refusing ${label}." >&2
+        rm -f "$f"; exit 1
+    }
+    case "$burl" in
+        https://?*) ;;
+        *)
+            echo "Error: the sigstore bundle of ${name} has no usable https download URL; refusing ${label}." >&2
+            rm -f "$f"; exit 1
+            ;;
+    esac
+    if [[ -z "${FB_TMP:-}" || ! -d "${FB_TMP:-}" ]]; then
+        echo "Error: FB_TMP is not set to a directory (fb_init not called); refusing ${label}." >&2
+        rm -f "$f"; exit 1
+    fi
+    bundle="$(mktemp "${FB_TMP}/fb-sig.XXXXXX")" || { rm -f "$f"; exit 1; }
+    cap="$(mktemp "${FB_TMP}/fb-sigout.XXXXXX")" || { rm -f "$f" "$bundle"; exit 1; }
+    ( gh_download "$burl" "$bundle" ) || {
+        rm -f "$f" "$bundle" "$cap"
+        echo "Error: could not download the sigstore bundle for ${label}; refusing." >&2
+        exit 1
+    }
+    secs="${FB_VERIFY_SIG_TIMEOUT:-60}"
+    _fb_bounded_cmd "$secs" "$cap" cosign verify-blob --bundle "$bundle" \
+        --certificate-identity "$identity" --certificate-oidc-issuer "$issuer" "$f" || rc=$?
+    # The watchdog verdict is read FIRST: 124 means the guard fired, and a cosign that
+    # trapped TERM and exited 0 after printing "Verified OK" is still a timeout.
+    if [[ "$rc" -eq 124 ]]; then
+        rm -f "$f" "$bundle"
+        echo "Error: cosign timed out after ${secs}s verifying ${name}." >&2
+        head -3 "$cap" | sed 's/^/       /' >&2
+        rm -f "$cap"
+        echo "       The download was deleted; nothing was installed." >&2
+        exit 1
+    fi
+    if [[ "$rc" -ne 0 ]] || ! grep -q 'Verified OK' "$cap"; then
+        rm -f "$f" "$bundle"
+        echo "Error: sigstore verification FAILED for ${name}." >&2
+        head -3 "$cap" | sed 's/^/       /' >&2
+        rm -f "$cap"
+        echo "       The download was deleted; nothing was installed." >&2
+        exit 1
+    fi
+    rm -f "$bundle" "$cap"
+    FB_VERIFY_STATUS="verified"
+    echo "verified sigstore ${name}"
 }
 
 # ----------------------------------------------------------------------
