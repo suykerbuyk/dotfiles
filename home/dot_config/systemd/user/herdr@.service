@@ -1,0 +1,32 @@
+# herdr@.service — one herdr server per named session (instance %i).
+#
+# WHY: a herdr server started by `herdr --session` from a Teleport shell lives in
+# system.slice/teleport.service (KillMode=control-group) and dies with it. Run as
+# a user unit it lives under user@UID.service and survives. Start with
+#   systemctl --user start herdr@<name>
+# `hrdr <name>` does this for you, then attaches.
+#
+# The environment is a contract, not a copy of the login shell: the server and
+# every pane it spawns inherit exactly this.
+[Unit]
+Description=Herdr server (session %i)
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/herdr server
+# Session selector. HERDR_SOCKET_PATH outranks it, so it is unset below.
+Environment=HERDR_SESSION=%i
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+# Deliberate PATH (a unit sources no shell rc). The node bin is pinned on purpose;
+# bump it when nvm's default node moves. SSH_AUTH_SOCK is inherited from the user
+# manager (its own value), never hard-coded here.
+Environment=PATH=%h/.local/apps/nvm/versions/node/v24.18.0/bin:%h/code/go/bin:%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Never inherit a live session's socket or a dead Teleport login (systemd has no
+# globs, so every known name is listed).
+UnsetEnvironment=HERDR_SOCKET_PATH HERDR_CLIENT_SOCKET_PATH HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_STARTUP_CWD HERDR_BIN_PATH
+UnsetEnvironment=TELEPORT_SESSION TELEPORT_SESSION_INVITED_USERS TELEPORT_SESSION_PARTICIPANT_REQUIREMENTS TELEPORT_SESSION_REASON TELEPORT_SSH_JOIN_MODE
+UnsetEnvironment=SSH_TTY SSH_CONNECTION SSH_CLIENT SSH_SESSION_ID SSH_SESSION_WEBPROXY_ADDR SSH_TELEPORT_CLUSTER_NAME SSH_TELEPORT_HOST_UUID SSH_TELEPORT_USER
+# A crash must not silently respawn an empty server.
+Restart=no
+KillMode=control-group

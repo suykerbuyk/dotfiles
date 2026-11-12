@@ -129,6 +129,72 @@ list_session_names() {
 	list_sessions | cut -f1
 }
 
+# --- server lifecycle: the user unit is the ONLY start path ------------------
+#
+# `herdr --session` auto-spawns its server in the CALLER's cgroup. From a
+# Teleport shell that is system.slice/teleport.service, which dies with Teleport.
+# So the server is started as herdr@<name>.service (user unit, see
+# dot_config/systemd/user/herdr@.service) and the client only ever attaches to it.
+#
+# A Teleport shell has no XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS, so
+# `systemctl --user` fails there until they are exported; derive them from the uid.
+#
+# If the unit cannot be started we ABORT. Falling through to a plain
+# `herdr --session` would recreate the exact failure this exists to prevent.
+
+# Is session $1 running (per herdr's own session list)?
+session_running() {
+	run_herdr_quiet session list --json |
+		jq -e --arg n "$1" '[.sessions[]? | select(.name == $n and .running)] | length > 0' >/dev/null 2>&1
+}
+
+ensure_server_unit() {
+	_unit_name=$1
+
+	# Already running (started as a unit, or bare like the pre-unit live server):
+	# just attach. Starting herdr@<name> on an occupied socket would fail, and the
+	# fail-fast below would then abort a perfectly good reattach.
+	if session_running "${_unit_name}"; then
+		return 0
+	fi
+
+	_uid=$(id -u)
+	XDG_RUNTIME_DIR=/run/user/${_uid}
+	DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${_uid}/bus
+	export XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
+
+	if ! command -v systemctl >/dev/null 2>&1; then
+		printf 'hrdr: systemctl not found; refusing to start a server outside a user unit\n' >&2
+		return 1
+	fi
+
+	# Idempotent: a no-op when the unit is already active.
+	if ! systemctl --user start "herdr@${_unit_name}.service"; then
+		printf 'hrdr: could not start herdr@%s.service; not falling back to a bare herdr server\n' "${_unit_name}" >&2
+		printf 'hrdr: try: systemctl --user status herdr@%s.service\n' "${_unit_name}" >&2
+		return 1
+	fi
+
+	# Wait (up to ~10s) for herdr to report the session running, i.e. its socket
+	# answers; "unit active" alone does not prove that.
+	_i=0
+	while [ "${_i}" -lt 50 ]; do
+		if session_running "${_unit_name}"; then
+			return 0
+		fi
+		# The server may die right after `start` (Type=simple returns at fork): bail out
+		# at once instead of waiting the full timeout.
+		if systemctl --user is-failed --quiet "herdr@${_unit_name}.service"; then
+			printf 'hrdr: herdr@%s.service failed; see: journalctl --user -u herdr@%s.service\n' "${_unit_name}" "${_unit_name}" >&2
+			return 1
+		fi
+		_i=$((_i + 1))
+		sleep 0.2
+	done
+	printf 'hrdr: herdr@%s.service started but session %s never became reachable\n' "${_unit_name}" "${_unit_name}" >&2
+	return 1
+}
+
 # Attach to, or create, a named session. herdr's --session does BOTH ("Use or
 # create a named persistent session"), so unlike tm there is no has-session
 # probe and no separate create path to keep in sync.
@@ -136,6 +202,8 @@ connect() {
 	_name=$1
 	validate_name "${_name}" || return 1
 	refuse_when_nested || return 1
+
+	ensure_server_unit "${_name}" || return 1
 
 	set_title "${HNAME}-${_name}"
 	run_herdr --session "${_name}"

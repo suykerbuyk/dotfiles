@@ -51,6 +51,28 @@ clear_pane_typeahead() {
 	tmux send-keys -t "${_target}" -R C-u 2>/dev/null || true
 }
 
+# Run a tmux command that may START the server. The tmux server daemonises into
+# the cgroup of whoever ran the first command; from a Teleport shell that is
+# system.slice/teleport.service, which dies with Teleport. So when no server is
+# running yet, make that first command run in a user-manager scope. Default
+# socket, as everywhere else in this script. No fallback: if the scope cannot be
+# created we stop, rather than start a server that dies with the login.
+tmux_start() {
+	if tmux -N list-sessions >/dev/null 2>&1; then
+		tmux "$@"
+		return $?
+	fi
+	_uid=$(id -u)
+	XDG_RUNTIME_DIR=/run/user/${_uid}
+	DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${_uid}/bus
+	export XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
+	if ! command -v systemd-run >/dev/null 2>&1; then
+		printf 'tm: systemd-run not found; refusing to start tmux outside a user scope\n' >&2
+		return 1
+	fi
+	systemd-run --user --scope --quiet --unit="tmux-server-$(date +%s)" -- tmux "$@"
+}
+
 # Create a new session with the host-appropriate pane layout.
 # $1 = full session name (already prefixed).
 #
@@ -63,7 +85,7 @@ do_create() {
 
 	case "${HOST_ID}" in
 	syke-01A)
-		tmux new-session -d -s "${_session}" \; \
+		tmux_start new-session -d -s "${_session}" \; \
 			split-window -v -d \; \
 			split-window -v -d \; \
 			select-layout even-horizontal \; \
@@ -72,7 +94,7 @@ do_create() {
 			select-pane -t 3
 		;;
 	dz68)
-		tmux new-session -d -s "${_session}" \; \
+		tmux_start new-session -d -s "${_session}" \; \
 			split-window -h -l 66% \; \
 			split-window -h -l 50% \; \
 			split-window -v -d -l 50% \; \
@@ -88,7 +110,7 @@ do_create() {
 			select-pane -t 1
 		;;
 	*)
-		tmux new-session -d -s "${_session}" \; \
+		tmux_start new-session -d -s "${_session}" \; \
 			split-window -d \; \
 			split-window -d \; \
 			select-layout tiled \; \
@@ -124,7 +146,7 @@ connect() {
 	_session="${UNAME}-${_short}"
 	set_title "${HNAME}-${_short}"
 
-	if tmux has-session -t "=${_session}" 2>/dev/null; then
+	if tmux -N has-session -t "=${_session}" 2>/dev/null; then
 		do_attach "${_session}"
 	else
 		do_create "${_session}"
@@ -132,7 +154,7 @@ connect() {
 }
 
 list_sessions() {
-	tmux list-sessions -F '#{session_name}' 2>/dev/null || true
+	tmux -N list-sessions -F '#{session_name}' 2>/dev/null || true
 }
 
 # Interactive: pick an existing session or create a new one.
@@ -211,7 +233,7 @@ interactive() {
 
 	# Existing session: attach by full name as listed.
 	set_title "${HNAME}-${_choice}"
-	if tmux has-session -t "=${_choice}" 2>/dev/null; then
+	if tmux -N has-session -t "=${_choice}" 2>/dev/null; then
 		do_attach "${_choice}"
 	else
 		printf 'tm: session vanished: %s\n' "${_choice}" >&2
@@ -232,7 +254,7 @@ resolve_host_id
 
 case ${1-} in
 ls | list)
-	tmux ls
+	tmux -N ls
 	exit $?
 	;;
 -h | --help | help)
