@@ -107,9 +107,41 @@ unset _e
 # Fill a gap, never override a choice.
 # POSIX test primaries only: this file is parsed with `dash -n` and a [[ ]] here
 # is caught by the harness's "empty stderr" assert.
-if [ -z "${SSH_AUTH_SOCK:-}" ] && [ -n "${XDG_RUNTIME_DIR:-}" ] &&
-    [ -S "$XDG_RUNTIME_DIR/openssh_agent" ]; then
-    export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/openssh_agent"
+#
+# A shell WITHOUT XDG_RUNTIME_DIR (a Teleport login: pam_systemd never ran) still has
+# the user socket at /run/user/$UID/openssh_agent. Use it, but only through
+# _df_user_sock_ok: /run/user/$UID is the trust root (systemd makes it per user,
+# 0700) and the predicate refuses a socket or directory we do not own, a directory
+# group/other can write, or a non-socket. See bashrc.d/10-ssh-agent.sh for why; the
+# two files each carry the predicate because each must stand alone. The fast path
+# (XDG_RUNTIME_DIR set) forks nothing. The no-XDG branch takes UID from bash/zsh and
+# forks `id -u` only under a shell with no UID variable. The predicate forks `ls -ld`
+# once, and only when the socket exists, to read the directory's mode: the one fork
+# this layer pays for the check. DF_RUN_USER_ROOT is a TEST SEAM (default /run/user).
+_df_user_sock_ok() {
+    [ -S "$1" ] && [ -O "$1" ] || return 1
+    set -- "${1%/*}"
+    [ -d "$1" ] && [ -O "$1" ] || return 1
+    set -- "$(command ls -ld -- "$1" 2>/dev/null)"
+    # d rwx r-x r-x : chars 6 and 9 are group-write and other-write. The trailing
+    # glob absorbs an ACL/SELinux suffix character.
+    case ${1%% *} in
+    d????-??-?*) return 0 ;;
+    esac
+    return 1
+}
+if [ -z "${SSH_AUTH_SOCK:-}" ]; then
+    if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+        if [ -S "$XDG_RUNTIME_DIR/openssh_agent" ]; then
+            export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/openssh_agent"
+        fi
+    else
+        _df_sock="${DF_RUN_USER_ROOT:-/run/user}/${UID:-$(id -u)}/openssh_agent"
+        if _df_user_sock_ok "$_df_sock"; then
+            export SSH_AUTH_SOCK="$_df_sock"
+        fi
+        unset _df_sock
+    fi
 fi
 
 # --- host-local ---------------------------------------------------------------

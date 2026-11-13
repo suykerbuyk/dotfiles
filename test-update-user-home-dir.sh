@@ -330,6 +330,45 @@ export XDG_CONFIG_HOME="$SB/.config" XDG_CACHE_HOME="$SB/.cache" XDG_DATA_HOME="
 # hazard as a CLI reaching a running server regardless of $HOME.
 export GIT_CONFIG_GLOBAL="$SB/.gitconfig"
 unset XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS   # simulate headless -> Phase 4 must skip
+
+# ---- the runtime-dir seam: no probe may reach the operator's /run/user/$UID ------
+# 10-ssh-agent.sh and env.sh, when XDG_RUNTIME_DIR is unset, look for a user agent
+# socket at ${DF_RUN_USER_ROOT:-/run/user}/$UID/openssh_agent. On a developer's host
+# that is the LIVE user ssh-agent.socket: a probe that sources either file with no
+# seam would export it, and the drop-in's own `ssh-add -l` liveness probe would
+# socket-activate the real user ssh-agent.service. So:
+#   * DF_RUN_USER_ROOT is exported here, for every probe that inherits this
+#     environment (posix_run, and anything else that is not `env -i`), and
+#   * dfenv is the ONE way to run an `env -i` probe: it always sets the seam to the
+#     same fake root, and refuses (exit 99) if the seam is missing or not under $SB.
+#     DFENV_PFX is the same prefix as text, for the probes that run through a pty
+#     (pty_run takes a command STRING, where a shell function does not exist).
+#   * a probe that WANTS a real fallback test overrides DF_RUN_USER_ROOT after it
+#     (the later assignment wins).
+#   * NOSVC_BIN holds a systemctl that always fails, put first on PROBE_PATH, so no
+#     probe's PATH can reach a systemctl talking to the live user manager.
+# A structural assert in the ssh-agent section fails any raw `env -i` probe added
+# later without going through dfenv.
+DF_HARNESS_RUN_USER_ROOT="$SB/no-run-user"; mkdir -p "$DF_HARNESS_RUN_USER_ROOT"
+export DF_RUN_USER_ROOT="$DF_HARNESS_RUN_USER_ROOT"
+DFENV_PFX="env -i DF_RUN_USER_ROOT=$DF_HARNESS_RUN_USER_ROOT"   # raw-env-i-ok: the helper itself
+dfenv_guard() {
+    if [[ -z "${DF_HARNESS_RUN_USER_ROOT:-}" || "$DF_HARNESS_RUN_USER_ROOT" != "$SB"/* ]]; then
+        echo "HARNESS BUG: the DF_RUN_USER_ROOT seam is missing or outside the sandbox" \
+             "[${DF_HARNESS_RUN_USER_ROOT:-}]; refusing to run a probe that could reach /run/user" >&2
+        exit 99
+    fi
+}
+dfenv() { dfenv_guard; env -i DF_RUN_USER_ROOT="$DF_HARNESS_RUN_USER_ROOT" "$@"; }   # raw-env-i-ok: the helper itself
+NOSVC_BIN="$SB/nosvc-bin"; mkdir -p "$NOSVC_BIN"
+printf '#!/bin/sh\nexit 1\n' > "$NOSVC_BIN/systemctl"; chmod +x "$NOSVC_BIN/systemctl"
+PROBE_PATH="$NOSVC_BIN:$PROBE_PATH"
+# Self-test, at load time: what dfenv hands a child must BE the seam. A helper edited
+# to drop it would otherwise run every probe unseamed and say nothing.
+if [[ "$(dfenv /bin/sh -c 'printf %s "${DF_RUN_USER_ROOT:-MISSING}"' 2>/dev/null)" != "$DF_HARNESS_RUN_USER_ROOT" ]]; then
+    echo "HARNESS BUG: dfenv does not pass the DF_RUN_USER_ROOT seam to its child; refusing to run" >&2
+    exit 99
+fi
 BIN_DIR="$SB/.local/bin"; APP_DIR="$SB/.local/apps"
 
 echo "sandbox HOME=$SB"
@@ -1015,7 +1054,7 @@ if [[ -n "$CHEZMOI" ]]; then
         } >>"$EVID_LOG"
     }
     probe() {
-        ( cd /tmp && env -i HOME="$SB" TERM=xterm PATH="$PROBE_PATH" "$1" "$2" "$3" ) \
+        ( cd /tmp && dfenv HOME="$SB" TERM=xterm PATH="$PROBE_PATH" "$1" "$2" "$3" ) \
             >"$EVID/probe.out" 2>"$EVID/probe.err"
         _probe_evid "$@"
         tr -d '\r' <"$EVID/probe.out" | tail -1
@@ -1069,12 +1108,12 @@ if [[ -n "$CHEZMOI" ]]; then
     # file ran, so nothing added ~/.local/bin and the shell must report it MISSING.
     # Reach for BASH_ENV, or let something start sourcing rc files unconditionally,
     # and this goes red.
-    p="$( cd /tmp && env -i HOME="$SB" PATH="$NOPATH" bash -c "$HAS_LOCALBIN" </dev/null 2>/dev/null )"
+    p="$( cd /tmp && dfenv HOME="$SB" PATH="$NOPATH" bash -c "$HAS_LOCALBIN" </dev/null 2>/dev/null )"
     assert_eq "bash -c (stdin not a socket): reads no startup file" "$p" MISSING
 
     # POSITIVE — the original claim, with its precondition now established rather
     # than assumed.
-    p="$( cd /tmp && env -i HOME="$SB" PATH="$SB/.local/bin:$PROBE_PATH" bash -c "$HAS_LOCALBIN" </dev/null 2>/dev/null )"
+    p="$( cd /tmp && dfenv HOME="$SB" PATH="$SB/.local/bin:$PROBE_PATH" bash -c "$HAS_LOCALBIN" </dev/null 2>/dev/null )"
     assert_eq "bash -c (non-interactive): inherits PATH from its parent" "$p" HAS
 
     # The `ssh host cmd` path -- ~/.bashrc sourcing env.sh above the interactivity
@@ -1124,7 +1163,7 @@ if [[ -n "$CHEZMOI" ]]; then
     sec "shell: startup is silent"
     for s in bash zsh; do
         command -v "$s" >/dev/null 2>&1 || continue
-        noise="$( cd /tmp && env -i HOME="$SB" PATH="$PROBE_PATH" "$s" -c true 2>&1 | tr -d '\r\n \t' )"
+        noise="$( cd /tmp && dfenv HOME="$SB" PATH="$PROBE_PATH" "$s" -c true 2>&1 | tr -d '\r\n \t' )"
         assert_empty "$s -c: non-interactive startup emits nothing (scp/rsync safe)" "$noise"
     done
 
@@ -1134,7 +1173,7 @@ if [[ -n "$CHEZMOI" ]]; then
     if command -v script >/dev/null 2>&1; then
         for s in bash zsh; do
             command -v "$s" >/dev/null 2>&1 || continue
-            noise="$(cd /tmp && pty_run "env -i HOME=$SB TERM=xterm PATH=$PROBE_PATH $s -ic true" | tr -d '\r\n \t')"
+            noise="$(cd /tmp && pty_run "$DFENV_PFX HOME=$SB TERM=xterm PATH=$PROBE_PATH $s -ic true" | tr -d '\r\n \t')"
             assert_empty "$s: interactive startup is silent" "$noise"
         done
     else
@@ -1157,7 +1196,7 @@ if [[ -n "$CHEZMOI" ]]; then
             printf '[ "$1" = init ] && printf "%%s\\n" "#compdef tv" "_tv() { :; }" "compdef _tv tv"\n'
         } > "$faketv"
         chmod +x "$faketv"
-        err="$( cd /tmp && env -i HOME="$SB" TERM=xterm PATH="$PROBE_PATH" zsh -ic true 2>&1 >/dev/null | tr -d '\r' )"
+        err="$( cd /tmp && dfenv HOME="$SB" TERM=xterm PATH="$PROBE_PATH" zsh -ic true 2>&1 >/dev/null | tr -d '\r' )"
         assert "tv init (unguarded compdef) raises no 'command not found'" \
             "! grep -q 'command not found: compdef' <<<\"\$err\""
         rm -f "$faketv"
@@ -1218,7 +1257,7 @@ if [[ -n "$CHEZMOI" ]]; then
         } > "$fakebroot"
         chmod +x "$fakeherdr" "$fakebroot"
 
-        err="$( cd /tmp && env -i HOME="$SB" TERM=xterm PATH="$PROBE_PATH" zsh -ic true 2>&1 >/dev/null | tr -d '\r' )"
+        err="$( cd /tmp && dfenv HOME="$SB" TERM=xterm PATH="$PROBE_PATH" zsh -ic true 2>&1 >/dev/null | tr -d '\r' )"
         assert "herdr completion (unguarded compdef) raises no 'command not found'" \
             "! grep -q 'command not found: compdef' <<<\"\$err\""
 
@@ -1234,7 +1273,7 @@ if [[ -n "$CHEZMOI" ]]; then
 
         # Neither eval may break the silence contract (both are 2>/dev/null).
         if command -v script >/dev/null 2>&1; then
-            noise="$(cd /tmp && pty_run "env -i HOME=$SB TERM=xterm PATH=$PROBE_PATH zsh -ic true" | tr -d '\r\n \t')"
+            noise="$(cd /tmp && pty_run "$DFENV_PFX HOME=$SB TERM=xterm PATH=$PROBE_PATH zsh -ic true" | tr -d '\r\n \t')"
             assert_empty "startup stays silent with herdr+broot wired" "$noise"
         fi
 
@@ -1386,7 +1425,7 @@ TVSTUB
     sec "doctor: tool-init staleness"
     TID="$SB/tool-init-probe"; mkdir -p "$TID"; : > "$TID/fzf"; chmod +x "$TID/fzf"
     ti_row() {
-        env -i HOME="$SB" PATH="$TID:$PROBE_PATH" \
+        dfenv HOME="$SB" PATH="$TID:$PROBE_PATH" \
             ${1:+DOTFILES_TOOL_INIT_EPOCH="$1"} \
             sh -c '. "$1/lib/df-common.sh"; . "$1/lib/doctor-report.sh"
                    df_doctor_registry() { :; }; df_doctor_report' sh \
@@ -1628,16 +1667,17 @@ TVSTUB
     # dotfiles-doctor greets ONCE per login session era: the first interactive
     # shell prints it, later shells (tmux panes) stay quiet. The one-shot is a
     # stamp in $XDG_RUNTIME_DIR, created atomically under `set -C`. The harness
-    # unsets XDG_RUNTIME_DIR globally (line ~54), so this test supplies its own.
+    # unsets XDG_RUNTIME_DIR globally (the `unset XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS`
+    # line beside the GIT_CONFIG_GLOBAL pin, near the top), so this test supplies its own.
     if command -v zsh >/dev/null 2>&1; then
         sec "shell: dotfiles-doctor greets once per login session era"
         rt="$SB/run.greet"; rm -rf "$rt"; mkdir -p "$rt"
-        greet() { ( cd /tmp && env -i HOME="$SB" TERM=xterm XDG_RUNTIME_DIR="$rt" PATH="$PROBE_PATH" zsh -ic true 2>/dev/null | tr -d '\r' ); }
+        greet() { ( cd /tmp && dfenv HOME="$SB" TERM=xterm XDG_RUNTIME_DIR="$rt" PATH="$PROBE_PATH" zsh -ic true 2>/dev/null | tr -d '\r' ); }
         first="$(greet)"; second="$(greet)"
         assert "first interactive shell runs dotfiles-doctor"        "grep -q '^env:' <<<\"\$first\""
         assert "greet stamp created in \$XDG_RUNTIME_DIR"            "[[ -e '$rt/dotfiles-shell.greeted' ]]"
         assert "second interactive shell is quiet (one-shot spent)"  "[[ -z \"\$(tr -d '\r\n \t' <<<\"\$second\")\" ]]"
-        v="$( cd /tmp && env -i HOME="$SB" TERM=xterm XDG_RUNTIME_DIR="$rt" DOTFILES_SHELL_VERBOSE=1 PATH="$PROBE_PATH" zsh -ic true 2>/dev/null | tr -d '\r' )"
+        v="$( cd /tmp && dfenv HOME="$SB" TERM=xterm XDG_RUNTIME_DIR="$rt" DOTFILES_SHELL_VERBOSE=1 PATH="$PROBE_PATH" zsh -ic true 2>/dev/null | tr -d '\r' )"
         assert "DOTFILES_SHELL_VERBOSE forces the report despite the stamp" "grep -q '^env:' <<<\"\$v\""
         rm -rf "$rt"
     fi
@@ -1666,7 +1706,7 @@ sh -c '. "\$1/lib/df-common.sh"; . "\$1/lib/doctor-report.sh"
 PROBE
     chmod +x "$SB/shell-row-probe.sh"
     shell_row() {
-        ( cd /tmp && env -i HOME="$SB" TERM=xterm PATH="$PROBE_PATH" \
+        ( cd /tmp && dfenv HOME="$SB" TERM=xterm PATH="$PROBE_PATH" \
             "$1" -ic "$SB/shell-row-probe.sh" 2>/dev/null | tr -d '\r' )
     }
     assert "shell row: a bash login reports bash" "[[ \"\$(shell_row bash)\" == *bash* ]]"
@@ -1999,7 +2039,7 @@ unset _b _src
 
 if [[ -x "$AGT/bin/ssh-agent" && -x "$AGT/bin/bash" ]]; then
     agent_probe() {
-        env -i HOME="$AGT" XDG_RUNTIME_DIR="$AGT" PATH="$AGT/bin" \
+        dfenv HOME="$AGT" XDG_RUNTIME_DIR="$AGT" PATH="$AGT/bin" \
             "$AGT/bin/bash" -c '. "$1" >/dev/null 2>&1; printf "%s" "${SSH_AUTH_SOCK:-UNSET}"' \
             bash "$REPO/home/dot_config/bashrc.d/10-ssh-agent.sh" 2>/dev/null </dev/null
     }
@@ -2022,7 +2062,7 @@ if [[ -x "$AGT/bin/ssh-agent" && -x "$AGT/bin/bash" ]]; then
     # check), so it would stay green whether the inherited arm were correct,
     # inverted, or absent. These probes seed the variable on purpose.
     inherit_probe() {
-        env -i HOME="$AGT" XDG_RUNTIME_DIR="$AGT" PATH="$AGT/bin" \
+        dfenv HOME="$AGT" XDG_RUNTIME_DIR="$AGT" PATH="$AGT/bin" \
             SSH_AUTH_SOCK="$1" \
             "$AGT/bin/bash" -c '. "$1" >/dev/null 2>&1; printf "%s" "${SSH_AUTH_SOCK:-UNSET}"' \
             bash "$REPO/home/dot_config/bashrc.d/10-ssh-agent.sh" 2>/dev/null </dev/null
@@ -2053,6 +2093,93 @@ if [[ -x "$AGT/bin/ssh-agent" && -x "$AGT/bin/bash" ]]; then
     : > "$AGT/notasocket"
     assert_ne "an inherited NON-socket is discarded" \
         "$(inherit_probe "$AGT/notasocket")" "$AGT/notasocket"
+    # No probe may bypass the seam: every `env -i` in this file goes through dfenv (or
+    # is the helper itself, marked raw-env-i-ok). A new raw one would source the
+    # drop-ins with no DF_RUN_USER_ROOT and could reach the live /run/user/$UID.
+    assert "every clean-environment probe in the harness goes through dfenv (the seam)" \
+        "[[ -z \$(grep -n 'env -i' \"\$REPO/test-update-user-home-dir.sh\" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -v 'raw-env-i-ok') ]]"  # raw-env-i-ok
+    assert "the seam is exported and points inside the sandbox" \
+        "[[ \"\${DF_RUN_USER_ROOT:-}\" == \"\$SB\"/* ]]"
+    # ---- the no-XDG user-socket fallback (a Teleport login) -----------------
+    # A shell with no XDG_RUNTIME_DIR must still find /run/user/$UID/openssh_agent,
+    # or it spawns a keyed-by-nothing agent inside teleport.service (see the comment
+    # above _df_user_sock_ok in 10-ssh-agent.sh). The runtime-dir ROOT is a test seam,
+    # DF_RUN_USER_ROOT, pointed here at a fake tree under a SHORT path: a unix socket
+    # path is limited to 108 bytes and $SB is not short. Both files carry the
+    # predicate, so both are probed and must AGREE.
+    SAR="$(mktemp -d /tmp/sa-XXXXXX)"
+    _suid="$(id -u)"
+    _sls=$(command -v ls 2>/dev/null) && ln -sf "$_sls" "$AGT/bin/ls"
+    mkdir -p "$AGT/shim" "$AGT/h/.config"
+    # env.sh returns early unless $HOME/.config/shell/lib.sh is readable, so the probe
+    # HOME carries a link to the SOURCE shell dir (env.sh writes only under this HOME).
+    ln -sfn "$REPO/home/dot_config/shell" "$AGT/h/.config/shell"
+    # A systemctl that claims ssh-agent.socket exists and starts fine, so the SECOND
+    # systemd block of the drop-in (list-unit-files / start / `-S "$SYSTEMD_SOCK"`) runs.
+    # That is the branch that would export an unvalidated candidate if the sentinel
+    # were not kept.
+    printf '#!/bin/sh\ncase "$*" in *list-unit-files*) echo "ssh-agent.socket enabled";; esac\nexit 0\n' \
+        > "$AGT/shim/systemctl"
+    chmod +x "$AGT/shim/systemctl"
+    mk_user_sock() {  # <root> <dirmode>: a user-owned socket at <root>/<uid>/openssh_agent
+        mkdir -p "$1/$_suid" && chmod "$2" "$1/$_suid"
+        "$AGT/bin/ssh-agent" -a "$1/$_suid/openssh_agent" >/dev/null 2>&1
+    }
+    noxdg_rc() {  # <root> : the rc drop-in with XDG_RUNTIME_DIR unset
+        dfenv HOME="$AGT/h" PATH="$AGT/shim:$AGT/bin" DF_RUN_USER_ROOT="$1" \
+            "$AGT/bin/bash" -c '. "$1" >/dev/null 2>&1; printf "%s" "${SSH_AUTH_SOCK:-UNSET}"' \
+            bash "$REPO/home/dot_config/bashrc.d/10-ssh-agent.sh" 2>/dev/null </dev/null
+    }
+    noxdg_env() {  # <root> : env.sh under dash with XDG_RUNTIME_DIR unset
+        dfenv HOME="$AGT/h" PATH="$NOSVC_BIN:$AGT/bin:/usr/bin:/bin" DF_RUN_USER_ROOT="$1" \
+            dash -c 'unset DOTFILES_ENV_LOADED; . "$1" >/dev/null 2>&1; printf "%s" "${SSH_AUTH_SOCK:-UNSET}"' \
+            sh "$REPO/home/dot_config/shell/env.sh" 2>/dev/null </dev/null
+    }
+    if mk_user_sock "$SAR/ok" 700 && mk_user_sock "$SAR/gw" 770 && mk_user_sock "$SAR/ow" 707 \
+        && mk_user_sock "$SAR/xdg/rt" 700 && command -v dash >/dev/null 2>&1; then
+        _want="$SAR/ok/$_suid/openssh_agent"
+        # (a) a user-owned 0700 dir holding a socket is used.
+        assert_eq "no-XDG: rc drop-in uses a valid user socket"  "$(noxdg_rc "$SAR/ok")"  "$_want"
+        assert_eq "no-XDG: env.sh uses a valid user socket"       "$(noxdg_env "$SAR/ok")" "$_want"
+        # (b) a group- or other-writable dir is NOT a trust root: rejected, and the
+        # shimmed systemctl block must not export it either (the sentinel is kept).
+        assert_eq "no-XDG: rc drop-in rejects a group-writable runtime dir" \
+            "$(noxdg_rc "$SAR/gw")" UNSET
+        assert_eq "no-XDG: rc drop-in rejects an other-writable runtime dir" \
+            "$(noxdg_rc "$SAR/ow")" UNSET
+        assert_eq "no-XDG: env.sh rejects a group-writable runtime dir" \
+            "$(noxdg_env "$SAR/gw")" UNSET
+        assert_eq "no-XDG: env.sh rejects an other-writable runtime dir" \
+            "$(noxdg_env "$SAR/ow")" UNSET
+        # (c) a missing dir falls through unchanged (no agent spawned: $HOME has no .ssh).
+        assert_eq "no-XDG: rc drop-in with no runtime dir falls through" \
+            "$(noxdg_rc "$SAR/missing")" UNSET
+        assert_eq "no-XDG: env.sh with no runtime dir falls through" \
+            "$(noxdg_env "$SAR/missing")" UNSET
+        # (d) XDG_RUNTIME_DIR set: behaviour unchanged, the fallback root is ignored.
+        assert_eq "XDG set: rc drop-in still uses \$XDG_RUNTIME_DIR/openssh_agent" \
+            "$(dfenv HOME="$AGT/h" PATH="$AGT/shim:$AGT/bin" XDG_RUNTIME_DIR="$SAR/xdg/rt/$_suid" \
+                DF_RUN_USER_ROOT="$SAR/ok" "$AGT/bin/bash" -c '. "$1" >/dev/null 2>&1; printf "%s" "${SSH_AUTH_SOCK:-UNSET}"' \
+                bash "$REPO/home/dot_config/bashrc.d/10-ssh-agent.sh" 2>/dev/null </dev/null)" \
+            "$SAR/xdg/rt/$_suid/openssh_agent"
+        assert_eq "XDG set: env.sh still uses \$XDG_RUNTIME_DIR/openssh_agent" \
+            "$(dfenv HOME="$AGT/h" PATH="$NOSVC_BIN:$AGT/bin:/usr/bin:/bin" XDG_RUNTIME_DIR="$SAR/xdg/rt/$_suid" \
+                DF_RUN_USER_ROOT="$SAR/ok" dash -c 'unset DOTFILES_ENV_LOADED; . "$1" >/dev/null 2>&1; printf "%s" "${SSH_AUTH_SOCK:-UNSET}"' \
+                sh "$REPO/home/dot_config/shell/env.sh" 2>/dev/null </dev/null)" \
+            "$SAR/xdg/rt/$_suid/openssh_agent"
+        # The two copies of the predicate agree on the file's own text.
+        assert "the predicate in env.sh and the rc drop-in are the same text" \
+            "[[ \"\$(sed -n '/^_df_user_sock_ok()/,/^}/p' home/dot_config/shell/env.sh)\" == \"\$(sed -n '/^_df_user_sock_ok()/,/^}/p' home/dot_config/bashrc.d/10-ssh-agent.sh)\" ]]"
+    else
+        skip "no-XDG user-socket fallback — could not stage the fake runtime dirs or dash is missing"
+    fi
+    for _ap in $(pgrep -f "ssh-agent .*-a .*$SAR" 2>/dev/null); do
+        [[ "$_ap" == "$$" || "$_ap" == "$PPID" ]] && continue
+        kill "$_ap" 2>/dev/null || true
+    done
+    rm -rf "$SAR"
+    unset _ap _suid _sls _want SAR
+
     # NO silence probe here, deliberately. Capturing this file's output through a
     # PIPE is unsafe: it spawns a daemon, the daemon survives the command
     # substitution, and this suite is self-capturing — a daemon holding the capture
@@ -2181,7 +2308,7 @@ for _b in bash dirname readlink basename cat grep sed mkdir; do
     _src=$(command -v "$_b" 2>/dev/null) && ln -sf "$_src" "$SSA_BIN/$_b"
 done
 unset _b _src
-_ssa_out="$(env -i HOME="$SB" PATH="$SSA_BIN" "$SSA_BIN/bash" "$REPO/$SSHSETUP" 2>&1)"; _ssa_rc=$?
+_ssa_out="$(dfenv HOME="$SB" PATH="$SSA_BIN" "$SSA_BIN/bash" "$REPO/$SSHSETUP" 2>&1)"; _ssa_rc=$?
 assert "setup-ssh-agent exits 0 with no systemctl on PATH" "[[ $_ssa_rc -eq 0 ]]"
 assert "and says why, by name"  "grep -q 'No systemctl on PATH' <<<\"\$_ssa_out\""
 unset _ssa_out _ssa_rc; rm -rf "$SSA_BIN"
@@ -3747,7 +3874,7 @@ case "$url" in
 esac
 FLCURL
     chmod +x "$FLTMP/wrap/curl"
-    env -i HOME="$FL_HOME" PATH="$FLTMP/wrap:/usr/bin:/bin" APP_DIR="$FL_HOME/.local/apps" BIN_DIR="$FL_HOME/.local/bin" \
+    dfenv HOME="$FL_HOME" PATH="$FLTMP/wrap:/usr/bin:/bin" APP_DIR="$FL_HOME/.local/apps" BIN_DIR="$FL_HOME/.local/bin" \
         XDG_CONFIG_HOME="$FL_HOME/.config" XDG_DATA_HOME="$FL_HOME/.local/share" TMPDIR="$FLTMP" \
         FL_EVENTS="$FL_EVENTS" FL_REL="$FL_REL" DISPLAY=:0 "$@" \
         bash "$FLTMP/fb/slot.sh" </dev/null >"$FLTMP/out" 2>"$FLTMP/err"

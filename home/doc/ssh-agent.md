@@ -38,7 +38,13 @@ more than anything in this list.
 2. **1Password agent** (`~/.1password/agent.sock` + `op` CLI present) — sets
    `TELEPORT_USE_LOCAL_SSH_AGENT=false` automatically. Desktop-only, so
    headless/WSL/FreeBSD skip it.
-3. Systemd OpenSSH socket (`$XDG_RUNTIME_DIR/openssh_agent`).
+3. Systemd OpenSSH socket (`$XDG_RUNTIME_DIR/openssh_agent`). **With no
+   `XDG_RUNTIME_DIR`** (a Teleport login: `pam_systemd` never ran) the candidate is
+   `/run/user/$UID/openssh_agent`, accepted only if the directory is ours and not
+   group/other-writable and the socket is ours (`_df_user_sock_ok`, in both
+   `env.sh` and the rc fragment). A refused candidate is never exported by any later
+   branch. Without this a Teleport shell fell through to step 5 and started an agent
+   inside `teleport.service`, which a Teleport restart kills along with its keys.
 4. Keychain fallback.
 5. Manual `ssh-agent` on a predictable socket.
 
@@ -57,6 +63,10 @@ the life of the session. For multi-hop use `ProxyJump`, never a chain of
 connection and never sees the agent socket.
 
 **From a box with NO local agent worth forwarding (WSL) → `ssh-load-keys.sh`.**
+On a host whose agent is the durable user `ssh-agent.service` (so it outlives a
+Teleport restart), load with `SSH_KEY_TTL=0`: the script's default of 36000 s would
+expire the key after about ten hours even though the agent keeps running. The agent
+itself sets no lifetime (`ssh-agent -D`, no `-t`).
 Forwarding cannot help there — there is no local 1Password agent to forward — so
 the keys come from `op` instead:
 

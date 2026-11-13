@@ -95,6 +95,7 @@ fi
 # a fork per shell for a value the shell already had. It fired on exactly the
 # machines with no XDG_RUNTIME_DIR to short-circuit it first — headless boxes and
 # FreeBSD, where there is no systemd socket to find at the end of it.
+#
 # 🔴 NOT $TMPDIR. The old expression was
 #     ${XDG_RUNTIME_DIR:-${TMPDIR:-/run/user/${UID}}}/openssh_agent
 # so with XDG_RUNTIME_DIR unset and TMPDIR set — cron, a container, macOS, CI —
@@ -104,9 +105,44 @@ fi
 # placed there was exported as SSH_AUTH_SOCK. It is the exact attack the comment
 # at the DF_AGENT_SOCK block below forbids, and the harness asserted against for
 # DF_AGENT_* but never for this variable.
-# The systemd socket only ever lives under XDG_RUNTIME_DIR, so the fallback bought
-# nothing: an unreachable sentinel is the correct expression.
-SYSTEMD_SOCK="${XDG_RUNTIME_DIR:-/nonexistent}/openssh_agent"
+#
+# A shell with no XDG_RUNTIME_DIR is not a shell with no systemd user socket. A
+# Teleport login arrives without it (pam_systemd never ran), while the user manager
+# is up and ssh-agent.socket is listening on /run/user/$UID/openssh_agent. Skipping
+# that socket sent such a shell to the plain-ssh-agent fallback below, which started
+# an agent inside the Teleport cgroup, and a Teleport restart killed it with every
+# key. So when XDG_RUNTIME_DIR is unset the candidate is /run/user/$UID/openssh_agent
+# — but only through _df_user_sock_ok, which makes /run/user/$UID the TRUST ROOT:
+# systemd creates it per user, 0700, root-made, so nobody else can pre-create a name
+# in it. The predicate refuses anything else: a socket or directory we do not own, a
+# directory another user could write to (that is what made $TMPDIR exploitable), a
+# non-socket. A refused candidate leaves SYSTEMD_SOCK at the unreachable sentinel, so
+# no later branch — both `-S "$SYSTEMD_SOCK"` tests below — can export it.
+#
+# DF_RUN_USER_ROOT is a TEST SEAM for the runtime-dir root (default /run/user); the
+# harness points it at a fake tree. It is not a user knob.
+#
+# POSIX syntax on purpose, and the same predicate as ~/.config/shell/env.sh: each
+# file must stand alone (the harness sources this one by itself), so the two copies
+# are compared behaviourally rather than shared.
+_df_user_sock_ok() {
+    [ -S "$1" ] && [ -O "$1" ] || return 1
+    set -- "${1%/*}"
+    [ -d "$1" ] && [ -O "$1" ] || return 1
+    set -- "$(command ls -ld -- "$1" 2>/dev/null)"
+    # d rwx r-x r-x : chars 6 and 9 are group-write and other-write. The trailing
+    # glob absorbs an ACL/SELinux suffix character.
+    case ${1%% *} in
+    d????-??-?*) return 0 ;;
+    esac
+    return 1
+}
+SYSTEMD_SOCK=/nonexistent/openssh_agent
+if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+    SYSTEMD_SOCK="$XDG_RUNTIME_DIR/openssh_agent"
+elif _df_user_sock_ok "${DF_RUN_USER_ROOT:-/run/user}/${UID}/openssh_agent"; then
+    SYSTEMD_SOCK="${DF_RUN_USER_ROOT:-/run/user}/${UID}/openssh_agent"
+fi
 if [[ -S "$SYSTEMD_SOCK" ]]; then
     export SSH_AUTH_SOCK="$SYSTEMD_SOCK"
     # Optional: ensure ssh-agent service is started if socket active
@@ -155,6 +191,13 @@ if command -v keychain >/dev/null 2>&1; then
 fi
 
 # Fallback 2: a plain ssh-agent on a PREDICTABLE socket path.
+#
+# On a host that has ssh-agent.socket this should no longer be reached: the systemd
+# branch above finds the user socket even without XDG_RUNTIME_DIR. It is also how an
+# agent ends up in teleport.service — a shell that gets here starts ssh-agent in its
+# OWN cgroup, which for a Teleport login is the one a Teleport restart kills. If you
+# find an agent there, a validated user socket was not found: check the systemd
+# branch, not this one.
 #
 # The old guard was `! pgrep -u "$UID" ssh-agent` — "start one only if none is
 # already running". That is not a question this script can act on. Knowing an
