@@ -1,0 +1,97 @@
+#!/usr/bin/env sh
+
+# Copyright (c) 2026 John Suykerbuyk and SykeTech LTD
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+# mmdc — run the Mermaid CLI (mermaid-cli's `mmdc`) without installing it globally.
+#
+# Chezmoi installs this as ~/.local/bin/mmdc (source: executable_mmdc).
+#
+# Order, first match wins:
+#
+#   1. Another `mmdc` on PATH. Any executable file named mmdc on PATH whose real
+#      path (readlink -f) is not this script's own real path is exec'd with the
+#      arguments unchanged. This is the native-install case (for example a distro
+#      package): the readlink -f self-skip is what lets a native mmdc LATER on PATH
+#      win when this shim comes first, and a second copy of ~/.local/bin on PATH,
+#      or a symlink to this script, is skipped because it resolves to this
+#      script's own real path. Before the exec this script exports
+#      MMDC_SHIM_HOP=1, and a copy of this script that starts with that variable
+#      set skips step 1 entirely. So two distinct copies (hardlinks or file
+#      copies) in two PATH directories cannot exec each other forever: at most one
+#      hop is made, then the second copy goes on to step 2 or 3. The exec'd mmdc
+#      inherits MMDC_SHIM_HOP=1; for a native mmdc that is harmless. If this
+#      script's own real path cannot be resolved (no `readlink -f`), step 1 is
+#      skipped rather than guessed.
+#   2. `npx`, if on PATH: MMDC_SHIM_HOP is unset (so it does not reach
+#      mermaid-cli), then exec npx -y
+#      "@mermaid-js/mermaid-cli@${MMDC_VERSION:-12}" "$@"
+#   3. Otherwise print a message to stderr and exit 127. The message says
+#      "neither mmdc nor npx found" only when that is true; if step 1 was skipped
+#      because readlink -f is unavailable, or because MMDC_SHIM_HOP was already
+#      set, while an mmdc is on PATH, it says so instead.
+#
+# MMDC_VERSION selects the mermaid-cli version npx runs. It takes an npm version
+# or range (default: the 12 major line). It is read only in step 2.
+#
+# There is deliberately no --prefer-offline. It makes npm trust its cached registry
+# metadata, and on a host whose cache was old the first run failed with
+# "notarget No matching version found" for dependency ranges that need newer
+# releases (measured on one host; the stale-metadata cause is inferred). Without
+# it npm applies its normal freshness checks to cached registry metadata, which
+# can mean a network request, although npm may still reuse packages it has already
+# downloaded. A host that wants offline-first can set npm_config_prefer_offline=true
+# in the environment: npm reads npm_config_* variables as config (checked:
+# `npm_config_prefer_offline=true npm config get prefer-offline` prints true).
+# npx caches packages under ~/.npm/_npx. mermaid-cli drives a headless Chrome
+# through puppeteer, which keeps its browser download under ~/.cache/puppeteer;
+# that download is large and happens on first use.
+#
+# Arguments are passed through exactly, including ones with spaces. This script
+# never assigns IFS.
+
+# This script's own real path, to recognise itself on PATH. Empty if readlink -f
+# is unavailable.
+self=$(readlink -f -- "$0" 2>/dev/null) || self=
+
+# Why step 1 was skipped, for the failure message: "", "noreadlink" or "hop".
+skipped=
+if [ -n "${MMDC_SHIM_HOP:-}" ]; then
+	skipped=hop
+elif [ -z "$self" ]; then
+	skipped=noreadlink
+else
+	# Walk PATH one entry at a time without splitting on IFS.
+	rest=${PATH}:
+	while [ -n "$rest" ]; do
+		dir=${rest%%:*}
+		rest=${rest#*:}
+		# POSIX: an empty PATH entry means the current directory.
+		[ -n "$dir" ] || dir=.
+		cand=$dir/mmdc
+		if [ -f "$cand" ] && [ -x "$cand" ]; then
+			real=$(readlink -f -- "$cand" 2>/dev/null) || real=
+			if [ -n "$real" ] && [ "$real" != "$self" ]; then
+				MMDC_SHIM_HOP=1
+				export MMDC_SHIM_HOP
+				exec "$cand" "$@"
+			fi
+		fi
+	done
+fi
+
+if command -v npx >/dev/null 2>&1; then
+	unset MMDC_SHIM_HOP
+	exec npx -y "@mermaid-js/mermaid-cli@${MMDC_VERSION:-12}" "$@"
+fi
+
+if [ -n "$skipped" ] && command -v mmdc >/dev/null 2>&1; then
+	case $skipped in
+	noreadlink) printf 'mmdc: readlink -f unavailable, PATH mmdc not tried; npx not found\n' >&2 ;;
+	hop) printf 'mmdc: reached from another mmdc shim (MMDC_SHIM_HOP set), PATH mmdc not tried again; npx not found\n' >&2 ;;
+	esac
+	exit 127
+fi
+
+printf 'mmdc: neither mmdc nor npx found\n' >&2
+exit 127

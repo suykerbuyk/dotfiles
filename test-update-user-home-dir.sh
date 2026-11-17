@@ -2201,6 +2201,154 @@ else
 fi
 rm -rf "$AGT"
 
+# ---------------------------------------------------------------------------
+# mmdc shim (home/dot_local/bin/executable_mmdc): another mmdc on PATH wins, else
+# npx, else exit 127, and it must never call itself. Every probe runs under dfenv
+# with a PATH of ONLY stub dirs plus a tools dir holding readlink and sh, so no
+# real mmdc or npx on the developer's machine can leak in, and nothing touches the
+# network. Stubs record their argv, one argument per line, so an argument with a
+# space is told apart from two arguments.
+# ---------------------------------------------------------------------------
+sec "mmdc shim: PATH mmdc, then npx, then 127, never itself"
+
+MMS="$SB/mmdcshim"; rm -rf "$MMS"
+mkdir -p "$MMS/shim" "$MMS/real" "$MMS/npx" "$MMS/tools" "$MMS/link"
+cp "$REPO/home/dot_local/bin/executable_mmdc" "$MMS/shim/mmdc"; chmod 755 "$MMS/shim/mmdc"
+ln -s "$MMS/shim/mmdc" "$MMS/link/mmdc"
+for _b in readlink sh; do
+    _src=$(command -v "$_b" 2>/dev/null) && ln -sf "$_src" "$MMS/tools/$_b"
+done
+unset _b _src
+# A stub that records its argv, one line per argument, to $STUB_OUT, then exits 0.
+mk_stub() {  # <path> <tag>
+    printf '#!/bin/sh\nprintf "%%s\\n" "%s" "$@" > "$STUB_OUT"\n' "$2" > "$1"
+    chmod 755 "$1"
+}
+mk_stub "$MMS/real/mmdc" REAL
+mk_stub "$MMS/npx/npx" NPX
+_to=$(command -v timeout 2>/dev/null || true)   # bounds every probe: a recursing shim must fail, not hang
+mm_run() {  # <PATH> <out-file> [extra env VAR=val ...] -- <args...>
+    _mp=$1; _mo=$2; shift 2
+    _ex=()
+    while [[ $# -gt 0 && "$1" != "--" ]]; do _ex+=("$1"); shift; done
+    shift
+    dfenv HOME="$MMS" PATH="$_mp" STUB_OUT="$_mo" ${_ex[@]+"${_ex[@]}"} ${_to:+"$_to" 10} "$MMS/shim/mmdc" "$@"
+}
+
+if [[ -x "$MMS/tools/readlink" && -x "$MMS/tools/sh" ]]; then
+    # (a) another mmdc earlier on PATH: exec'd, argv exact, space preserved.
+    mm_run "$MMS/real:$MMS/shim:$MMS/tools" "$MMS/a.out" -- -i "in file.md" -o out.svg
+    assert_eq "mmdc shim (a): execs the other mmdc with argv exact (incl. a space)" \
+        "$(cat "$MMS/a.out" 2>/dev/null | tr '\n' '|')" "REAL|-i|in file.md|-o|out.svg|"
+
+    # (b) no other mmdc, a stub npx: exactly the documented npx command line.
+    mm_run "$MMS/shim:$MMS/npx:$MMS/tools" "$MMS/b.out" -- -i "a b.md" -o x.svg
+    assert_eq "mmdc shim (b): falls to npx -y <pkg>@12 <args> (no --prefer-offline)" \
+        "$(cat "$MMS/b.out" 2>/dev/null | tr '\n' '|')" \
+        "NPX|-y|@mermaid-js/mermaid-cli@12|-i|a b.md|-o|x.svg|"
+
+    # (c) MMDC_VERSION overrides the version.
+    mm_run "$MMS/shim:$MMS/npx:$MMS/tools" "$MMS/c.out" MMDC_VERSION=11.4.0 -- -V
+    assert_eq "mmdc shim (c): MMDC_VERSION selects the package version" \
+        "$(cat "$MMS/c.out" 2>/dev/null | tr '\n' '|')" \
+        "NPX|-y|@mermaid-js/mermaid-cli@11.4.0|-V|"
+
+    # (d) neither: exit 127 and the message on stderr.
+    mm_err="$(mm_run "$MMS/shim:$MMS/tools" "$MMS/d.out" -- -V 2>&1 >/dev/null)"; mm_rc=$?
+    assert_eq "mmdc shim (d): exit 127 with neither mmdc nor npx" "$mm_rc" 127
+    assert_eq "mmdc shim (d): the message is on stderr" "$mm_err" "mmdc: neither mmdc nor npx found"
+
+    # (e) the shim's dir twice on PATH plus a symlink to it: no recursion, and it
+    # still reaches the npx stub. Bounded by timeout: a recursing shim would spin.
+    if [[ -n "$_to" ]]; then
+        rm -f "$MMS/e.out"
+        dfenv HOME="$MMS" PATH="$MMS/shim:$MMS/link:$MMS/shim:$MMS/npx:$MMS/tools" STUB_OUT="$MMS/e.out" \
+            "$_to" 10 "$MMS/link/mmdc" -V >/dev/null 2>&1; mm_rc=$?
+        assert "mmdc shim (e): no recursion with the shim dir twice and a symlink to it (timeout-bounded; exit $mm_rc, 124 means it spun)" \
+            "[[ $mm_rc -ne 124 ]]"
+        assert_eq "mmdc shim (e): it still falls through to npx" \
+            "$(cat "$MMS/e.out" 2>/dev/null | tr '\n' '|')" \
+            "NPX|-y|@mermaid-js/mermaid-cli@12|-V|"
+    else
+        skip "mmdc shim (e) — no timeout(1) to bound a recursing shim"
+    fi
+    # (f) and (g): two DISTINCT copies of the shim in two PATH dirs, as hardlinks
+    # (f) and as file copies (g). The readlink -f self-skip cannot tell them apart,
+    # so without the MMDC_SHIM_HOP hop guard they exec each other forever. With it
+    # the first execs the second once, the second skips step 1 and reaches npx.
+    if [[ -n "$_to" ]]; then
+        for _kind in hardlink copy; do
+            rm -rf "$MMS/$_kind"; mkdir -p "$MMS/$_kind/a" "$MMS/$_kind/b"
+            if [[ "$_kind" == hardlink ]]; then
+                ln "$MMS/shim/mmdc" "$MMS/$_kind/a/mmdc" && ln "$MMS/shim/mmdc" "$MMS/$_kind/b/mmdc"
+                _case=f
+            else
+                cp "$MMS/shim/mmdc" "$MMS/$_kind/a/mmdc"; cp "$MMS/shim/mmdc" "$MMS/$_kind/b/mmdc"
+                chmod 755 "$MMS/$_kind/a/mmdc" "$MMS/$_kind/b/mmdc"
+                _case=g
+            fi
+            rm -f "$MMS/$_case.out"
+            dfenv HOME="$MMS" PATH="$MMS/$_kind/a:$MMS/$_kind/b:$MMS/npx:$MMS/tools" STUB_OUT="$MMS/$_case.out" \
+                "$_to" 10 "$MMS/$_kind/a/mmdc" -V >/dev/null 2>&1; mm_rc=$?
+            assert "mmdc shim ($_case): two ${_kind} shims on PATH terminate (exit $mm_rc, 124 means they spun)" \
+                "[[ $mm_rc -ne 124 ]]"
+            assert_eq "mmdc shim ($_case): and the npx stub ran with the expected argv" \
+                "$(cat "$MMS/$_case.out" 2>/dev/null | tr '\n' '|')" \
+                "NPX|-y|@mermaid-js/mermaid-cli@12|-V|"
+        done
+        unset _kind _case
+        # The hop marker must not leak into npx (hence mermaid-cli): a stub npx that
+        # records it, started with the marker already set.
+        mkdir -p "$MMS/npxenv"
+        printf '#!/bin/sh\nprintf "HOP=%%s\\n" "${MMDC_SHIM_HOP-unset}" > "$STUB_OUT"\n' > "$MMS/npxenv/npx"; chmod 755 "$MMS/npxenv/npx"
+        rm -f "$MMS/h.out"
+        dfenv HOME="$MMS" PATH="$MMS/shim:$MMS/npxenv:$MMS/tools" STUB_OUT="$MMS/h.out" MMDC_SHIM_HOP=1 \
+            "$_to" 10 "$MMS/shim/mmdc" -V >/dev/null 2>&1
+        assert_eq "mmdc shim: MMDC_SHIM_HOP is unset before npx runs" "$(cat "$MMS/h.out" 2>/dev/null)" "HOP=unset"
+        # And a PATH mmdc really does receive it when step 1 execs it.
+        mkdir -p "$MMS/realenv"
+        printf '#!/bin/sh\nprintf "HOP=%%s\\n" "${MMDC_SHIM_HOP-unset}" > "$STUB_OUT"\n' > "$MMS/realenv/mmdc"; chmod 755 "$MMS/realenv/mmdc"
+        rm -f "$MMS/h2.out"
+        dfenv HOME="$MMS" PATH="$MMS/shim:$MMS/realenv:$MMS/tools" STUB_OUT="$MMS/h2.out" \
+            "$_to" 10 "$MMS/shim/mmdc" -V >/dev/null 2>&1
+        assert_eq "mmdc shim: a PATH mmdc reached by step 1 sees MMDC_SHIM_HOP=1" "$(cat "$MMS/h2.out" 2>/dev/null)" "HOP=1"
+        # Hop already set, no npx: the message must not claim there is no mmdc.
+        mm_err="$(dfenv HOME="$MMS" PATH="$MMS/shim:$MMS/real:$MMS/tools" MMDC_SHIM_HOP=1 "$_to" 10 "$MMS/shim/mmdc" -V 2>&1 >/dev/null)"; mm_rc=$?
+        assert_eq "mmdc shim: hop set + PATH mmdc + no npx: exit 127" "$mm_rc" 127
+        assert_eq "mmdc shim: hop set + PATH mmdc + no npx: an accurate message" "$mm_err" \
+            "mmdc: reached from another mmdc shim (MMDC_SHIM_HOP set), PATH mmdc not tried again; npx not found"
+    else
+        skip "mmdc shim (f)/(g)/hop — no timeout(1) to bound a recursing shim"
+    fi
+
+    # M2: a readlink that rejects -f. Step 1 is skipped (not guessed); the failure
+    # message must not say "neither mmdc nor npx found" while an mmdc is on PATH.
+    mkdir -p "$MMS/tools2"
+    for _b in sh; do ln -sf "$(command -v "$_b")" "$MMS/tools2/$_b"; done
+    printf '#!/bin/sh\n[ "$1" = "-f" ] && exit 1\nexit 1\n' > "$MMS/tools2/readlink"; chmod 755 "$MMS/tools2/readlink"
+    mm_err="$(mm_run "$MMS/shim:$MMS/real:$MMS/tools2" "$MMS/m2.out" -- -V 2>&1 >/dev/null)"; mm_rc=$?
+    assert_eq "mmdc shim (readlink -f rejected, PATH mmdc, no npx): exit 127" "$mm_rc" 127
+    assert_eq "mmdc shim (readlink -f rejected, PATH mmdc, no npx): the message says what happened" "$mm_err" \
+        "mmdc: readlink -f unavailable, PATH mmdc not tried; npx not found"
+    rm -f "$MMS/m2.out"
+    mm_run "$MMS/shim:$MMS/real:$MMS/npx:$MMS/tools2" "$MMS/m2.out" -- -V >/dev/null 2>&1
+    assert_eq "mmdc shim (readlink -f rejected, npx present): step 1 skipped, npx runs" \
+        "$(cat "$MMS/m2.out" 2>/dev/null | tr '\n' '|')" "NPX|-y|@mermaid-js/mermaid-cli@12|-V|"
+    unset _b
+
+    # The IFS rule is structural: the script must not assign IFS at all.
+    assert "mmdc shim never assigns IFS" \
+        "[[ -z \$(nocomment home/dot_local/bin/executable_mmdc | grep -E '(^|[[:space:];])IFS=') ]]"
+    assert "mmdc shim parses (sh -n)" "sh -n home/dot_local/bin/executable_mmdc"
+    if command -v dash >/dev/null 2>&1; then
+        assert "mmdc shim parses (dash -n)" "dash -n home/dot_local/bin/executable_mmdc"
+    fi
+else
+    skip "mmdc shim — no readlink or sh to build the tools dir"
+fi
+rm -rf "$MMS"
+unset MMS mm_rc mm_err _to _b
+
 # Structural guards for the two userland assumptions removed above. Both read
 # COMMENT-STRIPPED source: this file now documents at length why pgrep and the
 # random-path form were wrong, so a raw grep matches the rationale and passes
