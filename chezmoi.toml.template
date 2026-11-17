@@ -7,6 +7,8 @@
 # The matching PRIVATE identity lives ONLY at ~/.config/chezmoi/key.txt (mode
 # 0600, gitignored, mirrored in 1Password as "dotfiles age key") and NEVER in
 # this repo. See home/doc/secrets.md for the full model and how to rotate keys.
+# Pin chezmoi's umask: a shell umask of 0002 caused 157 paths of false mode-only drift.
+umask = 0o022
 sourceDir = "__SOURCE_DIR__"
 encryption = "age"
 [age]
